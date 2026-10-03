@@ -3,6 +3,7 @@
   import { api, poll, withReauth } from './api.js'
   import Capacity from './Capacity.svelte'
   import Card from './Card.svelte'
+  import History from './History.svelte'
   import ImportDialog from './ImportDialog.svelte'
   import NameForm from './NameForm.svelte'
   import Notifications from './Notifications.svelte'
@@ -12,6 +13,7 @@
   import ServiceForm from './ServiceForm.svelte'
   import ServiceDetail from './ServiceDetail.svelte'
   import ServiceTile from './ServiceTile.svelte'
+  import Updates from './Updates.svelte'
 
   let { user, onlogout } = $props()
 
@@ -26,6 +28,7 @@
   let searchEl = $state()
   let status = $state({})
   let widgets = $state({})
+  let updates = $state({ total: 0, security: 0, by_service: {} })
   let termOpen = $state(false)
   let termUsed = $state(false)
   let termRequest = $state(null)
@@ -67,6 +70,9 @@
     { label: 'terminal openen', run: () => openTerminal() },
     { label: 'beveiliging: sessies en auditlog', run: () => (modal = { kind: 'security' }) },
     { label: 'capaciteit: opslag, cpu en ram', run: () => (modal = { kind: 'capacity' }) },
+    { label: 'tijdlijn: storingen, herstarts, back-ups', run: () => (modal = { kind: 'history' }) },
+    { label: 'weekrapport', run: () => (modal = { kind: 'history', tab: 'report' }) },
+    { label: 'updates: openstaande pakketten en images', run: () => (modal = { kind: 'updates' }) },
     { label: 'bewerken aan/uit', run: () => (editing = !editing) },
   ]
   let quick = $state([])
@@ -154,6 +160,17 @@
     if (v === null) return
     await act(() => api(`/groups/${g.id}/maintenance`, { method: 'POST', body: { minutes: Math.max(0, parseInt(v, 10) || 0) } }))
     await loadStatus()
+  }
+  async function loadUpdates() {
+    try { updates = await api('/updates') } catch { /* volgende poging */ }
+  }
+  function openNotification(n) {
+    if (n.source === 'rapport') modal = { kind: 'history', tab: 'report' }
+    else if (n.source === 'updates') modal = { kind: 'updates' }
+    else if (n.service_id) {
+      const s = allServices.find((x) => x.id === n.service_id)
+      if (s) modal = { kind: 'detail', service: s }
+    }
   }
   async function loadWidgets() {
     try { widgets = await api('/widgets') } catch { /* volgende poging over 60 s */ }
@@ -308,10 +325,12 @@
     load()
     loadStatus()
     loadWidgets()
+    loadUpdates()
     const stopWidgets = poll(loadWidgets, 60000)
+    const stopUpdates = poll(loadUpdates, 300000)
     const stopClock = poll(() => (now = new Date()), 15000)
     const stopStatus = poll(loadStatus, 30000)
-    return () => { stopClock(); stopStatus(); stopWidgets() }
+    return () => { stopClock(); stopStatus(); stopWidgets(); stopUpdates() }
   })
 </script>
 
@@ -324,7 +343,10 @@
       <button class="mini" onclick={() => openLogs()} title="Logs van je machines">logs</button>
       <button class="mini" onclick={() => openTerminal()} title="SSH-terminal">&gt;_</button>
       <button class="mini" onclick={() => (modal = { kind: 'capacity' })} title="Capaciteit: opslag, cpu en ram">df</button>
-      <Notifications />
+      <button class="mini" onclick={() => (modal = { kind: 'history' })} title="Tijdlijn en weekrapport">history</button>
+      <button class="mini" class:upd={updates.security} onclick={() => (modal = { kind: 'updates' })}
+              title="Openstaande updates">apt{#if updates.total}<b class="n">{updates.total}</b>{/if}</button>
+      <Notifications onopen={openNotification} />
       <button class="mini" onclick={() => (modal = { kind: 'security' })} title="Beveiliging: sessies, auditlog en wachtwoord">⚿</button>
       <button class="mini" class:on={editing} onclick={() => (editing = !editing)}>{editing ? '✓ klaar' : '✎ bewerken'}</button>
       <button class="mini x" onclick={logout} title="Uitloggen">⏻</button>
@@ -399,7 +421,7 @@
       {/if}
       <div class="tiles pad">
         {#each results as s (s.id)}
-          <ServiceTile service={s} status={status[s.id]} widget={widgets[s.id]} {editing} onedit={(svc) => (modal = { kind: 'service', service: svc })}
+          <ServiceTile service={s} status={status[s.id]} widget={widgets[s.id]} updates={updates.by_service[s.id]} {editing} onedit={(svc) => (modal = { kind: 'service', service: svc })}
                        ondetail={(svc) => (modal = { kind: 'detail', service: svc })} />
         {:else}
           {#if !actionResults.length}<p class="hint">Niets gevonden.</p>{/if}
@@ -449,6 +471,7 @@
                     service={s}
                     status={status[s.id]}
                     widget={widgets[s.id]}
+                    updates={updates.by_service[s.id]}
                     {editing}
                     onedit={(svc) => (modal = { kind: 'service', service: svc })}
                     ondetail={(svc) => (modal = { kind: 'detail', service: svc })}
@@ -517,6 +540,10 @@
   <ImportDialog pages={layout.pages} onclose={() => (modal = null)} ondone={load} />
 {:else if modal?.kind === 'capacity'}
   <Capacity onclose={() => (modal = null)} />
+{:else if modal?.kind === 'history'}
+  <History tab={modal.tab} onclose={() => (modal = null)} />
+{:else if modal?.kind === 'updates'}
+  <Updates onclose={() => (modal = null)} onchanged={loadUpdates} />
 {:else if modal?.kind === 'security'}
   <Security onclose={() => (modal = null)} />
 {:else if modal?.kind === 'revisions'}
@@ -539,6 +566,8 @@
 <style>
   .wrap { max-width: 1240px; margin: 0 auto; padding: min(4vh, 32px) 14px 50px }
   .clock { color: var(--text); margin-right: 4px }
+  .n { margin-left: 5px; color: var(--text-h); font-size: 11px; font-weight: 500 }
+  .upd .n { color: var(--mid) }
   .down { color: var(--err) }
   .maint { color: var(--mid) }
   .head { display: flex; gap: 18px; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; padding-bottom: 12px }

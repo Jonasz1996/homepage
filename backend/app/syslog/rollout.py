@@ -43,12 +43,13 @@ WRAPPER = r'''set -u
 cat > /tmp/hp-rsyslog.sh <<'HPSCRIPT'
 __CLIENT__
 HPSCRIPT
-sh /tmp/hp-rsyslog.sh __TARGET__ __PORT__ || echo "FOUT op $(hostname)"
+# Dit script komt via stdin binnen (sh -s): commando's krijgen /dev/null als stdin, anders eten ze de rest op.
+sh /tmp/hp-rsyslog.sh __TARGET__ __PORT__ </dev/null || echo "FOUT op $(hostname)"
 if [ "__CONTAINERS__" = 1 ]; then
   if ! command -v pct >/dev/null 2>&1; then echo "geen Proxmox-node (pct ontbreekt), containers overgeslagen"; exit 0; fi
-  for id in $(pct list | awk 'NR>1 && $2=="running" {print $1}'); do
+  for id in $(pct list </dev/null | awk 'NR>1 && $2=="running" {print $1}'); do
     echo "--- CT $id"
-    pct push "$id" /tmp/hp-rsyslog.sh /tmp/hp-rsyslog.sh && pct exec "$id" -- sh /tmp/hp-rsyslog.sh __TARGET__ __PORT__ || echo "FOUT in CT $id"
+    pct push "$id" /tmp/hp-rsyslog.sh /tmp/hp-rsyslog.sh && pct exec "$id" -- sh /tmp/hp-rsyslog.sh __TARGET__ __PORT__ </dev/null || echo "FOUT in CT $id"
   done
 fi
 rm -f /tmp/hp-rsyslog.sh

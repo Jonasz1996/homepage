@@ -3,6 +3,8 @@
   import { api, poll } from './api.js'
 
   // Eigen meldingencentrum: een klein teller-icoon in de titelbalk, uitklapbaar paneel.
+  // Klik op een melding: het weekrapport, de updates of de service openen (onopen).
+  let { onopen } = $props()
   let open = $state(false)
   let data = $state({ unread: 0, items: [] })
 
@@ -15,6 +17,14 @@
   async function toggle() {
     open = !open
     if (open) await load()
+  }
+
+  const clickable = (n) => n.source === 'rapport' || n.source === 'updates' || !!n.service_id
+  async function pick(n) {
+    if (!clickable(n)) return
+    open = false
+    if (!n.read) api(`/notifications/${n.id}/read`, { method: 'POST' }).then(load).catch(() => {})
+    onopen?.(n)
   }
 
   async function readAll() {
@@ -46,10 +56,12 @@
       </div>
       <div class="items">
         {#each data.items as n (n.id)}
-          <div class="n {n.level}" class:unread={!n.read}>
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+          <div class="n {n.level}" class:unread={!n.read} class:go={clickable(n)} role={clickable(n) ? 'button' : undefined}
+               tabindex={clickable(n) ? 0 : undefined} onclick={() => pick(n)} onkeydown={(e) => e.key === 'Enter' && pick(n)}>
             <div class="t"><span class="lvl">{n.level}</span>{n.title}</div>
             {#if n.body}<div class="b">{n.body}</div>{/if}
-            <div class="ts">{fmt(n.ts)} · {n.source}</div>
+            <div class="ts">{fmt(n.ts)} · {n.source}{#if n.source === 'rapport'} · <u>volledig rapport</u>{/if}</div>
           </div>
         {:else}
           <p class="empty">Geen meldingen.</p>
@@ -76,6 +88,8 @@
     border: 1px solid rgba(255, 255, 255, .06); border-left: 3px solid #666; font-size: 12.5px; opacity: .6
   }
   .n.unread { opacity: 1 }
+  .n.go { cursor: pointer }
+  .n.go:hover { background: var(--fill-h) }
   .n.ok { border-left-color: var(--ok) }
   .n.warn { border-left-color: var(--mid) }
   .n.err { border-left-color: var(--err) }
