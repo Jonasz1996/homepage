@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..config import get_settings
 from ..db import get_db
 from ..deps import (COOKIE, audit, client_country, client_ip, current_session, current_user, notify, optional_session,
-                    recent_auth)
+                    recent_auth, secure_cookie)
 from ..models import AuditLog, Session, User
 from ..security import (
     check_setup_token,
@@ -71,7 +71,7 @@ async def _start_session(db: AsyncSession, request: Request, response: Response,
     ))
     response.set_cookie(
         COOKIE, token, max_age=s.session_days * 86400, httponly=True,
-        secure=s.cookie_secure, samesite="strict", path="/",
+        secure=secure_cookie(request), samesite="strict", path="/",
     )
 
 

@@ -15,7 +15,9 @@ class Settings(BaseSettings):
     secret_key_file: Path = Path("/etc/homepage/secret.key")
     # Eenmalige code om het eerste account aan te maken.
     setup_token_file: Path = Path("/etc/homepage/setup-token")
-    cookie_secure: bool = True
+    # "auto": Secure-cookie alleen als het verzoek via HTTPS binnenkwam (achter NPM altijd), zodat
+    # testen op http://IP ook werkt. "true" of "false" dwingt het af.
+    cookie_secure: str = "auto"
     session_days: int = 14
     # Na zoveel minuten moet je voor gevoelige acties opnieuw bevestigen.
     reauth_minutes: int = 15

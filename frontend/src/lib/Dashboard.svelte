@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte'
   import { api, poll, withReauth } from './api.js'
+  import Capacity from './Capacity.svelte'
   import Card from './Card.svelte'
   import ImportDialog from './ImportDialog.svelte'
   import NameForm from './NameForm.svelte'
@@ -65,6 +66,7 @@
     { label: 'logs openen', run: () => openLogs() },
     { label: 'terminal openen', run: () => openTerminal() },
     { label: 'beveiliging: sessies en auditlog', run: () => (modal = { kind: 'security' }) },
+    { label: 'capaciteit: opslag, cpu en ram', run: () => (modal = { kind: 'capacity' }) },
     { label: 'bewerken aan/uit', run: () => (editing = !editing) },
   ]
   let quick = $state([])
@@ -321,6 +323,7 @@
       <span class="clock">{clock}</span>
       <button class="mini" onclick={() => openLogs()} title="Logs van je machines">logs</button>
       <button class="mini" onclick={() => openTerminal()} title="SSH-terminal">&gt;_</button>
+      <button class="mini" onclick={() => (modal = { kind: 'capacity' })} title="Capaciteit: opslag, cpu en ram">df</button>
       <Notifications />
       <button class="mini" onclick={() => (modal = { kind: 'security' })} title="Beveiliging: sessies, auditlog en wachtwoord">⚿</button>
       <button class="mini" class:on={editing} onclick={() => (editing = !editing)}>{editing ? '✓ klaar' : '✎ bewerken'}</button>
@@ -512,6 +515,8 @@
   />
 {:else if modal?.kind === 'import'}
   <ImportDialog pages={layout.pages} onclose={() => (modal = null)} ondone={load} />
+{:else if modal?.kind === 'capacity'}
+  <Capacity onclose={() => (modal = null)} />
 {:else if modal?.kind === 'security'}
   <Security onclose={() => (modal = null)} />
 {:else if modal?.kind === 'revisions'}

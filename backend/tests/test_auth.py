@@ -106,3 +106,13 @@ async def test_session_slides_when_half_expired(authed):
     exp = exp if exp.tzinfo else exp.replace(tzinfo=timezone.utc)
     assert exp > datetime.now(timezone.utc) + timedelta(days=13)
     await agen.aclose()
+
+
+async def test_cookie_secure_auto_follows_scheme(client, monkeypatch):
+    from app.config import get_settings
+    monkeypatch.setattr(get_settings(), "cookie_secure", "auto")
+    r = await client.post("https://test/api/auth/setup",
+                          json={"token": SETUP_TOKEN, "username": "jonas", "password": PASSWORD})
+    assert r.status_code == 200 and "secure" in r.headers["set-cookie"].lower()
+    r = await client.post("/api/auth/login", json={"username": "jonas", "password": PASSWORD})
+    assert r.status_code == 200 and "secure" not in r.headers["set-cookie"].lower()
