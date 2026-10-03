@@ -65,6 +65,16 @@ Fase 5, SSH-terminal (knop `>_` in de titelbalk):
   na 30 minuten zonder typen wordt de sessie gesloten; openen en sluiten komen in de audit-log
 - koppel een host aan een service, dan staat er een `>_`-knop in het mini dashboard van die service
 
+Fase 6, logs (knop `logs` in de titelbalk):
+
+- eigen syslog-ontvanger op poort 514 (udp en tcp, service `homepage-syslog`), alleen van je eigen netwerken
+- alle regels in PostgreSQL; met TimescaleDB gecomprimeerd na 3 dagen en 30 dagen bewaard
+- logviewer: per machine, zoeken, filter op ernst, 1 u tot 30 dagen, histogram, live meekijken
+- meldingsregels (regex, machine, ernst, max. één melding per x minuten) naar het meldingencentrum;
+  standaard staat "alles vanaf crit" aan
+- **machines toevoegen**: kies een SSH-host en het dashboard installeert en configureert rsyslog. Op een
+  Proxmox-node kan dat meteen voor alle draaiende containers (via `pct`). Of plak het getoonde script zelf
+
 Optimalisaties:
 
 - je blijft ingelogd zolang je het dashboard gebruikt (sessie verlengt zich, na 14 dagen niets doen moet je opnieuw inloggen)
@@ -93,7 +103,7 @@ Inloggen werkt alleen via HTTPS. Wil je eerst rechtstreeks via `http://<IP>` tes
 
 Zet in Proxmox de firewall van de container aan en laat poort 80 alleen toe vanaf NPM (192.168.0.245).
 nginx gelooft de `X-Forwarded-For`- en `CF-Connecting-IP`-headers enkel van dat adres, maar zo kan
-niemand op het LAN NPM en Cloudflare omzeilen.
+niemand op het LAN NPM en Cloudflare omzeilen. Laat daarnaast poort 514 (udp en tcp) toe vanaf je LAN voor de logs.
 
 **Bewaar een kopie van `/etc/homepage/secret.key`.** Zonder die sleutel zijn de opgeslagen
 wachtwoorden, API-sleutels en 2FA-geheimen onleesbaar.
