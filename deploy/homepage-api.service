@@ -1,0 +1,21 @@
+[Unit]
+Description=homepage API (FastAPI)
+After=network-online.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+User=homepage
+Group=homepage
+WorkingDirectory=/opt/homepage/backend
+EnvironmentFile=/etc/homepage/homepage.env
+ExecStart=/opt/homepage/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/homepage /etc/homepage
+
+[Install]
+WantedBy=multi-user.target
