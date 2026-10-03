@@ -83,7 +83,7 @@
   .n.warn .lvl { color: var(--mid) }
   .n.err .lvl { color: var(--err) }
   .n.ok .lvl { color: var(--ok) }
-  .b { color: #bbb; margin-top: 3px }
+  .b { white-space: pre-line; color: #bbb; margin-top: 3px }
   .ts { color: var(--dim); font-size: 11px; margin-top: 4px }
   .empty { color: var(--muted); font-size: 12.5px; margin: 6px }
 </style>

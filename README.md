@@ -27,7 +27,7 @@ Fase 4, integraties (type van de service kiezen onder **bewerken → Integratie 
 | Type | Op de tegel | In het mini dashboard |
 | --- | --- | --- |
 | `proxmox` | VM's en containers aan, CPU, RAM, offline nodes | nodes, opslag, alle VM's/CT's met start, afsluiten, herstart, forceer stop |
-| `proxmoxbackupserver` | opslag, mislukte taken, oudste back-up | datastores met verwachte "vol"-datum, laatste back-up per VM/CT, mislukte taken |
+| `proxmoxbackupserver` | opslag, mislukte taken, oudste back-up, verify-fouten | datastores met verwachte "vol"-datum, laatste back-up en verify per VM/CT, mislukte taken |
 | `adguard` | verzoeken, % geblokkeerd, latency, bescherming | top geblokkeerde domeinen en clients, bescherming aan/uit |
 | `npm` | aantal hosts, eerstvolgende vervaldatum certificaat | certificaten, proxy hosts, **import van proxy hosts als tegels** |
 | `portainer` | omgevingen, draaiende en gestopte containers | containers per omgeving met start, stop, herstart |
@@ -98,6 +98,16 @@ Extra's, deel 2 (beheer):
   dashboard te openen. Ook `logs`, `terminal`, `beveiliging`. Enter voert de eerste uit als er geen tegel past
 - **Portainer**-integratie (type `portainer`, geheim `key` = API-sleutel): omgevingen, draaiende en gestopte
   containers, en containers starten, stoppen of herstarten
+
+Extra's, deel 3 (back-ups en capaciteit):
+
+- **back-ups (PBS)**: per VM/CT de laatste back-up en de verify-status. Oranje als de laatste back-up ouder is dan
+  26 uur, rood bij een mislukte back-up of verify (of na 3 dagen niets). Elk half uur kijkt de worker en meldt nieuwe
+  problemen één keer in het meldingencentrum
+- **capaciteit** (knop `df` in de titelbalk): de worker bewaart elke 10 minuten CPU, RAM en schijf van alle nodes,
+  VM's/CT's en opslag uit Proxmox (met TimescaleDB 180 dagen, gecomprimeerd na 7 dagen). Per opslag een trend over
+  7 dagen en "vol over x dagen"; melding als iets binnen 14 dagen en nog eens binnen 3 dagen vol loopt. Na een grote
+  opkuis telt alleen de trend van daarna
 
 Optimalisaties:
 
