@@ -22,6 +22,14 @@ Fase 3, monitoring:
 - melding in het meldingencentrum als een service down gaat (na 3 mislukte checks) en weer terugkomt
 - historiek: met TimescaleDB 1 jaar (gecomprimeerd na 7 dagen), zonder TimescaleDB 90 dagen
 
+Optimalisaties:
+
+- je blijft ingelogd zolang je het dashboard gebruikt (sessie verlengt zich, na 14 dagen niets doen moet je opnieuw inloggen)
+- geen verzoeken naar de server zolang het tabblad verborgen is, bij terugkeren meteen verse status
+- achter Cloudflare zien login-limiet, audit-log en meldingen het echte IP van de bezoeker
+- gzip, beveiligingsheaders op elke response, installeerbaar als app (manifest)
+- de worker hergebruikt HTTP-verbindingen en ruimt verlopen sessies, oude audit-regels (1 jaar) en gelezen meldingen (30 dagen) op
+
 ## Installeren in een Proxmox-container
 
 Container: Debian 13 (of 12), unprivileged, `nesting=1`, 2 cores, 4 GB RAM, 32 GB disk, vast IP.
@@ -39,6 +47,10 @@ met SSL en "Websockets Support" aan.
 
 Inloggen werkt alleen via HTTPS. Wil je eerst rechtstreeks via `http://<IP>` testen, zet dan
 `HOMEPAGE_COOKIE_SECURE=false` in `/etc/homepage/homepage.env` en voer `systemctl restart homepage-api` uit.
+
+Zet in Proxmox de firewall van de container aan en laat poort 80 alleen toe vanaf NPM (192.168.0.245).
+nginx gelooft de `X-Forwarded-For`- en `CF-Connecting-IP`-headers enkel van dat adres, maar zo kan
+niemand op het LAN NPM en Cloudflare omzeilen.
 
 **Bewaar een kopie van `/etc/homepage/secret.key`.** Zonder die sleutel zijn de opgeslagen
 wachtwoorden, API-sleutels en 2FA-geheimen onleesbaar.
