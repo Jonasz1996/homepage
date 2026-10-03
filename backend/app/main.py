@@ -1,7 +1,7 @@
 from fastapi import Depends, FastAPI, Request
 
 from .config import get_settings
-from .deps import COOKIE, csrf_guard
+from .deps import COOKIE, csrf_guard, secure_cookie
 from .routers import auth, capacity, importexport, integrations, layout, logs, monitoring, notifications, ssh
 
 app = FastAPI(
@@ -30,7 +30,7 @@ async def renew_session_cookie(request: Request, call_next):
     if renew:
         token, lifetime = renew
         response.set_cookie(COOKIE, token, max_age=int(lifetime.total_seconds()), httponly=True,
-                            secure=get_settings().cookie_secure, samesite="strict", path="/")
+                            secure=secure_cookie(request), samesite="strict", path="/")
     return response
 
 

@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Installeert of werkt homepage bij in een Debian 12/13 LXC-container.
-# Gebruik (als root):
-#   apt install -y git && git clone https://github.com/Jonasz1996/homepage /opt/homepage
+# Meestal via deploy/bootstrap.sh (haalt eerst de code op). Rechtstreeks, als root:
 #   bash /opt/homepage/deploy/install.sh
-# Opnieuw uitvoeren na een `git pull` werkt alles bij; bestaande sleutels en data blijven staan.
+# Opnieuw uitvoeren werkt alles bij; bestaande sleutels en data blijven staan.
 set -euo pipefail
 
 APP_DIR=/opt/homepage
@@ -42,7 +41,7 @@ if ! dpkg -s "timescaledb-2-postgresql-$PG_VER" >/dev/null 2>&1; then
     systemctl restart postgresql
   else
     rm -f /etc/apt/sources.list.d/timescaledb.list
-    warn "TimescaleDB kon niet geïnstalleerd worden. Het dashboard werkt, maar fase 3 heeft het nodig."
+    warn "TimescaleDB kon niet geïnstalleerd worden. Alles werkt, alleen ruimt de worker oude metingen dan zelf op (90 dagen)."
   fi
 fi
 
@@ -73,6 +72,13 @@ fi
 if [ ! -f "$CONF_DIR/homepage.env" ]; then
   install -m 640 -o root -g homepage "$APP_DIR/deploy/homepage.env.example" "$CONF_DIR/homepage.env"
 fi
+
+# Oudere installaties: "true" of "false" wordt "auto" (Secure via HTTPS, maar testen op http://IP werkt ook).
+sed -i -E 's/^HOMEPAGE_COOKIE_SECURE=(true|false)$/HOMEPAGE_COOKIE_SECURE=auto/' "$CONF_DIR/homepage.env"
+
+# Ping-checks draaien als gewone gebruiker: ICMP-sockets toelaten (ook in een unprivileged LXC).
+echo 'net.ipv4.ping_group_range = 0 2147483647' > /etc/sysctl.d/60-homepage-ping.conf
+sysctl -q -w net.ipv4.ping_group_range="0 2147483647" 2>/dev/null || warn "ping_group_range niet gezet; ping-checks kunnen falen"
 
 # IP van deze container voor de rsyslog-configuratie op andere machines (fase 6).
 if ! grep -q '^HOMEPAGE_SYSLOG_TARGET=' "$CONF_DIR/homepage.env"; then
@@ -123,11 +129,10 @@ fi
 IP=$(hostname -I | awk '{print $1}')
 say "Klaar"
 cat <<EOF
-Dashboard: http://$IP (zet er in Nginx Proxy Manager een HTTPS-host voor, bv. home.jbogaert.be)
-
-Inloggen werkt alleen via HTTPS (veilige cookie). Wil je eerst rechtstreeks via http://$IP testen,
-zet dan HOMEPAGE_COOKIE_SECURE=false in $CONF_DIR/homepage.env en voer
-'systemctl restart homepage-api' uit. Zet het daarna terug op true.
+Dashboard: http://$IP
+Testen kan meteen op dat adres. Voor gebruik van buitenaf: in Nginx Proxy Manager een HTTPS-host
+(bv. home.jbogaert.be) naar http://$IP:80 met "Websockets Support" aan.
+Bijwerken: hetzelfde bootstrap-commando opnieuw uitvoeren.
 EOF
 if [ -n "$NEW_TOKEN" ]; then
   echo

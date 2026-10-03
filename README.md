@@ -122,18 +122,21 @@ Optimalisaties:
 Container: Debian 13 (of 12), unprivileged, `nesting=1`, 2 cores, 4 GB RAM, 32 GB disk, vast IP.
 Kies een x86-node (niet de Raspberry Pi).
 
+Eén commando als root in de lege container (installeert alles, haalt de code op en start de services):
+
 ```bash
-apt update && apt install -y git
-git clone https://github.com/Jonasz1996/homepage /opt/homepage
-bash /opt/homepage/deploy/install.sh
+apt update && apt install -y curl && bash <(curl -fsSL https://raw.githubusercontent.com/Jonasz1996/homepage/extras-3-capaciteit/deploy/bootstrap.sh)
 ```
+
+Zolang de PR's niet gemerged zijn, neemt het script de branch `extras-3-capaciteit`; daarna `main`.
+Hetzelfde commando opnieuw uitvoeren werkt alles bij.
 
 Het script toont op het einde de **setup-code** voor het eerste account.
 Maak daarna in Nginx Proxy Manager een proxy host (bv. `home.jbogaert.be` → `http://<IP van de container>:80`)
 met SSL en "Websockets Support" aan.
 
-Inloggen werkt alleen via HTTPS. Wil je eerst rechtstreeks via `http://<IP>` testen, zet dan
-`HOMEPAGE_COOKIE_SECURE=false` in `/etc/homepage/homepage.env` en voer `systemctl restart homepage-api` uit.
+Testen kan meteen op `http://<IP>`. Via NPM met HTTPS is de sessiecookie automatisch `Secure`
+(`HOMEPAGE_COOKIE_SECURE=auto`).
 
 Zet in Proxmox de firewall van de container aan en laat poort 80 alleen toe vanaf NPM (192.168.0.245).
 nginx gelooft de `X-Forwarded-For`- en `CF-Connecting-IP`-headers enkel van dat adres, maar zo kan
@@ -144,8 +147,10 @@ wachtwoorden, API-sleutels en 2FA-geheimen onleesbaar.
 
 ## Bijwerken
 
+Hetzelfde bootstrap-commando opnieuw, of:
+
 ```bash
-cd /opt/homepage && git pull && bash deploy/install.sh
+bash /opt/homepage/deploy/bootstrap.sh
 ```
 
 ## Opbouw
