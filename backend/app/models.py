@@ -161,3 +161,34 @@ class ServiceState(Base):
     latency_ms: Mapped[float | None]
     fail_count: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(String(300))
+
+
+class SshKey(Base):
+    """Sleutelpaar voor de terminal. De private sleutel staat versleuteld in de database."""
+
+    __tablename__ = "ssh_keys"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(80))
+    public_key: Mapped[str] = mapped_column(Text)
+    private_key: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class SshHost(Base):
+    __tablename__ = "ssh_hosts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(80))
+    host: Mapped[str] = mapped_column(String(255))
+    port: Mapped[int] = mapped_column(Integer, default=22)
+    username: Mapped[str] = mapped_column(String(64), default="root")
+    key_id: Mapped[int | None] = mapped_column(ForeignKey("ssh_keys.id", ondelete="SET NULL"))
+    # Versleuteld; alleen als er geen sleutel gebruikt wordt.
+    password: Mapped[str | None] = mapped_column(Text)
+    # Publieke hostsleutel (OpenSSH-formaat), vastgelegd bij de eerste verbinding na bevestiging.
+    host_key: Mapped[str | None] = mapped_column(Text)
+    service_id: Mapped[int | None] = mapped_column(ForeignKey("services.id", ondelete="SET NULL"), index=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    last_used_at: Mapped[datetime | None]

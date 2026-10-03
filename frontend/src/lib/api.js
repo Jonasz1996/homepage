@@ -35,3 +35,21 @@ export function poll(fn, ms) {
   document.addEventListener('visibilitychange', vis)
   return () => { clearInterval(t); document.removeEventListener('visibilitychange', vis) }
 }
+
+// Gevoelige acties vragen een recente 2FA-bevestiging. withReauth voert fn uit; antwoordt de
+// server "reauth_required", dan vraagt ReauthDialog de code en probeert het één keer opnieuw.
+export function requestReauth() {
+  return new Promise((resolve, reject) => {
+    window.dispatchEvent(new CustomEvent('hp:reauth', { detail: { resolve, reject } }))
+  })
+}
+
+export async function withReauth(fn) {
+  try {
+    return await fn()
+  } catch (e) {
+    if (!(e instanceof ApiError && e.status === 403 && e.message === 'reauth_required')) throw e
+    await requestReauth()
+    return await fn()
+  }
+}

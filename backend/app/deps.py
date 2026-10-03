@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, HTTPException, Request, status
+from starlette.requests import HTTPConnection
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import get_settings
@@ -18,10 +19,14 @@ def client_ip(request: Request) -> str | None:
     return request.client.host if request.client else None
 
 
-async def csrf_guard(request: Request) -> None:
+async def csrf_guard(conn: HTTPConnection) -> None:
     """Een ander domein kan geen eigen header meesturen zonder CORS-toestemming,
-    dus deze header bewijst dat het verzoek van onze eigen frontend komt."""
-    if request.method in UNSAFE and request.headers.get(CSRF_HEADER) != "homepage":
+    dus deze header bewijst dat het verzoek van onze eigen frontend komt.
+    WebSockets controleren zelf de Origin (zie routers/ssh.py)."""
+    if conn.scope["type"] != "http":
+        return
+    request = conn
+    if request.scope["method"] in UNSAFE and request.headers.get(CSRF_HEADER) != "homepage":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "CSRF-header ontbreekt")
 
 

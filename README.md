@@ -54,6 +54,17 @@ proxmox-backup-manager user generate-token homepage@pbs dashboard
 proxmox-backup-manager acl update / Audit --auth-id 'homepage@pbs!dashboard'
 ```
 
+Fase 5, SSH-terminal (knop `>_` in de titelbalk):
+
+- hosts beheren (naam, IP, poort, gebruiker, sleutel of wachtwoord), tabbladen met meerdere sessies tegelijk
+- sleutels maken (ed25519) of een bestaande plakken; de private sleutel staat versleuteld in de database
+  en komt nooit in de browser. Kopieer de publieke sleutel naar `~/.ssh/authorized_keys` op de host
+- hostsleutel wordt bij de eerste verbinding getoond en pas na jouw bevestiging bewaard; verandert hij
+  later, dan weigert de terminal te verbinden (bescherming tegen man-in-the-middle)
+- een terminal openen vraagt je 2FA-code als je langer dan 15 minuten niet bevestigd hebt;
+  na 30 minuten zonder typen wordt de sessie gesloten; openen en sluiten komen in de audit-log
+- koppel een host aan een service, dan staat er een `>_`-knop in het mini dashboard van die service
+
 Optimalisaties:
 
 - je blijft ingelogd zolang je het dashboard gebruikt (sessie verlengt zich, na 14 dagen niets doen moet je opnieuw inloggen)
