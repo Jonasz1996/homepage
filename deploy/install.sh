@@ -105,6 +105,8 @@ NPM_IP_RE="${NPM_IP//./\\\\.}"
 sed "s/__NPM_IP_RE__/$NPM_IP_RE/" "$APP_DIR/deploy/nginx-map.conf" > /etc/nginx/conf.d/homepage-map.conf
 install -D -m 644 "$APP_DIR/deploy/nginx-headers.conf" /etc/nginx/snippets/homepage-headers.conf
 sed "s/__NPM_IP__/$NPM_IP/" "$APP_DIR/deploy/nginx.conf" > /etc/nginx/sites-available/homepage
+# Zonder IPv6 in de container kan nginx niet op [::] luisteren.
+[ -e /proc/net/if_inet6 ] || sed -i '/listen \[::\]/d' /etc/nginx/sites-available/homepage
 ln -sf /etc/nginx/sites-available/homepage /etc/nginx/sites-enabled/homepage
 rm -f /etc/nginx/sites-enabled/default
 nginx -t
