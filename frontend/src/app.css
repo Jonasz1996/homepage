@@ -126,3 +126,12 @@ pre {
 .ok { color: var(--ok) }
 
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important } }
+
+/* Gsm en Android-app: niet onder de notch of de navigatiebalk, en geen blauwe tik-flits. */
+body { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left) }
+a, button { -webkit-tap-highlight-color: transparent }
+@media (max-width: 560px) {
+  .body { padding: 16px }
+  input, select, textarea { font-size: 16px } /* iOS zoomt anders in bij elk veld */
+}
+

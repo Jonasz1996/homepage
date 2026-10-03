@@ -151,6 +151,27 @@ Later, deel 2 (internet, Wake-on-LAN en stroom):
   de hele maand en een staafje per dag. Zonder energiesensor rekent het dashboard de kWh uit zijn eigen metingen om de
   10 minuten (aangeduid met ≈)
 
+Later, deel 3 (Authentik en gsm):
+
+- **inloggen met Authentik**: maak in Authentik een *OAuth2/OpenID Provider* (type confidential, signing key
+  ingesteld) met als redirect-URI `https://homepage.jbogaert.be/api/auth/oidc/callback`, en een application met slug
+  bv. `homepage`. Vul in het dashboard bij ⚿ → *authentik* de issuer in
+  (`https://auth.jbogaert.be/application/o/homepage/`), de client-id en het client secret en zet het aan; het
+  dashboard toont daar ook de exacte redirect-URI. Alleen bestaande gebruikers met 2FA kunnen zo binnen, de
+  gebruikersnaam bij Authentik moet dezelfde zijn. Standaard moet Authentik in het ID-token melden dat er een tweede
+  factor gebruikt is (`amr`, zit erin als je flow een authenticator-validatie-stap heeft); dat kan je uitzetten als
+  je dat bewust bij Authentik regelt. Inloggen met wachtwoord en 2FA blijft altijd werken
+- **gsm**: onder 760 px breed zitten de knoppen van de titelbalk achter ☰, tegels staan met twee naast elkaar en
+  vensters vullen het scherm. Respecteert de notch en de gebarenbalk
+- **als app**: in Chrome op Android *Toevoegen aan startscherm* (op iOS via Delen). Eigen icoon, opent zonder
+  adresbalk, met snelkoppelingen (lang drukken op het icoon) naar history, updates, net en terminal. Een service
+  worker houdt de vormgeving offline beschikbaar; gegevens van `/api` worden nooit bewaard
+- **Android-app (WebView)**: laad `https://homepage.jbogaert.be/` en zet `javaScriptEnabled`, `domStorageEnabled` en
+  cookies aan (`CookieManager.setAcceptCookie(true)`). Third-party cookies zijn niet nodig:
+  alles blijft op dezelfde site als Authentik op een subdomein staat. Rechtstreeks openen kan met
+  `/?open=history`, `updates`, `network` of `terminal`. Links naar andere services kan de app in dezelfde WebView
+  openen (`shouldOverrideUrlLoading` false teruggeven voor `*.jbogaert.be`)
+
 Optimalisaties:
 
 - je blijft ingelogd zolang je het dashboard gebruikt (sessie verlengt zich, na 14 dagen niets doen moet je opnieuw inloggen)

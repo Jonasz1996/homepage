@@ -13,6 +13,9 @@
   let error = $state('')
   let pw = $state({ current: '', new: '', again: '' })
   let pwMsg = $state('')
+  let sso = $state(null)
+  let ssoSecret = $state('')
+  let ssoMsg = $state('')
 
   async function loadSessions() {
     try { sessions = await api('/auth/sessions'); error = '' } catch (e) { error = e.message }
@@ -34,6 +37,7 @@
   $effect(() => {
     if (tab === 'sessions') loadSessions()
     else if (tab === 'audit') { filter; loadAudit() }
+    else if (tab === 'sso') loadSso()
   })
 
   async function revoke(s) {
@@ -48,6 +52,21 @@
       await withReauth(() => api('/auth/sessions/revoke-others', { method: 'POST' }))
       await loadSessions()
     } catch (e) { error = e.message }
+  }
+  async function loadSso() {
+    try { sso = await api('/auth/oidc/settings'); ssoSecret = ''; error = '' } catch (e) { error = e.message }
+  }
+  async function saveSso(e) {
+    e.preventDefault()
+    ssoMsg = ''
+    const body = { ...sso, client_secret: ssoSecret ? ssoSecret : null }
+    for (const k of ['has_secret', 'redirect_uri']) delete body[k]
+    try {
+      sso = await withReauth(() => api('/auth/oidc/settings', { method: 'PUT', body }))
+      ssoSecret = ''
+      ssoMsg = sso.enabled ? 'Opgeslagen. Op het loginscherm staat nu een knop.' : 'Opgeslagen (staat uit).'
+      error = ''
+    } catch (err) { error = err.message }
   }
   async function changePw(e) {
     e.preventDefault()
@@ -90,7 +109,7 @@
     ssh_key_deleted: 'SSH-sleutel verwijderd', ssh_host_added: 'SSH-host toegevoegd', ssh_host_changed: 'SSH-host gewijzigd',
     ssh_host_deleted: 'SSH-host verwijderd', ssh_hostkey_accepted: 'hostsleutel aanvaard',
     ssh_hostkey_mismatch: 'hostsleutel klopt niet!', ssh_hostkey_forgotten: 'hostsleutel vergeten',
-    syslog_rollout: 'rsyslog uitgerold', maintenance: 'onderhoud', revision_restored: 'versie teruggezet',
+    syslog_rollout: 'rsyslog uitgerold', login_failed_oidc: 'login via Authentik mislukt', oidc_settings_changed: 'Authentik-instellingen gewijzigd', maintenance: 'onderhoud', revision_restored: 'versie teruggezet',
     page_deleted: 'pagina verwijderd', group_deleted: 'groep verwijderd', log_rule_added: 'logregel toegevoegd',
     log_rule_changed: 'logregel gewijzigd', log_rule_deleted: 'logregel verwijderd', wol: 'Wake-on-LAN',
   }
@@ -103,6 +122,7 @@
     <button class="mini" class:on={tab === 'sessions'} onclick={() => (tab = 'sessions')}>sessies</button>
     <button class="mini" class:on={tab === 'audit'} onclick={() => (tab = 'audit')}>auditlog</button>
     <button class="mini" class:on={tab === 'password'} onclick={() => (tab = 'password')}>wachtwoord</button>
+    <button class="mini" class:on={tab === 'sso'} onclick={() => (tab = 'sso')}>authentik</button>
   </div>
   <p class="err">{error}</p>
 
@@ -148,6 +168,39 @@
       </tbody>
     </table>
     {#if more}<button class="mini more" onclick={() => loadAudit(true)}>meer laden</button>{/if}
+  {:else if tab === 'sso'}
+    {#if sso}
+      <form onsubmit={saveSso}>
+        <label class="chk"><input type="checkbox" bind:checked={sso.enabled} /> inloggen via Authentik toestaan</label>
+        <label class="lbl" for="oi-iss">Issuer (OpenID Configuration Issuer van de provider)</label>
+        <input id="oi-iss" bind:value={sso.issuer} placeholder="https://auth.jbogaert.be/application/o/homepage/" />
+        <div class="two">
+          <div>
+            <label class="lbl" for="oi-id">Client ID</label>
+            <input id="oi-id" bind:value={sso.client_id} autocomplete="off" />
+          </div>
+          <div>
+            <label class="lbl" for="oi-sec">Client secret {sso.has_secret ? '(ingesteld, leeg = behouden)' : ''}</label>
+            <input id="oi-sec" type="password" bind:value={ssoSecret} autocomplete="new-password" />
+          </div>
+          <div>
+            <label class="lbl" for="oi-lbl">Opschrift van de knop</label>
+            <input id="oi-lbl" bind:value={sso.label} maxlength="40" />
+          </div>
+          <div>
+            <label class="lbl" for="oi-claim">Gebruikersnaam uit claim</label>
+            <input id="oi-claim" bind:value={sso.username_claim} />
+          </div>
+        </div>
+        <label class="chk"><input type="checkbox" bind:checked={sso.require_mfa} /> Authentik moet 2FA melden (amr-claim), anders weigeren</label>
+        <label class="chk"><input type="checkbox" bind:checked={sso.insecure} /> zelfondertekend certificaat aanvaarden</label>
+        <p class="hint">Redirect-URI om in Authentik in te vullen: <code class="uri">{sso.redirect_uri}</code><br />
+          Alleen bestaande gebruikers kunnen zo inloggen: de gebruikersnaam bij Authentik moet dezelfde zijn als hier.
+          Je eigen wachtwoord en 2FA blijven ook gewoon werken.</p>
+        {#if ssoMsg}<p class="ok">{ssoMsg}</p>{/if}
+        <div class="row foot"><button class="btn">Opslaan</button></div>
+      </form>
+    {/if}
   {:else}
     <form onsubmit={changePw}>
       <label class="lbl" for="pw-cur">Huidig wachtwoord</label>
@@ -181,4 +234,9 @@
   .bad { color: var(--err) }
   .more { margin-top: 10px }
   select { width: auto }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px }
+  .chk { display: flex; gap: 8px; align-items: center; font-size: 12.5px; color: var(--text); margin: 10px 0 }
+  .chk input { width: auto }
+  .uri { color: var(--ok); word-break: break-all }
+  @media (max-width: 560px) { .two { grid-template-columns: 1fr } }
 </style>
