@@ -6,6 +6,7 @@
   import History from './History.svelte'
   import ImportDialog from './ImportDialog.svelte'
   import NameForm from './NameForm.svelte'
+  import Network from './Network.svelte'
   import Notifications from './Notifications.svelte'
   import ReauthDialog from './ReauthDialog.svelte'
   import Revisions from './Revisions.svelte'
@@ -29,6 +30,7 @@
   let status = $state({})
   let widgets = $state({})
   let updates = $state({ total: 0, security: 0, by_service: {} })
+  let net = $state(null)
   let termOpen = $state(false)
   let termUsed = $state(false)
   let termRequest = $state(null)
@@ -73,6 +75,7 @@
     { label: 'tijdlijn: storingen, herstarts, back-ups', run: () => (modal = { kind: 'history' }) },
     { label: 'weekrapport', run: () => (modal = { kind: 'history', tab: 'report' }) },
     { label: 'updates: openstaande pakketten en images', run: () => (modal = { kind: 'updates' }) },
+    { label: 'netwerk: publiek ip, wan, tunnels, wake-on-lan', run: () => (modal = { kind: 'network' }) },
     { label: 'bewerken aan/uit', run: () => (editing = !editing) },
   ]
   let quick = $state([])
@@ -104,8 +107,9 @@
     if (a.confirm && !confirm(`${a.service}: ${what}?`)) return
     quickBusy = true
     try {
-      const r = await withReauth(() => api(`/services/${a.service_id}/integration/action`,
-        { method: 'POST', body: { action: a.id, params: a.params } }))
+      const r = await withReauth(() => (a.endpoint
+        ? api(a.endpoint, { method: 'POST' })
+        : api(`/services/${a.service_id}/integration/action`, { method: 'POST', body: { action: a.id, params: a.params } })))
       quickMsg = `✓ ${a.service}: ${r.message}`
       quickAt = 0
       setTimeout(() => { loadWidgets(); if (query.trim()) loadQuick() }, 1500)
@@ -161,6 +165,18 @@
     await act(() => api(`/groups/${g.id}/maintenance`, { method: 'POST', body: { minutes: Math.max(0, parseInt(v, 10) || 0) } }))
     await loadStatus()
   }
+  async function loadNet() {
+    try { net = await api('/network') } catch { /* volgende poging */ }
+  }
+  // Rood als een WAN-gateway of tunnel niet in orde is, oranje bij problemen.
+  let netLevel = $derived.by(() => {
+    if (!net) return ''
+    const gws = net.gateways.flatMap((g) => g.items.map((i) => i.level))
+    const tus = net.tunnels.flatMap((t) => t.items.map((i) => i.status))
+    if (gws.includes('err') || tus.some((x) => x === 'down' || x === 'inactive') || net.public_ip.error) return 'e'
+    if (gws.includes('warn') || tus.includes('degraded')) return 'w'
+    return gws.length || tus.length || net.public_ip.ip ? 'g' : ''
+  })
   async function loadUpdates() {
     try { updates = await api('/updates') } catch { /* volgende poging */ }
   }
@@ -326,11 +342,13 @@
     loadStatus()
     loadWidgets()
     loadUpdates()
+    loadNet()
+    const stopNet = poll(loadNet, 120000)
     const stopWidgets = poll(loadWidgets, 60000)
     const stopUpdates = poll(loadUpdates, 300000)
     const stopClock = poll(() => (now = new Date()), 15000)
     const stopStatus = poll(loadStatus, 30000)
-    return () => { stopClock(); stopStatus(); stopWidgets(); stopUpdates() }
+    return () => { stopClock(); stopStatus(); stopWidgets(); stopUpdates(); stopNet() }
   })
 </script>
 
@@ -343,6 +361,7 @@
       <button class="mini" onclick={() => openLogs()} title="Logs van je machines">logs</button>
       <button class="mini" onclick={() => openTerminal()} title="SSH-terminal">&gt;_</button>
       <button class="mini" onclick={() => (modal = { kind: 'capacity' })} title="Capaciteit: opslag, cpu en ram">df</button>
+      <button class="mini" onclick={() => (modal = { kind: 'network' })} title="Internet: publiek IP, WAN, tunnels, Wake-on-LAN">net{#if netLevel}<i class="nd {netLevel}"></i>{/if}</button>
       <button class="mini" onclick={() => (modal = { kind: 'history' })} title="Tijdlijn en weekrapport">history</button>
       <button class="mini" class:upd={updates.security} onclick={() => (modal = { kind: 'updates' })}
               title="Openstaande updates">apt{#if updates.total}<b class="n">{updates.total}</b>{/if}</button>
@@ -542,6 +561,8 @@
   <Capacity onclose={() => (modal = null)} />
 {:else if modal?.kind === 'history'}
   <History tab={modal.tab} onclose={() => (modal = null)} />
+{:else if modal?.kind === 'network'}
+  <Network onclose={() => (modal = null)} onchanged={(d) => (net = d)} />
 {:else if modal?.kind === 'updates'}
   <Updates onclose={() => (modal = null)} onchanged={loadUpdates} />
 {:else if modal?.kind === 'security'}
@@ -568,6 +589,10 @@
   .clock { color: var(--text); margin-right: 4px }
   .n { margin-left: 5px; color: var(--text-h); font-size: 11px; font-weight: 500 }
   .upd .n { color: var(--mid) }
+  .nd { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin: 0 0 1px 6px; vertical-align: middle }
+  .nd.g { background: var(--ok) }
+  .nd.w { background: var(--mid) }
+  .nd.e { background: var(--err); box-shadow: 0 0 6px var(--err) }
   .down { color: var(--err) }
   .maint { color: var(--mid) }
   .head { display: flex; gap: 18px; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; padding-bottom: 12px }

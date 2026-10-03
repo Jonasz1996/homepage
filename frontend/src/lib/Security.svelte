@@ -92,7 +92,7 @@
     ssh_hostkey_mismatch: 'hostsleutel klopt niet!', ssh_hostkey_forgotten: 'hostsleutel vergeten',
     syslog_rollout: 'rsyslog uitgerold', maintenance: 'onderhoud', revision_restored: 'versie teruggezet',
     page_deleted: 'pagina verwijderd', group_deleted: 'groep verwijderd', log_rule_added: 'logregel toegevoegd',
-    log_rule_changed: 'logregel gewijzigd', log_rule_deleted: 'logregel verwijderd',
+    log_rule_changed: 'logregel gewijzigd', log_rule_deleted: 'logregel verwijderd', wol: 'Wake-on-LAN',
   }
   const BAD = /failed|mismatch|revoked|deleted/
   const detail = (d) => Object.entries(d || {}).map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join('  ')

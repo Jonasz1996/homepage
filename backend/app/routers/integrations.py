@@ -16,6 +16,7 @@ from ..integrations.npm import NginxProxyManager, host_url
 from ..layout import record_revision
 from ..models import Group, Service, User
 from ..monitoring.checks import HttpClients
+from ..wol import normalize_mac
 
 router = APIRouter(prefix="/api", tags=["integrations"])
 
@@ -128,7 +129,13 @@ async def quick_actions(user: User = Depends(current_user), db: AsyncSession = D
             data = await _cached(s, "actions", ACTIONS_TTL, lambda i: _actions(i))
             return [{**a, "service_id": s.id, "service": s.name} for a in data.get("items", [])]
 
-    return [a for chunk in await asyncio.gather(*(one(s) for s in services)) for a in chunk]
+    out = [a for chunk in await asyncio.gather(*(one(s) for s in services)) for a in chunk]
+    # Wake-on-LAN voor elke service met een MAC-adres (bv. de HP-nodes).
+    for s in (await db.execute(select(Service))).scalars():
+        if normalize_mac(str((s.config or {}).get("mac") or "")):
+            out.append({"id": "wol", "label": "wekken (Wake-on-LAN)", "target": s.name, "service_id": s.id,
+                        "service": s.name, "endpoint": f"/services/{s.id}/wol", "confirm": True})
+    return out
 
 
 async def _actions(i: Integration) -> dict:
