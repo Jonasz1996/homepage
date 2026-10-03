@@ -13,6 +13,7 @@ from ..models import Service
 from .checks import HttpClients, run_check
 from .engine import cleanup, housekeeping, record
 from .capacity import SAMPLE_EVERY, check_forecasts, sample
+from .network import NETWORK_EVERY, PUBLIC_IP_EVERY, sample_power, watch_gateways, watch_public_ip, watch_tunnels
 from .report import weekly_notification
 from .updates import UPDATES_EVERY, run_updates
 from .watchers import watch_npm, watch_pbs
@@ -97,6 +98,15 @@ class Worker:
             await weekly_notification(db)
             await db.commit()
 
+    async def network(self, with_ip: bool) -> None:
+        """Elke 2 minuten: WAN-gateways en tunnels; elke 5 minuten ook het publieke IP."""
+        async with self.maker() as db:
+            await watch_gateways(db, self.http)
+            await watch_tunnels(db, self.http)
+            if with_ip:
+                await watch_public_ip(db, self.http)
+            await db.commit()
+
     async def updates(self) -> None:
         """Elke 6 uur: openstaande updates op nodes, containers en Docker-images."""
         async with self.maker() as db:
@@ -107,6 +117,7 @@ class Worker:
         """Elke 10 minuten: gebruik uit Proxmox bewaren en kijken of er opslag vol dreigt te lopen."""
         async with self.maker() as db:
             await sample(db, self.http)
+            await sample_power(db, self.http)
             await db.commit()
             await check_forecasts(db)
             await db.commit()
@@ -125,6 +136,9 @@ class Worker:
         last_periodic = time.monotonic() - PERIODIC + 60
         last_capacity = time.monotonic() - SAMPLE_EVERY + 30
         last_updates = time.monotonic() - UPDATES_EVERY + 300
+        # Netwerk en publiek IP meteen bij de start.
+        last_network = time.monotonic() - NETWORK_EVERY - 1
+        last_ip = time.monotonic() - PUBLIC_IP_EVERY - 1
         while True:
             try:
                 for sid, check, url in await self.due_services():
@@ -135,6 +149,12 @@ class Worker:
                 if time.monotonic() - last_capacity > SAMPLE_EVERY:
                     last_capacity = time.monotonic()
                     self.spawn(self.capacity())
+                if time.monotonic() - last_network > NETWORK_EVERY:
+                    last_network = time.monotonic()
+                    with_ip = last_network - last_ip > PUBLIC_IP_EVERY
+                    if with_ip:
+                        last_ip = last_network
+                    self.spawn(self.network(with_ip))
                 if time.monotonic() - last_updates > UPDATES_EVERY:
                     last_updates = time.monotonic()
                     self.spawn(self.updates())

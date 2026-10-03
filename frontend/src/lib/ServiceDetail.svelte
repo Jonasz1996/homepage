@@ -1,6 +1,6 @@
 <script>
   import { onMount, untrack } from 'svelte'
-  import { api, poll } from './api.js'
+  import { api, poll, withReauth } from './api.js'
   import IntegrationPanel from './IntegrationPanel.svelte'
   import LatencyChart from './LatencyChart.svelte'
   import Modal from './Modal.svelte'
@@ -16,6 +16,14 @@
   // Laatste gebeurtenissen van deze service op de tijdlijn (storingen, herstarts, updates, acties).
   let events = $state([])
   api(`/timeline?service_id=${untrack(() => service.id)}&limit=8`).then((r) => (events = r.items)).catch(() => {})
+
+  let wolMsg = $state('')
+  async function wake() {
+    if (!confirm(`${service.name} wekken met Wake-on-LAN?`)) return
+    try {
+      wolMsg = '✓ ' + (await withReauth(() => api(`/services/${service.id}/wol`, { method: 'POST' }))).message
+    } catch (e) { wolMsg = '✕ ' + e.message }
+  }
 
   const RANGES = ['1h', '24h', '7d', '30d', '1y']
   let range = $state('24h')
@@ -75,9 +83,11 @@
       {#each sshHosts as h (h.id)}
         <button class="mini" onclick={() => onterminal?.(h.id)} title="{h.username}@{h.host}">&gt;_ {h.name}</button>
       {/each}
+      {#if service.config?.mac}<button class="mini" onclick={wake} title="Wake-on-LAN naar {service.config.mac}">⏻ wekken</button>{/if}
       <button class="mini" onclick={() => onedit(service)}>✎ bewerken</button>
     </div>
   </div>
+  {#if wolMsg}<p class="wol" class:e={wolMsg.startsWith('✕')}>{wolMsg}</p>{/if}
 
   <div class="maint">
     {#if maintActive}
@@ -185,6 +195,8 @@
 
 <style>
   .maint { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 0 0 12px }
+  .wol { font-size: 12px; color: var(--ok); margin: 0 0 8px }
+  .wol.e { color: var(--err) }
   .ev td:first-child { width: 150px; white-space: nowrap }
   .maint .lbl { margin: 0 4px 0 0 }
   .maint .on { color: var(--mid); font-size: 12.5px }

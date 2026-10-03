@@ -130,6 +130,27 @@ Later, deel 1 (tijdlijn, weekrapport en updates):
   PBS-token van hierboven mag het al. Zonder die rechten staat er een duidelijke melding bij die machine en werkt de
   rest gewoon
 
+Later, deel 2 (internet, Wake-on-LAN en stroom):
+
+- **internet** (knop `net` in de titelbalk, met een groen, oranje of rood bolletje): het publieke IP met sinds wanneer
+  en de vorige IP's (elke 5 minuten via Cloudflare, melding als het verandert; uitzetten met
+  `HOMEPAGE_PUBLIC_IP_CHECK=false`), de WAN-gateways uit OPNsense en je Cloudflare-tunnels. Een gateway of tunnel die
+  down gaat of terugkomt geeft een melding, pas als dat twee keer na elkaar (2 minuten) gezien wordt
+- **OPNsense** (type `opnsense`, geheimen `key` en `secret` van een API-key): WAN-status, latency en verlies op de
+  tegel, alle gateways en de firmwarestatus in het mini dashboard. Firmware-updates tellen mee in `apt`
+- **Cloudflare Tunnel** (type `cloudflared`, instelling `account` = account-id, geheim `token` = API-token met
+  *Account → Cloudflare Tunnel → Read*): status, verbindingen en datacenters per tunnel
+- **Wake-on-LAN**: zet bij een service (bv. een HP-node) onder bewerken → Monitoring het MAC-adres. Wekken kan dan
+  vanuit het mini dashboard, het netwerkoverzicht of met `Ctrl+K` → "wekken"; het vraagt je 2FA als je langer dan 15
+  minuten niet bevestigd hebt. Werkt niet het standaard-broadcastadres in jouw netwerk, zet dan `"wol_broadcast":
+  "192.168.0.255"` in de instellingen van die service. De machine moet WoL aan hebben in het BIOS
+- **stroomverbruik** (type `homeassistant`, geheim `token` = long-lived access token): per node een sensor met het
+  vermogen in W, en als je die hebt een energiesensor in kWh. Instellingen bv.
+  `{"price": 0.30, "nodes": {"pve50": {"power": "sensor.pve50_power", "energy": "sensor.pve50_energy"}, "pve51": "sensor.pve51_power"}}`.
+  Op de tegel het verbruik nu; in `df` per node watt, gemiddelde over 24 u, kWh en kost deze maand, een prognose voor
+  de hele maand en een staafje per dag. Zonder energiesensor rekent het dashboard de kWh uit zijn eigen metingen om de
+  10 minuten (aangeduid met ≈)
+
 Optimalisaties:
 
 - je blijft ingelogd zolang je het dashboard gebruikt (sessie verlengt zich, na 14 dagen niets doen moet je opnieuw inloggen)
