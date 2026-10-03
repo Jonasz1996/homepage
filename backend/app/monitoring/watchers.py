@@ -1,12 +1,13 @@
-"""Periodieke taken naast de checks: nieuwe hosts in NPM opmerken."""
+"""Periodieke taken naast de checks: nieuwe hosts in NPM, back-ups in PBS."""
 
 import logging
+import time
 from urllib.parse import urlsplit
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..deps import notify
+from ..deps import event, notify
 from ..integrations import IntegrationError, build
 from ..integrations.npm import host_url
 from ..models import AppState, Service
@@ -52,6 +53,7 @@ async def watch_pbs(db: AsyncSession, clients: HttpClients) -> None:
         except IntegrationError as e:
             log.info("PBS %s niet bereikbaar: %s", svc.name, e)
             continue
+        await _new_backups(db, svc, groups)
         problems = {}
         for g in groups:
             name = f"{g['store']}:{g['group']}" + (f" ({g['comment']})" if g.get("comment") else "")
@@ -73,3 +75,22 @@ async def watch_pbs(db: AsyncSession, clients: HttpClients) -> None:
             state.value = {"keys": sorted(problems)}
         else:
             db.add(AppState(key=key, value={"keys": sorted(problems)}))
+
+
+async def _new_backups(db: AsyncSession, svc: Service, groups: list[dict]) -> None:
+    """Gemaakte back-ups op de tijdlijn, gebundeld per ronde (anders honderden regels per nacht)."""
+    now = time.time()
+    last = {f"{g['store']}:{g['group']}": int(now - g["age"]) for g in groups if g.get("age") is not None}
+    key = f"pbs_last:{svc.id}"
+    state = await db.get(AppState, key)
+    if state is None:
+        db.add(AppState(key=key, value=last))
+        return
+    seen = state.value
+    new = sorted((k for k, t in last.items() if t > seen.get(k, 0) + 60), key=lambda k: last[k])
+    if new:
+        names = {f"{g['store']}:{g['group']}": g.get("comment") or g["group"] for g in groups}
+        shown = [names[k] for k in new[:20]] + ([f"… en {len(new) - 20} meer"] if len(new) > 20 else [])
+        event(db, "backup", f"{svc.name}: {len(new)} back-up{'s' if len(new) > 1 else ''} gemaakt", ", ".join(shown),
+              level="ok", service_id=svc.id, data={"count": len(new)})
+    state.value = {**seen, **last}

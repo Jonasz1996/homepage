@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import get_settings
 from .db import get_db
-from .models import AuditLog, Notification, Session, User
+from .models import AuditLog, Event, Notification, Session, User
 from .security import token_id
 
 COOKIE = "hp_session"
@@ -106,6 +106,21 @@ async def audit(db: AsyncSession, request: Request, user: User | None, action: s
     db.add(AuditLog(user_id=user.id if user else None, action=action, detail=detail, ip=client_ip(request)))
 
 
+# Bron van een melding → soort gebeurtenis op de tijdlijn.
+EVENT_KIND = {"monitor": "storing", "backup": "backup", "capaciteit": "capaciteit", "log": "log", "npm": "wijziging",
+              "updates": "updates", "herstart": "herstart", "netwerk": "netwerk", "actie": "actie",
+              "auth": "toegang"}
+
+
+def event(db: AsyncSession, kind: str, title: str, body: str | None = None, level: str = "info",
+          service_id: int | None = None, data: dict | None = None) -> None:
+    """Alleen op de tijdlijn, zonder melding."""
+    db.add(Event(kind=kind, title=title[:200], body=body, level=level, service_id=service_id, data=data or {}))
+
+
 def notify(db: AsyncSession, title: str, body: str | None = None, level: str = "info",
-           source: str = "system", service_id: int | None = None) -> None:
+           source: str = "system", service_id: int | None = None, data: dict | None = None) -> None:
+    """Melding in het meldingencentrum, en ook op de tijdlijn (behalve het weekrapport zelf)."""
     db.add(Notification(title=title, body=body, level=level, source=source, service_id=service_id))
+    if source != "rapport":
+        event(db, EVENT_KIND.get(source, "melding"), title, body, level, service_id, data)

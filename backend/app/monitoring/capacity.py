@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..deps import notify
+from ..deps import event, notify
 from ..integrations import IntegrationError, build
 from ..models import AppState, Metric, Service
 from .checks import HttpClients
@@ -72,7 +72,75 @@ async def sample(db: AsyncSession, clients: HttpClients, now: datetime | None = 
         rows = rows_from_resources(svc.id, res, now)
         db.add_all(rows)
         n += len(rows)
+        await detect_restarts(db, svc, res, now)
     return n
+
+
+def _guest_name(r: dict) -> str:
+    return f"{'VM' if r.get('type') == 'qemu' else 'CT'} {r.get('vmid')} {r.get('name') or ''}".strip()
+
+
+def _at(now: datetime, uptime: float) -> str:
+    return (now - timedelta(seconds=uptime)).astimezone().strftime("%H:%M")
+
+
+async def detect_restarts(db: AsyncSession, svc: Service, res: list[dict], now: datetime) -> None:
+    """Herstarts van nodes en starten/stoppen van VM's/CT's op de tijdlijn zetten.
+
+    Proxmox geeft de uptime mee: daalt die, dan is de machine herstart. Een herstarte node krijgt één
+    melding, met de VM's/CT's die daarna opkwamen erbij (geen lawine van losse regels)."""
+    key = f"uptime:{svc.id}"
+    state = await db.get(AppState, key)
+    prev = dict(state.value) if state else {}
+    cur = dict(prev)
+    online = {r.get("node") for r in res if r.get("type") == "node" and r.get("status") == "online"}
+    rebooted: dict[str, int] = {}
+    per_node: dict[str, list[str]] = defaultdict(list)
+    singles: list[tuple[str, str, str]] = []
+    for r in res:
+        if r.get("type") == "node" and r.get("node") in online:
+            k, up = f"n:{r.get('node')}", int(r.get("uptime") or 0)
+            old = prev.get(k)
+            if old and up < old[0]:
+                rebooted[r["node"]] = up
+            cur[k] = [up, 1]
+    for r in res:
+        t = r.get("type")
+        if t in ("qemu", "lxc") and not r.get("template") and r.get("node") in online:
+            k = f"g:{r.get('vmid')}"
+            running = r.get("status") == "running"
+            up = int(r.get("uptime") or 0) if running else 0
+            old = prev.get(k)
+            cur[k] = [up, int(running)]
+            if not old:
+                continue
+            node_up = rebooted.get(r["node"])
+            if running and (not old[1] or up < old[0] or (node_up is not None and up <= node_up)):
+                what = "gestart" if not old[1] else "herstart"
+                per_node[r["node"]].append(f"{_guest_name(r)} {what} om {_at(now, up)}")
+            elif not running and old[1]:
+                singles.append((r["node"], f"{_guest_name(r)} gestopt", "Op " + str(r.get("node")) + "."))
+    for node, up in sorted(rebooted.items()):
+        guests = per_node.pop(node, [])
+        down = [t for n, t, _ in singles if n == node]
+        body = f"Weer online sinds {_at(now, up)}."
+        if guests:
+            body += "\nDaarna opgestart:\n" + "\n".join(guests)
+        if down:
+            body += "\nNiet meer actief:\n" + "\n".join(t.removesuffix(" gestopt") for t in down)
+        notify(db, f"Node {node} is herstart", body, level="warn", source="herstart", service_id=svc.id,
+               data={"node": node, "uptime": up})
+    for node, lines in per_node.items():
+        for line in lines:
+            title, _, at = line.rpartition(" om ")
+            event(db, "herstart", title, f"Op {node}, om {at}.", service_id=svc.id)
+    for node, title, body in singles:
+        if node not in rebooted:
+            event(db, "herstart", title, body, service_id=svc.id)
+    if state:
+        state.value = cur
+    else:
+        db.add(AppState(key=key, value=cur))
 
 
 def forecast(points: list[tuple[float, float]], total: float | None) -> tuple[float | None, float | None]:
