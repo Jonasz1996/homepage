@@ -1,0 +1,24 @@
+[Unit]
+Description=homepage syslog-ontvanger (udp/tcp 514)
+After=network-online.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+User=homepage
+Group=homepage
+WorkingDirectory=/opt/homepage/backend
+EnvironmentFile=/etc/homepage/homepage.env
+ExecStart=/opt/homepage/.venv/bin/python -m app.syslog.server
+Restart=always
+RestartSec=5
+# Poort 514 is een systeempoort.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/homepage /etc/homepage
+
+[Install]
+WantedBy=multi-user.target
