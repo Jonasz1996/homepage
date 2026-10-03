@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Eén commando op een lege Debian 12/13-container (als root):
-#   apt update && apt install -y curl && bash <(curl -fsSL https://raw.githubusercontent.com/Jonasz1996/homepage/main/deploy/bootstrap.sh)
+#   apt update && apt install -y curl && bash <(curl -fsSL https://raw.githubusercontent.com/Jonasz1996/homepage/nieuwste/deploy/bootstrap.sh)
 # Haalt de code op (of werkt ze bij) in /opt/homepage en voert daarna deploy/install.sh uit.
-# Opnieuw uitvoeren = bijwerken. Andere branch: BRANCH=naam bash <(curl ...)
+# Opnieuw uitvoeren = bijwerken naar de nieuwste versie. Andere branch: BRANCH=naam bash <(curl ...)
 set -euo pipefail
 
 REPO="${REPO:-https://github.com/Jonasz1996/homepage}"
 APP_DIR=/opt/homepage
-# Zolang de PR's niet gemerged zijn, staat de code nog niet op main: dan deze branch gebruiken.
-FALLBACK_BRANCH=extras-3-capaciteit
+# Branch "nieuwste" volgt altijd de nieuwste (nog niet gemerge) versie. Bestaat die niet meer,
+# dan is alles in main gemerged.
+LATEST_BRANCH=nieuwste
 
 [ "$(id -u)" -eq 0 ] || { echo "Voer uit als root."; exit 1; }
 
@@ -21,16 +22,10 @@ has_app() { git ls-remote --exit-code "$REPO" "refs/heads/$1" >/dev/null 2>&1 \
   && curl -fsSL -o /dev/null "${REPO/github.com/raw.githubusercontent.com}/$1/deploy/install.sh"; }
 
 if [ -z "${BRANCH:-}" ]; then
-  if [ -d "$APP_DIR/.git" ]; then
-    BRANCH=$(git -C "$APP_DIR" rev-parse --abbrev-ref HEAD)
-    # Was het een tijdelijke branch die intussen in main zit, dan overschakelen naar main.
-    if [ "$BRANCH" != main ] && has_app main && ! git ls-remote --exit-code "$REPO" "refs/heads/$BRANCH" >/dev/null 2>&1; then
-      BRANCH=main
-    fi
-  elif has_app main; then
-    BRANCH=main
+  if has_app "$LATEST_BRANCH"; then
+    BRANCH=$LATEST_BRANCH
   else
-    BRANCH=$FALLBACK_BRANCH
+    BRANCH=main
   fi
 fi
 

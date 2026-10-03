@@ -125,10 +125,10 @@ Kies een x86-node (niet de Raspberry Pi).
 Eén commando als root in de lege container (installeert alles, haalt de code op en start de services):
 
 ```bash
-apt update && apt install -y curl && bash <(curl -fsSL https://raw.githubusercontent.com/Jonasz1996/homepage/extras-3-capaciteit/deploy/bootstrap.sh)
+apt update && apt install -y curl && bash <(curl -fsSL https://raw.githubusercontent.com/Jonasz1996/homepage/nieuwste/deploy/bootstrap.sh)
 ```
 
-Zolang de PR's niet gemerged zijn, neemt het script de branch `extras-3-capaciteit`; daarna `main`.
+Het script neemt de branch `nieuwste` (altijd de nieuwste versie, ook als die nog niet gemerged is); bestaat die niet meer, dan `main`.
 Hetzelfde commando opnieuw uitvoeren werkt alles bij.
 
 Het script toont op het einde de **setup-code** voor het eerste account.
