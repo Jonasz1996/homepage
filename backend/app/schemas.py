@@ -27,6 +27,7 @@ class ServiceIn(BaseModel):
     # None = ongewijzigd laten. Een sleutel met lege waarde wordt verwijderd.
     secrets: dict[str, str | None] | None = None
     parent_id: int | None = None
+    notes: str | None = Field(default=None, max_length=20000)
 
     @field_validator("url")
     @classmethod
@@ -51,6 +52,7 @@ class ServiceOut(BaseModel):
     config: dict
     parent_id: int | None = None
     maintenance_until: datetime | None = None
+    notes: str | None = None
     secret_keys: list[str] = []
 
 

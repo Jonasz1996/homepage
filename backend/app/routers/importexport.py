@@ -120,6 +120,7 @@ async def import_yaml(data: ImportIn, request: Request, user: User = Depends(cur
                     group_id=group.id, position=pos, name=str(s["name"])[:80],
                     description=s.get("description"), url=s.get("url"), icon=s.get("icon"),
                     type=s.get("type") or "link", check=s.get("check") or {}, config=s.get("config") or {},
+                    notes=str(s["notes"])[:20000] if s.get("notes") else None,
                     secrets=encrypt_json(s.get("secrets") or {}),
                 ))
                 n_services += 1
@@ -145,6 +146,7 @@ async def export_yaml(user: User = Depends(current_user), db: AsyncSession = Dep
                             {k: v for k, v in {
                                 "name": s.name, "url": s.url, "icon": s.icon, "description": s.description,
                                 "type": s.type, "check": s.check or None, "config": s.config or None,
+                                "notes": s.notes,
                             }.items() if v not in (None, "")}
                             for s in g.services
                         ],

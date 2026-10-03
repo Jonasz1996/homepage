@@ -1,12 +1,13 @@
 <script>
   import { onMount } from 'svelte'
-  import { api, poll } from './api.js'
+  import { api, poll, withReauth } from './api.js'
   import Card from './Card.svelte'
   import ImportDialog from './ImportDialog.svelte'
   import NameForm from './NameForm.svelte'
   import Notifications from './Notifications.svelte'
   import ReauthDialog from './ReauthDialog.svelte'
   import Revisions from './Revisions.svelte'
+  import Security from './Security.svelte'
   import ServiceForm from './ServiceForm.svelte'
   import ServiceDetail from './ServiceDetail.svelte'
   import ServiceTile from './ServiceTile.svelte'
@@ -55,9 +56,57 @@
     if (!q) return []
     return layout.pages
       .flatMap((p) => p.groups.flatMap((g) => g.services))
-      .filter((s) => [s.name, s.description, s.url].some((v) => v && v.toLowerCase().includes(q)))
+      .filter((s) => [s.name, s.description, s.url, s.notes].some((v) => v && v.toLowerCase().includes(q)))
       .slice(0, 40)
   })
+
+  // Snelle acties in de zoekbalk: commando's van het dashboard zelf en knoppen van de integraties.
+  const COMMANDS = [
+    { label: 'logs openen', run: () => openLogs() },
+    { label: 'terminal openen', run: () => openTerminal() },
+    { label: 'beveiliging: sessies en auditlog', run: () => (modal = { kind: 'security' }) },
+    { label: 'bewerken aan/uit', run: () => (editing = !editing) },
+  ]
+  let quick = $state([])
+  let quickAt = 0
+  let quickMsg = $state('')
+  let quickBusy = $state(false)
+  async function loadQuick() {
+    if (Date.now() - quickAt < 60000) return
+    quickAt = Date.now()
+    try { quick = await api('/actions') } catch { quickAt = 0 }
+  }
+  $effect(() => { if (query.trim()) loadQuick(); else quickMsg = '' })
+  let actionResults = $derived.by(() => {
+    const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
+    if (!words.length) return []
+    const hit = (text) => words.every((w) => text.toLowerCase().includes(w))
+    return [
+      ...COMMANDS.filter((c) => hit(c.label)).map((c) => ({ ...c, kind: 'cmd' })),
+      ...quick.filter((a) => hit(`${a.service} ${a.label} ${a.target || ''} ${a.id}`)).map((a) => ({ ...a, kind: 'act' })),
+    ].slice(0, 8)
+  })
+  async function runQuick(a) {
+    if (a.kind === 'cmd') {
+      query = ''
+      a.run()
+      return
+    }
+    const what = `${a.label} ${a.target || ''}`.trim()
+    if (a.confirm && !confirm(`${a.service}: ${what}?`)) return
+    quickBusy = true
+    try {
+      const r = await withReauth(() => api(`/services/${a.service_id}/integration/action`,
+        { method: 'POST', body: { action: a.id, params: a.params } }))
+      quickMsg = `✓ ${a.service}: ${r.message}`
+      quickAt = 0
+      setTimeout(() => { loadWidgets(); if (query.trim()) loadQuick() }, 1500)
+    } catch (e) {
+      quickMsg = `✕ ${a.service}: ${e.message}`
+    } finally {
+      quickBusy = false
+    }
+  }
   let summary = $derived.by(() => {
     const all = Object.values(status)
     const active = all.filter((s) => !s.maintenance_until)
@@ -248,7 +297,9 @@
     }
   }
   function searchKey(e) {
-    if (e.key === 'Enter' && results[0]?.url) window.open(results[0].url, '_blank', 'noopener')
+    if (e.key !== 'Enter') return
+    if (results[0]?.url) window.open(results[0].url, '_blank', 'noopener')
+    else if (actionResults[0]) runQuick(actionResults[0])
   }
 
   onMount(() => {
@@ -271,6 +322,7 @@
       <button class="mini" onclick={() => openLogs()} title="Logs van je machines">logs</button>
       <button class="mini" onclick={() => openTerminal()} title="SSH-terminal">&gt;_</button>
       <Notifications />
+      <button class="mini" onclick={() => (modal = { kind: 'security' })} title="Beveiliging: sessies, auditlog en wachtwoord">⚿</button>
       <button class="mini" class:on={editing} onclick={() => (editing = !editing)}>{editing ? '✓ klaar' : '✎ bewerken'}</button>
       <button class="mini x" onclick={logout} title="Uitloggen">⏻</button>
     {/snippet}
@@ -331,12 +383,23 @@
 
   {#if query.trim()}
     <Card title={`grep -i "${query.trim()}"`} class="results">
+      {#if actionResults.length || quickMsg}
+        <div class="acts">
+          {#each actionResults as a}
+            <button class="act" class:danger={a.danger} disabled={quickBusy} onclick={() => runQuick(a)}>
+              {#if a.kind === 'cmd'}<span class="src">dashboard</span>{a.label}
+              {:else}<span class="src">{a.service}</span>{a.label} <b>{a.target || ''}</b>{/if}
+            </button>
+          {/each}
+          {#if quickMsg}<span class="qmsg" class:bad={quickMsg.startsWith('✕')}>{quickMsg}</span>{/if}
+        </div>
+      {/if}
       <div class="tiles pad">
         {#each results as s (s.id)}
           <ServiceTile service={s} status={status[s.id]} widget={widgets[s.id]} {editing} onedit={(svc) => (modal = { kind: 'service', service: svc })}
                        ondetail={(svc) => (modal = { kind: 'detail', service: svc })} />
         {:else}
-          <p class="hint">Niets gevonden.</p>
+          {#if !actionResults.length}<p class="hint">Niets gevonden.</p>{/if}
         {/each}
       </div>
     </Card>
@@ -449,6 +512,8 @@
   />
 {:else if modal?.kind === 'import'}
   <ImportDialog pages={layout.pages} onclose={() => (modal = null)} ondone={load} />
+{:else if modal?.kind === 'security'}
+  <Security onclose={() => (modal = null)} />
 {:else if modal?.kind === 'revisions'}
   <Revisions onclose={() => (modal = null)} ondone={load} />
 {/if}
@@ -499,6 +564,16 @@
   .add.drop { border-color: var(--ok); color: var(--ok) }
   .none { margin: 0; padding: 6px }
   :global(.results), :global(.empty) { margin-top: 18px }
+  .acts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 12px 12px 0 }
+  .act { display: inline-flex; gap: 8px; align-items: baseline; padding: 6px 10px; border-radius: 9px; cursor: pointer;
+         background: var(--fill); border: 1px solid var(--line-2); color: var(--text); font-size: 12.5px }
+  .act:hover { background: var(--fill-h); color: #fff }
+  .act.danger:hover { border-color: var(--err); color: var(--err) }
+  .act:disabled { opacity: .5; cursor: progress }
+  .act .src { color: var(--muted); font-size: 11px }
+  .act b { font-weight: 500; color: var(--text-h) }
+  .qmsg { font-size: 12px; color: var(--ok); margin-left: 4px }
+  .qmsg.bad { color: var(--err) }
   @media (max-width: 560px) {
     .head { padding: 18px 16px 12px }
     .tabs, .tools { padding-left: 16px; padding-right: 16px }
