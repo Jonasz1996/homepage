@@ -44,6 +44,10 @@ class Session(Base):
     auth_at: Mapped[datetime] = mapped_column(default=utcnow)
     ip: Mapped[str | None] = mapped_column(String(64))
     user_agent: Mapped[str | None] = mapped_column(String(255))
+    # Landcode van Cloudflare (CF-IPCountry), alleen als het verzoek via NPM binnenkwam.
+    country: Mapped[str | None] = mapped_column(String(2))
+    # Hoogstens om de 5 minuten bijgewerkt, om niet bij elk verzoek te schrijven.
+    last_seen_at: Mapped[datetime | None]
 
     user: Mapped[User] = relationship(lazy="joined")
 
@@ -99,6 +103,8 @@ class Service(Base):
     parent_id: Mapped[int | None] = mapped_column(ForeignKey("services.id", ondelete="SET NULL"), index=True)
     # Onderhoud: geen meldingen en telt niet mee voor de uptime. Geldt ook voor wat ervan afhangt.
     maintenance_until: Mapped[datetime | None]
+    # Eigen notities in Markdown (wachtwoordloze uitleg, poorten, hoe herstellen, ...).
+    notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 
