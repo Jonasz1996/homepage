@@ -1,0 +1,70 @@
+from datetime import datetime, timedelta, timezone
+
+from fastapi import Depends, HTTPException, Request, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from .config import get_settings
+from .db import get_db
+from .models import AuditLog, Notification, Session, User
+from .security import token_id
+
+COOKIE = "hp_session"
+CSRF_HEADER = "x-requested-with"
+UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def client_ip(request: Request) -> str | None:
+    # uvicorn draait met --proxy-headers achter nginx, dus dit is het echte IP.
+    return request.client.host if request.client else None
+
+
+async def csrf_guard(request: Request) -> None:
+    """Een ander domein kan geen eigen header meesturen zonder CORS-toestemming,
+    dus deze header bewijst dat het verzoek van onze eigen frontend komt."""
+    if request.method in UNSAFE and request.headers.get(CSRF_HEADER) != "homepage":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "CSRF-header ontbreekt")
+
+
+async def optional_session(request: Request, db: AsyncSession = Depends(get_db)) -> Session | None:
+    token = request.cookies.get(COOKIE)
+    if not token:
+        return None
+    sess = await db.get(Session, token_id(token))
+    if sess is None:
+        return None
+    if sess.expires_at.replace(tzinfo=sess.expires_at.tzinfo or timezone.utc) < datetime.now(timezone.utc):
+        await db.delete(sess)
+        await db.commit()
+        return None
+    return sess
+
+
+async def current_session(sess: Session | None = Depends(optional_session)) -> Session:
+    if sess is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Niet ingelogd")
+    return sess
+
+
+async def current_user(sess: Session = Depends(current_session)) -> User:
+    """Volledig ingelogd: wachtwoord en TOTP zijn allebei gecontroleerd."""
+    if not (sess.mfa_ok and sess.user.totp_enabled):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "2FA vereist")
+    return sess.user
+
+
+async def recent_auth(sess: Session = Depends(current_session), user: User = Depends(current_user)) -> User:
+    """Voor gevoelige acties: wachtwoord of TOTP moet recent ingegeven zijn."""
+    limit = timedelta(minutes=get_settings().reauth_minutes)
+    auth_at = sess.auth_at.replace(tzinfo=sess.auth_at.tzinfo or timezone.utc)
+    if datetime.now(timezone.utc) - auth_at > limit:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "reauth_required")
+    return user
+
+
+async def audit(db: AsyncSession, request: Request, user: User | None, action: str, **detail) -> None:
+    db.add(AuditLog(user_id=user.id if user else None, action=action, detail=detail, ip=client_ip(request)))
+
+
+def notify(db: AsyncSession, title: str, body: str | None = None, level: str = "info",
+           source: str = "system", service_id: int | None = None) -> None:
+    db.add(Notification(title=title, body=body, level=level, source=source, service_id=service_id))
