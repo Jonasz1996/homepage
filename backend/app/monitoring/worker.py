@@ -12,12 +12,14 @@ from ..db import get_engine
 from ..models import Service
 from .checks import HttpClients, run_check
 from .engine import cleanup, housekeeping, record
+from .watchers import watch_npm
 
 log = logging.getLogger("homepage.worker")
 
 TICK = 5
 MIN_INTERVAL = 15
 PARALLEL = 20
+PERIODIC = 1800
 
 
 class Worker:
@@ -80,15 +82,31 @@ class Worker:
         finally:
             self.running.discard(sid)
 
+    async def periodic(self) -> None:
+        """Trage taken (externe API's) los van de checks, elk half uur."""
+        async with self.maker() as db:
+            await watch_npm(db, self.http)
+            await db.commit()
+
+    def spawn(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+        task.add_done_callback(lambda t: t.cancelled() or not t.exception() or
+                               log.error("achtergrondtaak mislukt", exc_info=t.exception()))
+
     async def run(self) -> None:
         await self.detect_timescale()
         last_cleanup = 0.0
+        # Eerste ronde na een minuut, daarna elk half uur.
+        last_periodic = time.monotonic() - PERIODIC + 60
         while True:
             try:
                 for sid, check, url in await self.due_services():
-                    task = asyncio.create_task(self.run_one(sid, check, url))
-                    self.tasks.add(task)
-                    task.add_done_callback(self.tasks.discard)
+                    self.spawn(self.run_one(sid, check, url))
+                if time.monotonic() - last_periodic > PERIODIC:
+                    last_periodic = time.monotonic()
+                    self.spawn(self.periodic())
                 if time.monotonic() - last_cleanup > 3600:
                     async with self.maker() as db:
                         if self.self_cleanup:

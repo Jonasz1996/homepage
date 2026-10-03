@@ -5,7 +5,7 @@
   import Modal from './Modal.svelte'
 
   // service = bestaande service, of null voor een nieuwe in groupId.
-  let { service = null, groupId, groups, onclose, onsaved } = $props()
+  let { service = null, groupId, groups, services = [], onclose, onsaved } = $props()
 
   // Formulier start met de huidige waarden; wijzigingen daarna komen van de gebruiker.
   const s = untrack(() => service) || {}
@@ -19,6 +19,15 @@
   let checkTarget = $state(s.check?.target || '')
   let checkInterval = $state(s.check?.interval || 60)
   let checkInsecure = $state(!!s.check?.insecure)
+  let keyword = $state(s.check?.keyword || '')
+  let keywordAbsent = $state(!!s.check?.keyword_absent)
+  let jsonPath = $state(s.check?.json_path || '')
+  let jsonValue = $state(s.check?.json_value ?? '')
+  let dnsServer = $state(s.check?.dns_server || '')
+  let dnsExpect = $state(s.check?.expect || '')
+  let parentId = $state(s.parent_id ?? null)
+  // Kandidaten voor "hangt af van": alles behalve zichzelf.
+  let parents = $derived(services.filter((x) => x.id !== s.id).sort((a, b) => a.name.localeCompare(b.name)))
   let configText = $state(s.config && Object.keys(s.config).length ? JSON.stringify(s.config, null, 2) : '')
   let secretKeys = $state([...(s.secret_keys || [])])
   let removed = $state([])
@@ -45,6 +54,10 @@
           target: checkTarget || null,
           interval: Math.max(15, Number(checkInterval) || 60),
           ...(checkType === 'http' && checkInsecure ? { insecure: true } : {}),
+          ...(checkType === 'http' && keyword.trim() ? { keyword: keyword.trim(), keyword_absent: keywordAbsent } : {}),
+          ...(checkType === 'http' && jsonPath.trim() ? { json_path: jsonPath.trim(), json_value: String(jsonValue).trim() } : {}),
+          ...(checkType === 'dns' && dnsServer.trim() ? { dns_server: dnsServer.trim() } : {}),
+          ...(checkType === 'dns' && dnsExpect.trim() ? { expect: dnsExpect.trim() } : {}),
         }
       : {}
     const secrets = {}
@@ -52,7 +65,7 @@
     for (const row of newSecrets) if (row.key.trim() && row.value) secrets[row.key.trim()] = row.value
     return {
       group_id, name, url: url || null, icon: icon || null, description: description || null,
-      type: type || 'link', check, config,
+      type: type || 'link', check, config, parent_id: parentId || null,
       secrets: Object.keys(secrets).length ? secrets : null,
     }
   }
@@ -131,6 +144,7 @@
             <option value="http">HTTP(S)</option>
             <option value="ping">ping</option>
             <option value="tcp">TCP-poort</option>
+            <option value="dns">DNS</option>
           </select>
         </div>
         <div>
@@ -140,13 +154,46 @@
         <div class="full">
           <label class="lbl" for="sf-target">Doel</label>
           <input id="sf-target" bind:value={checkTarget} disabled={!checkType}
-                 placeholder={checkType === 'tcp' ? 'leeg = host en poort uit de URL, of 192.168.0.10:22' : checkType === 'ping' ? 'leeg = host uit de URL, of 192.168.0.10' : 'leeg = de URL hierboven'} />
+                 placeholder={checkType === 'tcp' ? 'leeg = host en poort uit de URL, of 192.168.0.10:22' : checkType === 'ping' ? 'leeg = host uit de URL, of 192.168.0.10' : checkType === 'dns' ? 'leeg = naam uit de URL' : 'leeg = de URL hierboven'} />
         </div>
       </div>
       {#if checkType === 'http'}
         <label class="chk tls"><input type="checkbox" bind:checked={checkInsecure} /> certificaatfouten negeren (zelfondertekend, bv. Proxmox op :8006)</label>
+        <div class="grid">
+          <div>
+            <label class="lbl" for="sf-kw">Woord op de pagina (optioneel)</label>
+            <input id="sf-kw" bind:value={keyword} placeholder="bv. Jellyfin" />
+            <label class="chk"><input type="checkbox" bind:checked={keywordAbsent} disabled={!keyword.trim()} /> mag er juist niet staan</label>
+          </div>
+          <div>
+            <label class="lbl" for="sf-jp">JSON-veld (optioneel)</label>
+            <div class="row nowrap">
+              <input id="sf-jp" bind:value={jsonPath} placeholder="status.health" />
+              <input bind:value={jsonValue} placeholder="= ok" aria-label="Verwachte waarde" disabled={!jsonPath.trim()} />
+            </div>
+          </div>
+        </div>
+      {:else if checkType === 'dns'}
+        <div class="grid">
+          <div>
+            <label class="lbl" for="sf-dns">DNS-server (IP)</label>
+            <input id="sf-dns" bind:value={dnsServer} placeholder="leeg = systeem, bv. IP van AdGuard" />
+          </div>
+          <div>
+            <label class="lbl" for="sf-exp">Verwacht IP (optioneel)</label>
+            <input id="sf-exp" bind:value={dnsExpect} placeholder="192.168.0.245" />
+          </div>
+        </div>
       {/if}
-      <p class="help">Een service is pas down na 3 mislukte checks op rij. Je krijgt dan een melding.</p>
+      <div class="dep">
+        <label class="lbl" for="sf-parent">Hangt af van (draait op)</label>
+        <select id="sf-parent" bind:value={parentId}>
+          <option value={null}>niets</option>
+          {#each parents as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
+        </select>
+        <p class="help">Valt dit uit, dan krijg je één melding voor alles wat ervan afhangt, en onderhoud geldt voor allemaal.</p>
+      </div>
+      <p class="help">Een service is pas down na 3 mislukte checks op rij. Bij HTTPS wordt ook het certificaat gevolgd (melding 14 en 3 dagen vooraf).</p>
     </details>
 
     <details class="adv" open={type !== 'link' || secretKeys.length > 0}>
@@ -222,6 +269,7 @@
   .adv[open] summary::before { content: "▾ " }
   .secret { margin-bottom: 6px }
   .tls { margin-top: 10px }
+  .dep { margin-top: 10px }
   .ihelp div { padding-left: 10px }
   .ihelp code { color: #d6e6ff }
   .secret code { font-size: 12.5px; color: #d6e6ff }

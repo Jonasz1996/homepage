@@ -9,7 +9,8 @@ from .models import Group, Page, Revision, Service, User
 from .schemas import PageOut, ServiceOut
 from .security import decrypt_json
 
-SERVICE_FIELDS = ("id", "name", "description", "url", "icon", "position", "type", "check", "config", "secrets")
+SERVICE_FIELDS = ("id", "name", "description", "url", "icon", "position", "type", "check", "config", "secrets",
+                  "parent_id")
 
 
 async def load_pages(db: AsyncSession) -> list[Page]:
@@ -85,11 +86,19 @@ async def restore_snapshot(db: AsyncSession, snap: dict) -> None:
             await db.merge(Group(id=g["id"], page_id=p["id"], name=g["name"], icon=g.get("icon"),
                                  position=g["position"], collapsed=g.get("collapsed", False)))
     await db.flush()
+    parents = {}
     for p in snap["pages"]:
         for g in p["groups"]:
             for s in g["services"]:
                 service_ids.add(s["id"])
-                await db.merge(Service(group_id=g["id"], **{f: s.get(f) for f in SERVICE_FIELDS}))
+                parents[s["id"]] = s.get("parent_id")
+                fields = {f: s.get(f) for f in SERVICE_FIELDS if f != "parent_id"}
+                await db.merge(Service(group_id=g["id"], parent_id=None, **fields))
+    await db.flush()
+    # Afhankelijkheden pas zetten als alle services bestaan.
+    for sid, parent in parents.items():
+        if parent in service_ids:
+            (await db.get(Service, sid)).parent_id = parent
     await db.flush()
     # Eerst services, dan groepen, dan pagina's: wat verplaatst werd, hangt al onder de juiste ouder.
     await db.execute(delete(Service).where(Service.id.not_in(service_ids or {-1})))

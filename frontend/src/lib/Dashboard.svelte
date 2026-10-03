@@ -60,7 +60,12 @@
   })
   let summary = $derived.by(() => {
     const all = Object.values(status)
-    return { up: all.filter((s) => s.status === 'up').length, down: all.filter((s) => s.status === 'down').length }
+    const active = all.filter((s) => !s.maintenance_until)
+    return {
+      up: active.filter((s) => s.status === 'up').length,
+      down: active.filter((s) => s.status === 'down').length,
+      maint: all.length - active.length,
+    }
   })
   let greeting = $derived.by(() => {
     const h = now.getHours()
@@ -92,6 +97,12 @@
 
   async function loadStatus() {
     try { status = await api('/status') } catch { /* volgende poging over 30 s */ }
+  }
+  async function groupMaintenance(g) {
+    const v = prompt(`Hoeveel minuten onderhoud voor alle services in '${g.name}'? (0 = stoppen)`, '60')
+    if (v === null) return
+    await act(() => api(`/groups/${g.id}/maintenance`, { method: 'POST', body: { minutes: Math.max(0, parseInt(v, 10) || 0) } }))
+    await loadStatus()
   }
   async function loadWidgets() {
     try { widgets = await api('/widgets') } catch { /* volgende poging over 60 s */ }
@@ -269,7 +280,7 @@
         <p class="hint">
           {date}
           {#if summary.up + summary.down > 0}
-            {' · '}<span class="ok">{summary.up} up</span>{#if summary.down}{' · '}<span class="down">{summary.down} down</span>{/if}
+            {' · '}<span class="ok">{summary.up} up</span>{#if summary.down}{' · '}<span class="down">{summary.down} down</span>{/if}{#if summary.maint}{' · '}<span class="maint">{summary.maint} in onderhoud</span>{/if}
           {/if}<span class="cur"></span>
         </p>
       </div>
@@ -358,6 +369,9 @@
                 <button class="mini" onclick={() => (modal = { kind: 'service', service: null, groupId: g.id })}>+</button>
                 <button class="mini" onclick={() => (modal = { kind: 'group', group: g })}>✎</button>
               {/if}
+              {#if editing}
+                <button class="mini" onclick={() => groupMaintenance(g)} title="Onderhoud voor de hele groep">⏸</button>
+              {/if}
               <button class="mini fold" onclick={() => toggleGroup(g)} aria-label={g.collapsed ? 'Openklappen' : 'Dichtklappen'}>
                 {g.collapsed ? '▸' : '▾'} {g.services.length}
               </button>
@@ -404,6 +418,7 @@
     service={modal.service}
     groupId={modal.groupId}
     groups={groupOptions}
+    services={allServices}
     onclose={() => (modal = null)}
     onsaved={() => { load(); setTimeout(loadWidgets, 300) }}
   />
@@ -455,6 +470,7 @@
   .wrap { max-width: 1240px; margin: 0 auto; padding: min(4vh, 32px) 14px 50px }
   .clock { color: var(--text); margin-right: 4px }
   .down { color: var(--err) }
+  .maint { color: var(--mid) }
   .head { display: flex; gap: 18px; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; padding-bottom: 12px }
   .hello .hint { margin: 6px 0 0 }
   .search { max-width: 340px }

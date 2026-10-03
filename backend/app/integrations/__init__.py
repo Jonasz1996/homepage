@@ -11,4 +11,17 @@ REGISTRY: dict[str, type[Integration]] = {
     cls.name: cls for cls in (Proxmox, ProxmoxBackupServer, AdGuard, NginxProxyManager, JsonApi, CustomApi)
 }
 
-__all__ = ["REGISTRY", "Integration", "IntegrationError"]
+
+
+def build(service, clients) -> Integration:
+    """Integratie-object voor een service, met de gedeelde HTTP-clients (zie monitoring/checks.py)."""
+    from ..security import decrypt_json
+
+    cls = REGISTRY.get(service.type)
+    if cls is None:
+        raise IntegrationError(f"Geen integratie voor type '{service.type}'")
+    client = clients.get(bool((service.config or {}).get("insecure")))
+    return cls(service.url, service.config or {}, decrypt_json(service.secrets), client)
+
+
+__all__ = ["REGISTRY", "Integration", "IntegrationError", "build"]

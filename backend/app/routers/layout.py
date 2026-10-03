@@ -114,9 +114,24 @@ def _apply_secrets(service: Service, secrets: dict[str, str | None] | None) -> N
     service.secrets = encrypt_json(current)
 
 
+async def _check_parent(db: AsyncSession, service_id: int | None, parent_id: int | None) -> None:
+    """Afhankelijkheid moet bestaan en mag geen kring vormen (A hangt af van B, B van A)."""
+    seen = {service_id} if service_id else set()
+    cur = parent_id
+    while cur:
+        if cur in seen:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Deze afhankelijkheid maakt een kring")
+        seen.add(cur)
+        parent = await db.get(Service, cur)
+        if parent is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Service voor afhankelijkheid bestaat niet")
+        cur = parent.parent_id
+
+
 @router.post("/services", status_code=201)
 async def create_service(data: ServiceIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     await _get(db, Group, data.group_id)
+    await _check_parent(db, None, data.parent_id)
     service = Service(**data.model_dump(exclude={"secrets"}),
                       position=await _next_position(db, Service.position, Service.group_id, data.group_id))
     _apply_secrets(service, data.secrets)
@@ -135,6 +150,7 @@ async def get_service(service_id: int, user: User = Depends(current_user), db: A
 async def update_service(service_id: int, data: ServiceIn, request: Request,
                          user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     service = await _get(db, Service, service_id)
+    await _check_parent(db, service_id, data.parent_id)
     if data.group_id != service.group_id:
         await _get(db, Group, data.group_id)
         service.position = await _next_position(db, Service.position, Service.group_id, data.group_id)
