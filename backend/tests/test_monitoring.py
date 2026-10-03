@@ -110,3 +110,22 @@ async def test_restore_keeps_history(authed):
     await authed.post(f"/api/revisions/{rev}/restore")
     h = (await authed.get(f"/api/services/{sid}/history?range=1h")).json()
     assert h["checks"] == 1
+
+
+async def test_housekeeping_removes_old_rows(authed):
+    from sqlalchemy import func, select
+
+    from app.models import Notification
+    from app.monitoring.engine import housekeeping
+
+    agen = app.dependency_overrides[get_db]()
+    db = await agen.__anext__()
+    old = datetime.now(timezone.utc) - timedelta(days=40)
+    db.add(Notification(title="oud", ts=old, read_at=old))
+    db.add(Notification(title="oud maar ongelezen", ts=old))
+    await db.commit()
+    await housekeeping(db)
+    await db.commit()
+    titles = (await db.execute(select(Notification.title))).scalars().all()
+    assert "oud" not in titles and "oud maar ongelezen" in titles
+    await agen.aclose()

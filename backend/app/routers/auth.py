@@ -200,5 +200,6 @@ async def logout(request: Request, response: Response, sess: Session | None = De
         await audit(db, request, sess.user, "logout")
         await db.delete(sess)
         await db.commit()
+    request.state.renew_cookie = None
     response.delete_cookie(COOKIE, path="/")
     return {"ok": True}

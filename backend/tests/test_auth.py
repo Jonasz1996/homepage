@@ -82,3 +82,27 @@ async def test_password_change(authed):
     code = pyotp.TOTP(authed.totp_secret).now()
     r = await authed.post("/api/auth/login", json={"username": "jonas", "password": PASSWORD, "code": code})
     assert r.status_code == 401
+
+
+async def test_session_slides_when_half_expired(authed):
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import select, update
+
+    from app.db import get_db
+    from app.main import app
+    from app.models import Session
+
+    agen = app.dependency_overrides[get_db]()
+    db = await agen.__anext__()
+    soon = datetime.now(timezone.utc) + timedelta(days=2)
+    await db.execute(update(Session).values(expires_at=soon))
+    await db.commit()
+    r = await authed.get("/api/layout")
+    assert r.status_code == 200
+    assert "hp_session" in r.headers.get("set-cookie", "")
+    db.expire_all()
+    exp = (await db.execute(select(Session.expires_at))).scalar_one()
+    exp = exp if exp.tzinfo else exp.replace(tzinfo=timezone.utc)
+    assert exp > datetime.now(timezone.utc) + timedelta(days=13)
+    await agen.aclose()
