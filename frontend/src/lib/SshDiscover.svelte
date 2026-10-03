@@ -51,6 +51,11 @@
     <p class="hint">Proxmox bevragen…</p>
   {:else}
     {#each data.errors as e}<p class="e">{e.service}: {e.error}</p>{/each}
+    {#if data.errors.length}
+      <p class="hint small">Token of url aanpassen: ✎ bewerken → klik op de Proxmox-tegel → url (bv. <code>https://192.168.0.50:8006</code>),
+        insecure <code>true</code>, geheimen <code>username</code> = token-id (<code>homepage@pve!dashboard</code>) en
+        <code>password</code> = het token-geheim. Bij een cluster volstaat één tegel.</p>
+    {/if}
     {#if !data.items.length}
       <p class="hint">Niets gevonden. Voeg eerst een Proxmox-tegel toe (type <b>proxmox</b> met een API-token).</p>
     {/if}
