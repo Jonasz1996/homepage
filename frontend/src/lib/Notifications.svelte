@@ -77,7 +77,7 @@
   .bell.has { color: var(--mid) }
   .bell b { margin-left: 4px; color: var(--text-h); font-size: 11px }
   .panel {
-    position: fixed; top: 64px; right: max(14px, calc((100vw - 1240px) / 2 + 14px)); width: min(380px, calc(100vw - 28px));
+    position: fixed; top: 64px; right: 14px; width: min(380px, calc(100vw - 28px));
     z-index: 70; white-space: normal; padding: 10px; color: var(--text); text-align: left
   }
   .head { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; font-size: 12px; color: var(--muted) }

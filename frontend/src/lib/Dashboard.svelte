@@ -605,7 +605,8 @@
 <ReauthDialog />
 
 <style>
-  .wrap { max-width: 1240px; margin: 0 auto; padding: min(4vh, 32px) 14px 50px }
+  /* Volle schermbreedte; op brede schermen komen er gewoon meer groepen naast elkaar. */
+  .wrap { padding: min(4vh, 32px) clamp(14px, 2vw, 36px) 50px }
   .clock { color: var(--text); margin-right: 4px }
   .n { margin-left: 5px; color: var(--text-h); font-size: 11px; font-weight: 500 }
   .upd .n { color: var(--mid) }
