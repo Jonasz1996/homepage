@@ -22,8 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..deps import event
 from ..integrations import IntegrationError, build
-from ..models import AppState, Service, SshHost, SshKey
-from ..security import decrypt
+from ..models import AppState, Service, SshHost
+from ..ssh_login import Login, defaults, login_for
 from .checks import HttpClients
 
 log = logging.getLogger("homepage.worker")
@@ -190,20 +190,18 @@ async def from_opnsense(svc: Service, clients: HttpClients) -> list[dict]:
     return [t]
 
 
-async def from_ssh(h: SshHost, private_key: str | None) -> list[dict]:
+async def from_ssh(h: SshHost, login: Login) -> list[dict]:
     key = f"ssh:{h.id}"
     if not h.host_key:
         return [target(key, h.name, "host", h.service_id,
                        error="Open eerst één keer een terminal naar deze host om de hostsleutel te bevestigen")]
-    client_key = asyncssh.import_private_key(decrypt(private_key)) if private_key else None
-    command = "sh -s" if h.username == "root" else "sudo -n sh -s"
+    command = "sh -s" if login.username == "root" else "sudo -n sh -s"
     try:
         async with asyncio.timeout(SSH_TIMEOUT):
             async with asyncssh.connect(
-                h.host, port=h.port, username=h.username,
+                h.host, port=h.port, username=login.username,
                 known_hosts=([asyncssh.import_public_key(h.host_key)], [], []),
-                client_keys=[client_key] if client_key else None,
-                password=decrypt(h.password) if h.password else None,
+                client_keys=[login.key] if login.key else None, password=login.password,
                 agent_path=None, config=None, connect_timeout=10,
             ) as conn:
                 result = await conn.run(command, input=script(h.updates == "cts"), check=False)
@@ -229,10 +227,11 @@ async def collect(db: AsyncSession, clients: HttpClients) -> list[dict]:
     services = (await db.execute(select(Service).where(
         Service.type.in_(("proxmox", "proxmoxbackupserver", "portainer", "opnsense"))))).scalars().all()
     hosts = (await db.execute(select(SshHost).where(SshHost.updates.in_(("host", "cts"))))).scalars().all()
-    keys = {k.id: k.private_key for k in (await db.execute(select(SshKey))).scalars()}
+    d = await defaults(db)
+    logins = {h.id: await login_for(db, h, d) for h in hosts}
     fetch = {"proxmox": from_proxmox, "proxmoxbackupserver": from_pbs, "portainer": from_portainer,
              "opnsense": from_opnsense}
-    jobs = [fetch[s.type](s, clients) for s in services] + [from_ssh(h, keys.get(h.key_id)) for h in hosts]
+    jobs = [fetch[s.type](s, clients) for s in services] + [from_ssh(h, logins[h.id]) for h in hosts]
     names = [s.name for s in services] + [h.name for h in hosts]
     out: list[dict] = []
     seen_nodes: set[str] = set()

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from ..db import get_engine
 from ..models import Service
+from ..ssh_discovery import SYNC_EVERY, auto_sync
 from .checks import HttpClients, run_check
 from .engine import cleanup, housekeeping, record
 from .capacity import SAMPLE_EVERY, check_forecasts, sample
@@ -122,6 +123,14 @@ class Worker:
             await check_forecasts(db)
             await db.commit()
 
+    async def ssh_sync(self) -> None:
+        """Elk half uur, als het aan staat: nieuwe machines uit Proxmox in de terminal en IP's bijwerken."""
+        async with self.maker() as db:
+            result = await auto_sync(db, self.http)
+            await db.commit()
+            if result and (result["added"] or result["updated"]):
+                log.info("SSH-hosts uit Proxmox: %(added)s nieuw, %(updated)s bijgewerkt", result)
+
     def spawn(self, coro) -> None:
         task = asyncio.create_task(coro)
         self.tasks.add(task)
@@ -139,6 +148,7 @@ class Worker:
         # Netwerk en publiek IP meteen bij de start.
         last_network = time.monotonic() - NETWORK_EVERY - 1
         last_ip = time.monotonic() - PUBLIC_IP_EVERY - 1
+        last_ssh = time.monotonic() - SYNC_EVERY + 120
         while True:
             try:
                 for sid, check, url in await self.due_services():
@@ -158,6 +168,9 @@ class Worker:
                 if time.monotonic() - last_updates > UPDATES_EVERY:
                     last_updates = time.monotonic()
                     self.spawn(self.updates())
+                if time.monotonic() - last_ssh > SYNC_EVERY:
+                    last_ssh = time.monotonic()
+                    self.spawn(self.ssh_sync())
                 if time.monotonic() - last_cleanup > 3600:
                     async with self.maker() as db:
                         if self.self_cleanup:
