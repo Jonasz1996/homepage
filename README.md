@@ -3,7 +3,7 @@
 Eigen homelab-dashboard in de stijl van aiverslag: een vervanger voor homepage.dev
 waarin je alles vanuit de browser beheert.
 
-Dit is fase 1 en 2 van het [stappenplan](https://claude.ai/code/artifact/fe2b226c-d5ef-4cef-9b02-6047fcc63504):
+Fase 1 en 2 van het [stappenplan](https://claude.ai/code/artifact/fe2b226c-d5ef-4cef-9b02-6047fcc63504):
 
 - inloggen met wachtwoord en verplichte 2FA (TOTP), eerste account via een eenmalige setup-code
 - pagina's, groepen en services, aanpasbaar in een edit mode met slepen
@@ -21,6 +21,38 @@ Fase 3, monitoring:
   verstoringen en de laatste checks, over 1 u, 24 u, 7 d, 30 d of 1 jaar
 - melding in het meldingencentrum als een service down gaat (na 3 mislukte checks) en weer terugkomt
 - historiek: met TimescaleDB 1 jaar (gecomprimeerd na 7 dagen), zonder TimescaleDB 90 dagen
+
+Fase 4, integraties (type van de service kiezen onder **bewerken → Integratie en API**):
+
+| Type | Op de tegel | In het mini dashboard |
+| --- | --- | --- |
+| `proxmox` | VM's en containers aan, CPU, RAM, offline nodes | nodes, opslag, alle VM's/CT's met start, afsluiten, herstart, forceer stop |
+| `proxmoxbackupserver` | opslag, mislukte taken, oudste back-up | datastores met verwachte "vol"-datum, laatste back-up per VM/CT, mislukte taken |
+| `adguard` | verzoeken, % geblokkeerd, latency, bescherming | top geblokkeerde domeinen en clients, bescherming aan/uit |
+| `npm` | aantal hosts, eerstvolgende vervaldatum certificaat | certificaten, proxy hosts, **import van proxy hosts als tegels** |
+| `json` / `customapi` | zelfgekozen velden uit een JSON-API | dezelfde velden plus het ruwe antwoord |
+
+Acties (VM herstarten, AdGuard uitzetten, ...) vragen je 2FA-code als je langer dan 15 minuten
+niet bevestigd hebt, en komen in de audit-log en het meldingencentrum. Widgets uit je homepage.dev-import
+gebruiken dezelfde namen (`url`, `username`, `password`) en werken meteen zodra de geheimen kloppen.
+
+Een token voor Proxmox VE (op een node, alleen-lezen plus aan/uitzetten):
+
+```bash
+pveum user add homepage@pve
+pveum aclmod / -user homepage@pve -role PVEAuditor
+pveum role add HomepagePower -privs VM.PowerMgmt && pveum aclmod /vms -user homepage@pve -role HomepagePower
+pveum user token add homepage@pve dashboard --privsep 0
+```
+
+Gebruik `homepage@pve!dashboard` als `username` en het getoonde geheim als `password`.
+Voor PBS (alleen lezen):
+
+```bash
+proxmox-backup-manager user create homepage@pbs
+proxmox-backup-manager user generate-token homepage@pbs dashboard
+proxmox-backup-manager acl update / Audit --auth-id 'homepage@pbs!dashboard'
+```
 
 Optimalisaties:
 

@@ -1,11 +1,12 @@
 <script>
   import { onMount } from 'svelte'
   import { api, poll } from './api.js'
+  import IntegrationPanel from './IntegrationPanel.svelte'
   import LatencyChart from './LatencyChart.svelte'
   import Modal from './Modal.svelte'
 
-  // Mini dashboard van één service. Later komen hier ook de API-gegevens van de integratie.
-  let { service, onclose, onedit } = $props()
+  // Mini dashboard van één service: gegevens van de integratie en de monitoring-historiek.
+  let { service, groups = [], onclose, onedit, onchanged } = $props()
 
   const RANGES = ['1h', '24h', '7d', '30d', '1y']
   let range = $state('24h')
@@ -54,6 +55,10 @@
     </div>
     <button class="mini" onclick={() => onedit(service)}>✎ bewerken</button>
   </div>
+
+  {#if service.type && service.type !== 'link'}
+    <IntegrationPanel {service} {groups} {onchanged} />
+  {/if}
 
   {#if !service.check?.type}
     <p class="hint">Voor deze service staat nog geen monitoring aan. Kies onder <b>bewerken → Monitoring</b> een check.</p>
