@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte'
   import { api, poll, withReauth } from './api.js'
+  import { boom, fxEnabled, flash, RED, setFx, storm } from './fx.js'
   import Capacity from './Capacity.svelte'
   import Card from './Card.svelte'
   import History from './History.svelte'
@@ -78,6 +79,7 @@
     { label: 'updates: openstaande pakketten en images', run: () => (modal = { kind: 'updates' }) },
     { label: 'netwerk: publiek ip, wan, tunnels, wake-on-lan', run: () => (modal = { kind: 'network' }) },
     { label: 'bewerken aan/uit', run: () => (editing = !editing) },
+    { label: 'effecten aan/uit (vuur, bliksem, ...)', run: () => { setFx(!fxEnabled()); if (fxEnabled()) storm() } },
   ]
   let quick = $state([])
   let quickAt = 0
@@ -112,10 +114,12 @@
         ? api(a.endpoint, { method: 'POST' })
         : api(`/services/${a.service_id}/integration/action`, { method: 'POST', body: { action: a.id, params: a.params } })))
       quickMsg = `✓ ${a.service}: ${r.message}`
+      storm()
       quickAt = 0
       setTimeout(() => { loadWidgets(); if (query.trim()) loadQuick() }, 1500)
     } catch (e) {
       quickMsg = `✕ ${a.service}: ${e.message}`
+      flash(RED)
     } finally {
       quickBusy = false
     }
@@ -208,8 +212,9 @@
   }
 
   async function logout() {
+    boom()
     await api('/auth/logout', { method: 'POST' })
-    onlogout()
+    setTimeout(onlogout, fxEnabled() ? 600 : 0)
   }
 
   // --- Pagina's en groepen -------------------------------------------------
@@ -221,6 +226,7 @@
   }
   const deletePage = (p) => async () => {
     await api(`/pages/${p.id}`, { method: 'DELETE' })
+    boom(undefined, 1.6)
     await load()
   }
   const saveGroup = (g) => async (data) => {
@@ -231,6 +237,7 @@
   }
   const deleteGroup = (g) => async () => {
     await api(`/groups/${g.id}`, { method: 'DELETE' })
+    boom(undefined, 1.4)
     await load()
   }
   function toggleGroup(g) {

@@ -1,4 +1,5 @@
 <script>
+  import { bolt, boom, sparkle } from './fx.js'
   import { onMount } from 'svelte'
   import { api, poll } from './api.js'
 
@@ -10,8 +11,17 @@
 
   const fmt = (ts) => new Date(ts).toLocaleString('nl-BE', { dateStyle: 'short', timeStyle: 'short' })
 
+  let bell = $state()
+  let seen = null
   async function load() {
-    try { data = await api('/notifications') } catch { /* stil falen, volgende poging komt */ }
+    try {
+      data = await api('/notifications')
+      // Nieuwe storing binnen: een bliksem op het belletje (niet bij het eerste laden).
+      const newest = data.items[0]
+      if (seen !== null && newest && newest.id > seen && !newest.read && newest.level === 'err') bolt(bell)
+      if (newest) seen = Math.max(seen ?? 0, newest.id)
+      else seen ??= 0
+    } catch { /* stil falen, volgende poging komt */ }
   }
 
   async function toggle() {
@@ -28,11 +38,13 @@
   }
 
   async function readAll() {
+    sparkle()
     await api('/notifications/read-all', { method: 'POST' })
     await load()
   }
 
   async function clearRead() {
+    boom(undefined, 0.8)
     await api('/notifications', { method: 'DELETE' })
     await load()
   }
@@ -44,7 +56,7 @@
 </script>
 
 <span class="wrapn">
-  <button class="mini bell" class:has={data.unread > 0} onclick={toggle} aria-label="Meldingen" aria-expanded={open}>
+  <button bind:this={bell} class="mini bell" class:has={data.unread > 0} onclick={toggle} aria-label="Meldingen" aria-expanded={open}>
     ◉{#if data.unread > 0}<b>{data.unread}</b>{/if}
   </button>
   {#if open}

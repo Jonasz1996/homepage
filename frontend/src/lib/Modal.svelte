@@ -25,7 +25,7 @@
     position: fixed; inset: 0; z-index: 65; display: flex; align-items: flex-start; justify-content: center;
     padding: 6vh 14px; background: rgba(0, 0, 0, .6); overflow: auto;
   }
-  .box { width: 100%; max-width: 640px }
+  .box { width: 100%; max-width: 640px; transition: transform .15s ease-out }
   .box.wide { max-width: 860px }
   /* Op de gsm schermvullend, met ruimte voor de notch en de navigatiebalk. */
   @media (max-width: 600px) {

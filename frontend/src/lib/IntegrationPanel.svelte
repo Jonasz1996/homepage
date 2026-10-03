@@ -1,4 +1,5 @@
 <script>
+  import { storm } from './fx.js'
   import { onMount } from 'svelte'
   import { ApiError, api, poll } from './api.js'
   import { bytes, value } from './format.js'
@@ -39,6 +40,7 @@
       const r = await api(`/services/${service.id}/integration/action`, { method: 'POST', body: { action: a.id, params: a.params } })
       msg = r.message
       pending = null
+      storm()
       setTimeout(load, 1500)
     } catch (e) {
       if (e instanceof ApiError && e.status === 403 && e.message === 'reauth_required') pending = a
