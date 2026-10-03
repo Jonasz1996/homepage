@@ -1,4 +1,5 @@
 <script>
+  import { storm } from './fx.js'
   import { onMount, untrack } from 'svelte'
   import { api, poll, withReauth } from './api.js'
   import IntegrationPanel from './IntegrationPanel.svelte'
@@ -22,6 +23,7 @@
     if (!confirm(`${service.name} wekken met Wake-on-LAN?`)) return
     try {
       wolMsg = '✓ ' + (await withReauth(() => api(`/services/${service.id}/wol`, { method: 'POST' }))).message
+      storm()
     } catch (e) { wolMsg = '✕ ' + e.message }
   }
 

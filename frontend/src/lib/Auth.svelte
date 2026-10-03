@@ -18,6 +18,15 @@
   let error = $state('')
   let enroll = $state(null)
 
+  // Inloggen via Authentik: knop als het aan staat; een fout komt terug als ?login_error=...
+  let sso = $state({ enabled: false, label: 'Authentik' })
+  api('/auth/oidc').then((r) => (sso = r)).catch(() => {})
+  const params = new URLSearchParams(location.search)
+  if (params.has('login_error')) {
+    error = params.get('login_error')
+    history.replaceState(null, '', location.pathname)
+  }
+
   async function run(fn) {
     busy = true
     error = ''
@@ -120,6 +129,10 @@
             {/if}
           </div>
         </form>
+        {#if sso.enabled && !needCode}
+          <div class="or"><span>of</span></div>
+          <a class="btn alt sso" href="/api/auth/oidc/start">Inloggen met {sso.label}</a>
+        {/if}
       {/if}
     </div>
   </Card>
@@ -130,4 +143,7 @@
   .qr { display: flex; justify-content: center; margin: 6px 0 4px }
   .qr :global(svg) { width: 220px; height: 220px }
   form .btn { margin-top: 4px }
+  .or { display: flex; align-items: center; gap: 10px; color: var(--dim); font-size: 11.5px; margin: 16px 0 10px }
+  .or::before, .or::after { content: ''; flex: 1; height: 1px; background: var(--line) }
+  .sso { display: block; text-align: center; text-decoration: none }
 </style>

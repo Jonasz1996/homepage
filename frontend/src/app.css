@@ -99,6 +99,7 @@ h3 { margin: 0 0 4px; font-size: 16px; color: var(--text-h) }
 .btn.danger:hover { background: #a84a4a }
 .btn:disabled { opacity: .5; cursor: default }
 .mini {
+  position: relative; overflow: hidden;
   background: rgba(255, 255, 255, .07); border: 1px solid rgba(255, 255, 255, .12); color: var(--text);
   font-size: 12.5px; padding: 5px 10px; border-radius: 7px; cursor: pointer; transition: color .2s, background .2s;
 }
@@ -125,4 +126,27 @@ pre {
 .err { color: var(--err); font-size: 12.5px; min-height: 1.2em }
 .ok { color: var(--ok) }
 
+/* Speciale effecten (lib/fx.js) */
+#fx { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 95 }
+#flash { position: fixed; inset: 0; pointer-events: none; z-index: 94; opacity: 0 }
+.rip { position: absolute; border-radius: 50%; background: rgba(255, 255, 255, .45); transform: scale(0);
+       animation: rip .6s ease-out forwards; pointer-events: none }
+@keyframes rip { to { transform: scale(4); opacity: 0 } }
+main.wrap.shk { animation: shk .45s }
+@keyframes shk {
+  10% { transform: translate(-9px, 5px) } 30% { transform: translate(8px, -6px) } 50% { transform: translate(-6px, -4px) }
+  70% { transform: translate(5px, 5px) } 90% { transform: translate(-2px, 1px) }
+}
+.zap { animation: zap .3s steps(6) forwards }
+@keyframes zap { 0% { background: #fff; color: #000 } 50% { background: #9cc9ff } 100% { opacity: 0; transform: scale(.96) } }
+
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important } }
+
+/* Gsm en Android-app: niet onder de notch of de navigatiebalk, en geen blauwe tik-flits. */
+body { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left) }
+a, button { -webkit-tap-highlight-color: transparent }
+@media (max-width: 560px) {
+  .body { padding: 16px }
+  input, select, textarea { font-size: 16px } /* iOS zoomt anders in bij elk veld */
+}
+

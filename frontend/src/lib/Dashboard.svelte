@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte'
   import { api, poll, withReauth } from './api.js'
+  import { boom, fxEnabled, flash, RED, setFx, storm } from './fx.js'
   import Capacity from './Capacity.svelte'
   import Card from './Card.svelte'
   import History from './History.svelte'
@@ -31,6 +32,7 @@
   let widgets = $state({})
   let updates = $state({ total: 0, security: 0, by_service: {} })
   let net = $state(null)
+  let menuOpen = $state(false)
   let termOpen = $state(false)
   let termUsed = $state(false)
   let termRequest = $state(null)
@@ -77,6 +79,7 @@
     { label: 'updates: openstaande pakketten en images', run: () => (modal = { kind: 'updates' }) },
     { label: 'netwerk: publiek ip, wan, tunnels, wake-on-lan', run: () => (modal = { kind: 'network' }) },
     { label: 'bewerken aan/uit', run: () => (editing = !editing) },
+    { label: 'effecten aan/uit (vuur, bliksem, ...)', run: () => { setFx(!fxEnabled()); if (fxEnabled()) storm() } },
   ]
   let quick = $state([])
   let quickAt = 0
@@ -111,10 +114,12 @@
         ? api(a.endpoint, { method: 'POST' })
         : api(`/services/${a.service_id}/integration/action`, { method: 'POST', body: { action: a.id, params: a.params } })))
       quickMsg = `✓ ${a.service}: ${r.message}`
+      storm()
       quickAt = 0
       setTimeout(() => { loadWidgets(); if (query.trim()) loadQuick() }, 1500)
     } catch (e) {
       quickMsg = `✕ ${a.service}: ${e.message}`
+      flash(RED)
     } finally {
       quickBusy = false
     }
@@ -207,8 +212,9 @@
   }
 
   async function logout() {
+    boom()
     await api('/auth/logout', { method: 'POST' })
-    onlogout()
+    setTimeout(onlogout, fxEnabled() ? 600 : 0)
   }
 
   // --- Pagina's en groepen -------------------------------------------------
@@ -220,6 +226,7 @@
   }
   const deletePage = (p) => async () => {
     await api(`/pages/${p.id}`, { method: 'DELETE' })
+    boom(undefined, 1.6)
     await load()
   }
   const saveGroup = (g) => async (data) => {
@@ -230,6 +237,7 @@
   }
   const deleteGroup = (g) => async () => {
     await api(`/groups/${g.id}`, { method: 'DELETE' })
+    boom(undefined, 1.4)
     await load()
   }
   function toggleGroup(g) {
@@ -337,7 +345,21 @@
     else if (actionResults[0]) runQuick(actionResults[0])
   }
 
+  // Snelkoppelingen van de app (manifest) en de Android-app: /?open=history, updates, network, ...
+  function openFromUrl() {
+    const q = new URLSearchParams(location.search)
+    const what = q.get('open')
+    if (!what) return
+    history.replaceState(null, '', location.pathname)
+    const kinds = { history: 'history', report: 'history', updates: 'updates', network: 'network', capacity: 'capacity',
+                    security: 'security' }
+    if (what === 'logs') openLogs()
+    else if (what === 'terminal') openTerminal()
+    else if (kinds[what]) modal = { kind: kinds[what], tab: what === 'report' ? 'report' : undefined }
+  }
+
   onMount(() => {
+    openFromUrl()
     load()
     loadStatus()
     loadWidgets()
@@ -358,17 +380,22 @@
   <Card title="homepage" glow>
     {#snippet right()}
       <span class="clock">{clock}</span>
-      <button class="mini" onclick={() => openLogs()} title="Logs van je machines">logs</button>
-      <button class="mini" onclick={() => openTerminal()} title="SSH-terminal">&gt;_</button>
-      <button class="mini" onclick={() => (modal = { kind: 'capacity' })} title="Capaciteit: opslag, cpu en ram">df</button>
-      <button class="mini" onclick={() => (modal = { kind: 'network' })} title="Internet: publiek IP, WAN, tunnels, Wake-on-LAN">net{#if netLevel}<i class="nd {netLevel}"></i>{/if}</button>
-      <button class="mini" onclick={() => (modal = { kind: 'history' })} title="Tijdlijn en weekrapport">history</button>
-      <button class="mini" class:upd={updates.security} onclick={() => (modal = { kind: 'updates' })}
-              title="Openstaande updates">apt{#if updates.total}<b class="n">{updates.total}</b>{/if}</button>
       <Notifications onopen={openNotification} />
-      <button class="mini" onclick={() => (modal = { kind: 'security' })} title="Beveiliging: sessies, auditlog en wachtwoord">⚿</button>
-      <button class="mini" class:on={editing} onclick={() => (editing = !editing)}>{editing ? '✓ klaar' : '✎ bewerken'}</button>
-      <button class="mini x" onclick={logout} title="Uitloggen">⏻</button>
+      <button class="mini burger" class:on={menuOpen} onclick={() => (menuOpen = !menuOpen)} aria-label="Menu" aria-expanded={menuOpen}>☰</button>
+      <!-- Op de gsm klapt dit open onder ☰; op een groot scherm staan de knoppen gewoon in de titelbalk. -->
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <span class="menu" class:open={menuOpen} onclick={() => (menuOpen = false)}>
+        <button class="mini" onclick={() => openLogs()} title="Logs van je machines">logs</button>
+        <button class="mini" onclick={() => openTerminal()} title="SSH-terminal">&gt;_<span class="ml">terminal</span></button>
+        <button class="mini" onclick={() => (modal = { kind: 'capacity' })} title="Capaciteit: opslag, cpu en ram">df<span class="ml">capaciteit, stroom</span></button>
+        <button class="mini" onclick={() => (modal = { kind: 'network' })} title="Internet: publiek IP, WAN, tunnels, Wake-on-LAN">net{#if netLevel}<i class="nd {netLevel}"></i>{/if}</button>
+        <button class="mini" onclick={() => (modal = { kind: 'history' })} title="Tijdlijn en weekrapport">history</button>
+        <button class="mini" class:upd={updates.security} onclick={() => (modal = { kind: 'updates' })}
+                title="Openstaande updates">apt{#if updates.total}<b class="n">{updates.total}</b>{/if}</button>
+        <button class="mini" onclick={() => (modal = { kind: 'security' })} title="Beveiliging: sessies, auditlog en wachtwoord">⚿<span class="ml">beveiliging</span></button>
+        <button class="mini" class:on={editing} onclick={() => (editing = !editing)}>{editing ? '✓ klaar' : '✎ bewerken'}</button>
+        <button class="mini x" onclick={logout} title="Uitloggen">⏻<span class="ml">uitloggen</span></button>
+      </span>
     {/snippet}
     <div class="body head">
       <div class="hello">
@@ -585,10 +612,17 @@
 <ReauthDialog />
 
 <style>
-  .wrap { max-width: 1240px; margin: 0 auto; padding: min(4vh, 32px) 14px 50px }
+  /* Volle schermbreedte; op brede schermen komen er gewoon meer groepen naast elkaar. */
+  .wrap { padding: min(4vh, 32px) clamp(14px, 2vw, 36px) 50px }
   .clock { color: var(--text); margin-right: 4px }
   .n { margin-left: 5px; color: var(--text-h); font-size: 11px; font-weight: 500 }
   .upd .n { color: var(--mid) }
+  .menu { display: contents }
+  /* De kopkaart boven de groepen houden: het menu en de meldingen klappen eroverheen open
+     (backdrop-filter maakt van elke kaart een eigen stapel). */
+  .wrap > :global(.card:first-child) { z-index: 5 }
+  .burger { display: none }
+  .ml { display: none }
   .nd { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin: 0 0 1px 6px; vertical-align: middle }
   .nd.g { background: var(--ok) }
   .nd.w { background: var(--mid) }
@@ -633,7 +667,21 @@
   .act b { font-weight: 500; color: var(--text-h) }
   .qmsg { font-size: 12px; color: var(--ok); margin-left: 4px }
   .qmsg.bad { color: var(--err) }
+  @media (max-width: 760px) {
+    .burger { display: inline-block; padding: 3px 9px }
+    .menu { display: none }
+    .menu.open {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 6px; position: fixed; z-index: 70;
+      top: calc(62px + env(safe-area-inset-top)); right: 12px; width: min(300px, calc(100vw - 24px)); padding: 10px;
+      background: rgba(18, 18, 18, .97); border: 1px solid var(--line-2); border-radius: 12px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, .6)
+    }
+    .menu.open :global(.mini) { padding: 9px 10px; text-align: left; font-size: 13px }
+    .menu.open .ml { display: inline; margin-left: 7px; color: var(--muted); font-size: 12px }
+  }
   @media (max-width: 560px) {
+    .tiles { grid-template-columns: repeat(auto-fill, minmax(138px, 1fr)) }
+    .groups { gap: 12px; margin-top: 12px }
     .head { padding: 18px 16px 12px }
     .tabs, .tools { padding-left: 16px; padding-right: 16px }
     .search { max-width: none }

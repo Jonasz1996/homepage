@@ -94,6 +94,9 @@
       </span>
     {:else if widget?.error}
       <span class="wf"><span class="f lv-err" title={widget.error}>⚠ {widget.error}</span></span>
+    {:else if health === 'down' && status?.last_error && !status?.cause && !maint}
+      <!-- De reden meteen tonen: "Time-out", "Name or service not known", "HTTP 502", ... -->
+      <span class="wf"><span class="f lv-err" title={status.last_error}>⚠ {status.last_error}</span></span>
     {/if}
   </span>
   {#if spark}
