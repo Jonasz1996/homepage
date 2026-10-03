@@ -63,10 +63,8 @@ if [ ! -f "$CONF_DIR/secret.key" ]; then
   head -c 32 /dev/urandom | base64 | tr '+/' '-_' > "$CONF_DIR/secret.key"
   chown root:homepage "$CONF_DIR/secret.key"; chmod 640 "$CONF_DIR/secret.key"
 fi
-NEW_TOKEN=""
 if [ ! -f "$CONF_DIR/setup-token" ]; then
-  NEW_TOKEN=$(openssl rand -hex 12)
-  echo "$NEW_TOKEN" > "$CONF_DIR/setup-token"
+  openssl rand -hex 12 > "$CONF_DIR/setup-token"
   chown root:homepage "$CONF_DIR/setup-token"; chmod 640 "$CONF_DIR/setup-token"
 fi
 if [ ! -f "$CONF_DIR/homepage.env" ]; then
@@ -136,9 +134,11 @@ Testen kan meteen op dat adres. Voor gebruik van buitenaf: in Nginx Proxy Manage
 (bv. home.jbogaert.be) naar http://$IP:80 met "Websockets Support" aan.
 Bijwerken: hetzelfde bootstrap-commando opnieuw uitvoeren.
 EOF
-if [ -n "$NEW_TOKEN" ]; then
+# Nog geen account (ook bij een tweede keer uitvoeren): de setup-code tonen.
+USERS=$(runuser -u postgres -- psql -d homepage -tAc "SELECT count(*) FROM users" 2>/dev/null || echo 0)
+if [ "${USERS:-0}" = 0 ] && [ -f "$CONF_DIR/setup-token" ]; then
   echo
-  echo "Setup-code voor het eerste account: $NEW_TOKEN"
+  echo "Setup-code voor het eerste account: $(cat "$CONF_DIR/setup-token")"
   echo "(ook in $CONF_DIR/setup-token)"
 fi
 echo
