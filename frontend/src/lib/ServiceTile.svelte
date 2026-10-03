@@ -1,7 +1,7 @@
 <script>
   import { iconIsMono, iconUrl } from './icons.js'
 
-  let { service, editing = false, onedit, dragging = false, dropBefore = false, ...events } = $props()
+  let { service, status = null, editing = false, onedit, ondetail, dragging = false, dropBefore = false, ...events } = $props()
 
   let src = $derived(iconUrl(service.icon))
   // Pas tonen als het icoon echt geladen is; anders de eerste letter.
@@ -14,6 +14,32 @@
   let host = $derived.by(() => {
     try { return service.url ? new URL(service.url).host : '' } catch { return '' }
   })
+
+  // Sparkline van de laatste checks: lijn door de latency, gaten waar een check mislukte.
+  let spark = $derived.by(() => {
+    const pts = status?.spark || []
+    if (pts.length < 2) return ''
+    const max = Math.max(1, ...pts.filter((v) => v != null))
+    let d = ''
+    let pen = false
+    pts.forEach((v, i) => {
+      if (v == null) { pen = false; return }
+      const px = (i / (pts.length - 1)) * 100
+      const py = 13 - (v / max) * 11
+      d += `${pen ? 'L' : 'M'}${px.toFixed(1)},${py.toFixed(1)}`
+      pen = true
+    })
+    return d
+  })
+  let health = $derived(status?.status || (service.check?.type ? 'unknown' : null))
+  const stateLabel = { up: 'bereikbaar', down: 'down', unknown: 'nog geen check' }
+  let ms = $derived(status?.latency_ms == null ? '' : status.latency_ms < 10 ? status.latency_ms.toFixed(1) : Math.round(status.latency_ms))
+
+  function detail(e) {
+    e.preventDefault()
+    e.stopPropagation()
+    ondetail(service)
+  }
 
   function click(e) {
     if (editing) {
@@ -28,11 +54,13 @@
   class:editing
   class:dragging
   class:drop-before={dropBefore}
+  class:up={health === 'up'}
+  class:down={health === 'down'}
   href={service.url || undefined}
   target="_blank"
   rel="noopener noreferrer"
   draggable={editing}
-  title={service.description || host || service.name}
+  title={[service.description || host || service.name, health && stateLabel[health], status?.last_error].filter(Boolean).join(' · ')}
   onclick={click}
   {...events}
 >
@@ -47,9 +75,19 @@
   </span>
   <span class="txt">
     <span class="name">{service.name}</span>
-    <span class="desc">{service.description || host}</span>
+    <span class="desc">
+      {#if health === 'down'}<span class="downtxt">down</span>{:else if ms !== ''}<span class="ms">{ms} ms</span>{/if}
+      {service.description || host}
+    </span>
   </span>
-  {#if editing}<span class="edit" aria-hidden="true">✎</span>{/if}
+  {#if spark}
+    <svg class="spark" viewBox="0 0 100 14" preserveAspectRatio="none" aria-hidden="true"><path d={spark} /></svg>
+  {/if}
+  {#if editing}
+    <span class="edit" aria-hidden="true">✎</span>
+  {:else}
+    <button class="info" onclick={detail} aria-label="Details van {service.name}" title="Details">▤</button>
+  {/if}
 </a>
 
 <style>
@@ -75,4 +113,17 @@
   .name { font-size: 13.5px; color: var(--text-h); white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
   .desc { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
   .edit { position: absolute; top: 6px; right: 8px; font-size: 11px; color: var(--muted) }
+  .tile.up { border-left-color: var(--ok) }
+  .tile.down { border-left-color: var(--err); background: rgba(229, 139, 139, .08) }
+  .ms { color: var(--text); margin-right: 4px }
+  .downtxt { color: var(--err); margin-right: 4px; text-transform: uppercase; font-size: 10.5px; letter-spacing: .06em }
+  .spark { position: absolute; left: 56px; right: 12px; bottom: 3px; width: calc(100% - 68px); height: 12px; pointer-events: none }
+  .spark path { fill: none; stroke: rgba(255, 255, 255, .22); stroke-width: 1.2; vector-effect: non-scaling-stroke }
+  .info {
+    position: absolute; top: 4px; right: 4px; border: 0; background: none; color: var(--dim); cursor: pointer;
+    font-size: 12px; padding: 2px 5px; border-radius: 5px; opacity: 0; transition: opacity .15s
+  }
+  .tile:hover .info, .info:focus-visible { opacity: 1 }
+  .info:hover { color: var(--text-h); background: rgba(255, 255, 255, .1) }
+  @media (hover: none) { .info { opacity: 1 } }
 </style>

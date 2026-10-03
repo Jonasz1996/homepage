@@ -1,7 +1,7 @@
 from fastapi import Depends, FastAPI
 
 from .deps import csrf_guard
-from .routers import auth, importexport, layout, notifications
+from .routers import auth, importexport, layout, monitoring, notifications
 
 app = FastAPI(
     title="homepage",
@@ -15,6 +15,7 @@ app.include_router(auth.router)
 app.include_router(layout.router)
 app.include_router(importexport.router)
 app.include_router(notifications.router)
+app.include_router(monitoring.router)
 
 
 @app.get("/api/health")

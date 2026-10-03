@@ -26,7 +26,7 @@ say "Pakketten installeren"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
 apt-get install -y -q postgresql nginx python3-venv python3-dev build-essential nodejs npm \
-  curl gnupg ca-certificates openssl
+  curl gnupg ca-certificates openssl iputils-ping
 
 PG_VER=$(pg_config --version 2>/dev/null | grep -oE '[0-9]+' | head -1 || true)
 [ -n "$PG_VER" ] || PG_VER=$(find /usr/lib/postgresql -mindepth 1 -maxdepth 1 -printf "%f\n" | sort -n | tail -1)
@@ -99,12 +99,12 @@ systemctl enable nginx
 systemctl reload nginx || systemctl restart nginx
 
 say "Services"
-install -m 644 "$APP_DIR/deploy/homepage-api.service" /etc/systemd/system/
+install -m 644 "$APP_DIR/deploy/homepage-api.service" "$APP_DIR/deploy/homepage-worker.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/homepage-backup.service" "$APP_DIR/deploy/homepage-backup.timer" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now homepage-backup.timer
-systemctl enable homepage-api
-systemctl restart homepage-api
+systemctl enable homepage-api homepage-worker
+systemctl restart homepage-api homepage-worker
 sleep 2
 if curl -fsS http://127.0.0.1/api/health >/dev/null; then
   echo "API draait."
