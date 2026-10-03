@@ -1,7 +1,8 @@
 <script>
+  import { value } from './format.js'
   import { iconIsMono, iconUrl } from './icons.js'
 
-  let { service, status = null, editing = false, onedit, ondetail, dragging = false, dropBefore = false, ...events } = $props()
+  let { service, status = null, widget = null, editing = false, onedit, ondetail, dragging = false, dropBefore = false, ...events } = $props()
 
   let src = $derived(iconUrl(service.icon))
   // Pas tonen als het icoon echt geladen is; anders de eerste letter.
@@ -79,6 +80,13 @@
       {#if health === 'down'}<span class="downtxt">down</span>{:else if ms !== ''}<span class="ms">{ms} ms</span>{/if}
       {service.description || host}
     </span>
+    {#if widget?.fields?.length}
+      <span class="wf">
+        {#each widget.fields as f}<span class="f lv-{f.level || 'none'}"><i>{f.label}</i> {value(f.value)}</span>{/each}
+      </span>
+    {:else if widget?.error}
+      <span class="wf"><span class="f lv-err" title={widget.error}>⚠ {widget.error}</span></span>
+    {/if}
   </span>
   {#if spark}
     <svg class="spark" viewBox="0 0 100 14" preserveAspectRatio="none" aria-hidden="true"><path d={spark} /></svg>
@@ -112,6 +120,11 @@
   .txt { display: flex; flex-direction: column; min-width: 0 }
   .name { font-size: 13.5px; color: var(--text-h); white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
   .desc { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+  .wf { display: flex; gap: 4px 10px; flex-wrap: wrap; margin-top: 3px; font-size: 11px; color: var(--text); overflow: hidden; max-height: 30px }
+  .wf .f { white-space: nowrap }
+  .wf i { font-style: normal; color: var(--dim) }
+  .wf .lv-warn { color: var(--mid) }
+  .wf .lv-err { color: var(--err); overflow: hidden; text-overflow: ellipsis; max-width: 100% }
   .edit { position: absolute; top: 6px; right: 8px; font-size: 11px; color: var(--muted) }
   .tile.up { border-left-color: var(--ok) }
   .tile.down { border-left-color: var(--err); background: rgba(229, 139, 139, .08) }
