@@ -9,7 +9,7 @@ from .schedule import describe, describe_interval, occurrences, per_day, tz_of
 from .scan import _aware, spec_of
 
 RUNNABLE = {"cron", "timer"}
-DENSE_PER_DAY = 96
+DENSE_PER_DAY = 24
 
 
 def schedule_text(job: CronJob) -> str:
@@ -33,7 +33,7 @@ def job_out(job: CronJob, recent: list[CronRun] | None = None, full: bool = Fals
         "kind": job.kind, "source": job.source, "user": job.user, "schedule": job.schedule, "sched_type": job.sched_type,
         "when": schedule_text(job), "command": job.command if full else job.command[:400], "name": job.alias or job.name,
         "auto_name": job.name, "alias": job.alias, "enabled": job.enabled, "system": job.system,
-        "monitored": job.monitored, "muted": job.muted, "targets": job.targets or [], "tz": job.tz,
+        "monitored": job.monitored, "wid": job.wid if job.monitored else None, "muted": job.muted, "targets": job.targets or [], "tz": job.tz,
         "next_run_at": job.next_run_at, "last_run_at": job.last_run_at, "last_status": job.last_status,
         "last_exit": job.last_exit, "last_duration": job.last_duration, "runs_24h": job.runs_24h,
         "removed_at": job.removed_at, "first_seen": job.first_seen,
@@ -170,7 +170,8 @@ def _duration(job: CronJob, runs: list[CronRun]) -> float:
 
 
 def resources(job: CronJob, res: links.Resolver, machines: dict, storage: dict) -> set[str]:
-    heavy = job.kind.startswith(("pve-", "pbs-")) or any(t.get("via") in links.HEAVY_VIA for t in job.targets or [])
+    # Replicatie is incrementeel en kort: die telt niet mee voor botsingen.
+    heavy = job.kind in ("pve-backup", "pbs-sync", "pbs-verify", "pbs-gc", "pbs-prune") or any(t.get("via") in links.HEAVY_VIA for t in job.targets or [])
     if not heavy:
         return set()
     out = {f"m:{job.target}"}

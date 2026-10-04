@@ -44,6 +44,18 @@
     logsOpen = true
     logsHost = host
   }
+  let cronOpen = $state(false)
+  let cronUsed = $state(false)
+  let cronInitial = $state(null)
+  let cron = $state({ fout: 0, gemist: 0 })
+  function openCron(initial = null) {
+    cronUsed = true
+    cronOpen = true
+    cronInitial = initial
+  }
+  async function loadCron() {
+    try { cron = await api('/cron/summary') } catch { /* volgende poging */ }
+  }
   function openTerminal(hostId = null) {
     termUsed = true
     termOpen = true
@@ -72,6 +84,7 @@
   const COMMANDS = [
     { label: 'logs openen', run: () => openLogs() },
     { label: 'terminal openen', run: () => openTerminal() },
+    { label: 'cron: alle geplande taken, agenda, verbanden', run: () => openCron() },
     { label: 'beveiliging: sessies en auditlog', run: () => (modal = { kind: 'security' }) },
     { label: 'capaciteit: opslag, cpu en ram', run: () => (modal = { kind: 'capacity' }) },
     { label: 'tijdlijn: storingen, herstarts, back-ups', run: () => (modal = { kind: 'history' }) },
@@ -188,6 +201,7 @@
   function openNotification(n) {
     if (n.source === 'rapport') modal = { kind: 'history', tab: 'report' }
     else if (n.source === 'updates') modal = { kind: 'updates' }
+    else if (n.source === 'cron') openCron({ filter: 'probleem' })
     else if (n.service_id) {
       const s = allServices.find((x) => x.id === n.service_id)
       if (s) modal = { kind: 'detail', service: s }
@@ -354,6 +368,7 @@
     const kinds = { history: 'history', report: 'history', updates: 'updates', network: 'network', capacity: 'capacity',
                     security: 'security' }
     if (what === 'logs') openLogs()
+    else if (what === 'cron') openCron()
     else if (what === 'terminal') openTerminal()
     else if (kinds[what]) modal = { kind: kinds[what], tab: what === 'report' ? 'report' : undefined }
   }
@@ -365,12 +380,14 @@
     loadWidgets()
     loadUpdates()
     loadNet()
+    loadCron()
+    const stopCron = poll(loadCron, 120000)
     const stopNet = poll(loadNet, 120000)
     const stopWidgets = poll(loadWidgets, 60000)
     const stopUpdates = poll(loadUpdates, 300000)
     const stopClock = poll(() => (now = new Date()), 15000)
     const stopStatus = poll(loadStatus, 30000)
-    return () => { stopClock(); stopStatus(); stopWidgets(); stopUpdates(); stopNet() }
+    return () => { stopClock(); stopStatus(); stopWidgets(); stopUpdates(); stopNet(); stopCron() }
   })
 </script>
 
@@ -390,6 +407,8 @@
         <button class="mini" onclick={() => (modal = { kind: 'capacity' })} title="Capaciteit: opslag, cpu en ram">df<span class="ml">capaciteit, stroom</span></button>
         <button class="mini" onclick={() => (modal = { kind: 'network' })} title="Internet: publiek IP, WAN, tunnels, Wake-on-LAN">net{#if netLevel}<i class="nd {netLevel}"></i>{/if}</button>
         <button class="mini" onclick={() => (modal = { kind: 'history' })} title="Tijdlijn en weekrapport">history</button>
+        <button class="mini" class:cronbad={cron.fout} onclick={() => openCron(cron.fout || cron.gemist ? { filter: 'probleem' } : null)}
+                title="Cronjobs, timers en Proxmox/PBS-jobs van alle machines">cron{#if cron.fout + cron.gemist}<b class="n">{cron.fout + cron.gemist}</b>{/if}</button>
         <button class="mini" class:upd={updates.security} onclick={() => (modal = { kind: 'updates' })}
                 title="Openstaande updates">apt{#if updates.total}<b class="n">{updates.total}</b>{/if}</button>
         <button class="mini" onclick={() => (modal = { kind: 'security' })} title="Beveiliging: sessies, auditlog en wachtwoord">⚿<span class="ml">beveiliging</span></button>
@@ -604,6 +623,12 @@
     <Terminal open={termOpen} request={termRequest} services={allServices} onclose={() => (termOpen = false)} />
   {/await}
 {/if}
+{#if cronUsed}
+  {#await import('./Cron.svelte') then { default: Cron }}
+    <Cron open={cronOpen} initial={cronInitial} onclose={() => (cronOpen = false)}
+          onterminal={(hostId) => { cronOpen = false; openTerminal(hostId) }} />
+  {/await}
+{/if}
 {#if logsUsed}
   {#await import('./Logs.svelte') then { default: Logs }}
     <Logs open={logsOpen} initialHost={logsHost} onclose={() => (logsOpen = false)} />
@@ -617,6 +642,7 @@
   .clock { color: var(--text); margin-right: 4px }
   .n { margin-left: 5px; color: var(--text-h); font-size: 11px; font-weight: 500 }
   .upd .n { color: var(--mid) }
+  .cronbad .n { color: var(--err) }
   .menu { display: contents }
   /* De kopkaart boven de groepen houden: het menu en de meldingen klappen eroverheen open
      (backdrop-filter maakt van elke kaart een eigen stapel). */

@@ -83,6 +83,15 @@ async def overview(user: User = Depends(current_user), db: AsyncSession = Depend
     }
 
 
+@router.get("/summary")
+async def summary(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Voor de knop in de titelbalk: hoeveel jobs er mislukten of niet liepen."""
+    rows = (await db.execute(select(CronJob.last_status).where(
+        CronJob.removed_at.is_(None), CronJob.system.is_(False), CronJob.muted.is_(False),
+        CronJob.last_status.in_(("fout", "gemist"))))).scalars().all()
+    return {"fout": rows.count("fout"), "gemist": rows.count("gemist")}
+
+
 async def _run_scan(session_factory) -> None:
     gen = session_factory()
     try:

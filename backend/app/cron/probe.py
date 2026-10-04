@@ -184,8 +184,10 @@ def _cron_name(command: str) -> str:
     if not words:
         return c[:60]
     exe = words[0].split("/")[-1]
-    if exe in ("sh", "bash", "python", "python3", "perl", "php", "node") and len(words) > 1:
-        exe = words[1].split("/")[-1]
+    if exe in ("sh", "bash", "python", "python3", "perl", "php", "node", "ruby"):
+        arg = next((w for w in words[1:] if not w.startswith("-")), None)
+        if arg:
+            exe = arg.split("/")[-1]
     return exe[:60]
 
 

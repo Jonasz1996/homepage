@@ -12,7 +12,7 @@ SYNC_TOOLS = {"rsync", "scp", "sftp", "rclone", "borg", "restic", "syncoid", "zf
               "tar", "cp", "mount", "ssh", "curl", "wget", "vzdump", "pct", "qm", "wakeonlan", "etherwake"}
 COPY_TOOLS = {"rsync", "scp", "rclone", "cp", "unison", "lftp", "rdiff-backup", "duplicity"}
 HEAVY_VIA = {"rsync", "scp", "rclone", "borg", "restic", "syncoid", "zfs", "proxmox-backup-client", "rdiff-backup",
-             "duplicity", "kopia", "vzdump", "pbs-sync", "verify", "gc", "prune", "zfs-replicatie", "pg_dump",
+             "duplicity", "kopia", "vzdump", "pbs-sync", "verify", "gc", "prune", "pg_dump",
              "mysqldump", "tar", "unison", "lftp"}
 LOCAL = {"localhost", "127.0.0.1", "0.0.0.0", "::1", ""}
 PING_HOSTS = re.compile(r"(hc-ping\.com|healthchecks|uptime-?kuma|cronitor|deadmanssnitch|betteruptime|/api/push/)", re.I)
