@@ -227,6 +227,20 @@ Later, deel 3 (Authentik en gsm):
     USB-schijf aan, bv. `pct set <id> -mp0 /mnt/nas/homepage,mp=/mnt/homepage-backup` en
     `chown homepage: /mnt/homepage-backup` in de container, daarna `systemctl restart homepage-worker`. Terugzetten
     staat in `LEESMIJ.txt` in die map
+- **diff** (knop in de titelbalk): configuratiewijzigingen. Elke nacht (standaard om 2:00) een kopie van de
+  config.xml van OPNsense, de proxy hosts, redirections en streams van Nginx Proxy Manager, de `.conf` van elke VM en
+  container in Proxmox, en de bestanden of mappen die je zelf kiest op een SSH-host (bv. `/etc/nginx`, als root gelezen,
+  alleen tekstbestanden tot 256 kB). Een nieuwe versie wordt alleen bewaard als er iets veranderd is: dan een melding
+  en een regel op de tijdlijn. Per configuratie de versies met een gekleurde diff (wachtwoorden en sleutels
+  gemaskeerd), twee willekeurige versies vergelijken, en een oude versie volledig downloaden (recente 2FA). De
+  laatste 90 versies per bestand blijven bewaard, versleuteld. Voor OPNsense heeft de API-key het recht
+  *Diagnostics: Configuration History* nodig
+- **net → apparaten**: elke 5 minuten de ARP- en DHCP-tabel van OPNsense (ISC en Kea), met IP, MAC, fabrikant,
+  hostnaam en interface. Wat er bij de eerste keer al is, geldt als gekend; een nieuw MAC-adres daarna geeft een
+  melding. Geef apparaten een naam of zet ze op "ken ik". Met **volgen** wordt een apparaat elke 6 uur gescand op
+  ongeveer 60 gebruikelijke poorten (ssh, http, smb, rdp, docker, databanken, ...) en komt er een melding als er een
+  nieuwe poort openstaat. Rechten voor de API-key: *Diagnostics: ARP Table* en *Services: DHCP: Leases* (of
+  *Services: Kea DHCP*)
 - **effecten** zoals in aiverslag: een achtergrond van punten en 0/1 die voor de muis wijken, een ripple op elke knop,
   bliksem en vonken bij een geslaagde actie (herstarten, wekken), een vuurbal met flits en schudden bij verwijderen
   en uitloggen, en een bliksem op het belletje als er een nieuwe storing binnenkomt. Uit te zetten met `Ctrl+K` →
@@ -239,7 +253,7 @@ Later, deel 3 (Authentik en gsm):
 - **Android-app (WebView)**: laad `https://homepage.jbogaert.be/` en zet `javaScriptEnabled`, `domStorageEnabled` en
   cookies aan (`CookieManager.setAcceptCookie(true)`). Third-party cookies zijn niet nodig:
   alles blijft op dezelfde site als Authentik op een subdomein staat. Rechtstreeks openen kan met
-  `/?open=history`, `updates`, `network`, `cron`, `health` of `terminal`. Links naar andere services kan de app in dezelfde WebView
+  `/?open=history`, `updates`, `network`, `devices`, `configs`, `cron`, `health` of `terminal`. Links naar andere services kan de app in dezelfde WebView
   openen (`shouldOverrideUrlLoading` false teruggeven voor `*.jbogaert.be`)
 
 Optimalisaties:

@@ -4,6 +4,7 @@
   import { boom, fxEnabled, flash, RED, setFx, storm } from './fx.js'
   import Capacity from './Capacity.svelte'
   import Card from './Card.svelte'
+  import Configs from './Configs.svelte'
   import History from './History.svelte'
   import ImportDialog from './ImportDialog.svelte'
   import NameForm from './NameForm.svelte'
@@ -104,6 +105,8 @@
     { label: 'weekrapport', run: () => (modal = { kind: 'history', tab: 'report' }) },
     { label: 'updates: openstaande pakketten en images', run: () => (modal = { kind: 'updates' }) },
     { label: 'netwerk: publiek ip, wan, tunnels, wake-on-lan', run: () => (modal = { kind: 'network' }) },
+    { label: 'apparaten op het netwerk, poortscan', run: () => (modal = { kind: 'network', tab: 'apparaten' }) },
+    { label: 'configuratiewijzigingen: opnsense, npm, proxmox, bestanden (diff)', run: () => (modal = { kind: 'configs' }) },
     { label: 'bewerken aan/uit', run: () => (editing = !editing) },
     { label: 'effecten aan/uit (vuur, bliksem, ...)', run: () => { setFx(!fxEnabled()); if (fxEnabled()) storm() } },
   ]
@@ -216,6 +219,8 @@
     if (n.source === 'rapport') modal = { kind: 'history', tab: 'report' }
     else if (n.source === 'updates') modal = { kind: 'updates' }
     else if (n.source === 'cron') openCron({ filter: 'probleem' })
+    else if (n.source === 'config') modal = { kind: 'configs' }
+    else if (n.source === 'apparaat') modal = { kind: 'network', tab: 'apparaten' }
     else if (HEALTH_TAB[n.source]) openHealth({ tab: HEALTH_TAB[n.source] })
     else if (n.service_id) {
       const s = allServices.find((x) => x.id === n.service_id)
@@ -381,11 +386,12 @@
     if (!what) return
     history.replaceState(null, '', location.pathname)
     const kinds = { history: 'history', report: 'history', updates: 'updates', network: 'network', capacity: 'capacity',
-                    security: 'security' }
+                    security: 'security', configs: 'configs' }
     if (what === 'logs') openLogs()
     else if (what === 'cron') openCron()
     else if (what === 'health') openHealth()
     else if (what === 'terminal') openTerminal()
+    else if (what === 'devices') modal = { kind: 'network', tab: 'apparaten' }
     else if (kinds[what]) modal = { kind: kinds[what], tab: what === 'report' ? 'report' : undefined }
   }
 
@@ -425,6 +431,7 @@
         <button class="mini" onclick={() => (modal = { kind: 'capacity' })} title="Capaciteit: opslag, cpu en ram">df<span class="ml">capaciteit, stroom</span></button>
         <button class="mini" onclick={() => (modal = { kind: 'network' })} title="Internet: publiek IP, WAN, tunnels, Wake-on-LAN">net{#if netLevel}<i class="nd {netLevel}"></i>{/if}</button>
         <button class="mini" onclick={() => (modal = { kind: 'history' })} title="Tijdlijn en weekrapport">history</button>
+        <button class="mini" onclick={() => (modal = { kind: 'configs' })} title="Configuratiewijzigingen: OPNsense, NPM, Proxmox en je eigen bestanden">diff</button>
         <button class="mini" class:cronbad={cron.fout} onclick={() => openCron(cron.fout || cron.gemist ? { filter: 'probleem' } : null)}
                 title="Cronjobs, timers en Proxmox/PBS-jobs van alle machines">cron{#if cron.fout + cron.gemist}<b class="n">{cron.fout + cron.gemist}</b>{/if}</button>
         <button class="mini" class:cronbad={health.err} onclick={() => openHealth(health.problems?.length ? { tab: 'homepage' } : null)}
@@ -628,7 +635,9 @@
 {:else if modal?.kind === 'history'}
   <History tab={modal.tab} onclose={() => (modal = null)} />
 {:else if modal?.kind === 'network'}
-  <Network onclose={() => (modal = null)} onchanged={(d) => (net = d)} />
+  <Network initialTab={modal.tab} onclose={() => (modal = null)} onchanged={(d) => (net = d)} />
+{:else if modal?.kind === 'configs'}
+  <Configs onclose={() => (modal = null)} />
 {:else if modal?.kind === 'updates'}
   <Updates onclose={() => (modal = null)} onchanged={loadUpdates} />
 {:else if modal?.kind === 'security'}

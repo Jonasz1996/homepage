@@ -4,7 +4,7 @@ import re
 
 import httpx
 
-from .base import Integration, cell, field
+from .base import Integration, IntegrationError, cell, field
 
 # "none" betekent bij OPNsense: geen probleem.
 GW_OK = {"none", "online", ""}
@@ -52,6 +52,35 @@ class OPNsense(Integration):
                         "delay_ms": _num(g.get("delay")), "loss_pct": _num(g.get("loss")),
                         "level": gateway_level(status)})
         return out
+
+    async def config_xml(self) -> str:
+        """De volledige configuratie (recht: "Diagnostics: Configuration History" of "System: Configuration Backups")."""
+        return await self.text("GET", "/api/core/backup/download/this", auth=self.auth())
+
+    async def neighbours(self) -> list[dict]:
+        """ARP-tabel plus DHCP-leases (ISC of Kea): mac, ip, fabrikant, hostnaam, interface."""
+        out: dict[str, dict] = {}
+        arp = await self.get("/diagnostics/interface/getArp") or []
+        for a in arp if isinstance(arp, list) else arp.get("rows", []):
+            mac = str(a.get("mac") or "").lower()
+            if mac and mac != "(incomplete)":
+                out[mac] = {"mac": mac, "ip": a.get("ip"), "vendor": a.get("manufacturer") or None,
+                            "hostname": a.get("hostname") or None, "intf": a.get("intf_description") or a.get("intf")}
+        for path, mac_key in (("/dhcpv4/leases/searchLease", "mac"), ("/kea/leases4/search", "hwaddr")):
+            try:
+                data = await self.get(path) or {}
+            except IntegrationError:
+                continue
+            for row in data.get("rows", []) if isinstance(data, dict) else []:
+                mac = str(row.get(mac_key) or "").lower()
+                if not mac or str(row.get("state") or "").lower() in ("expired", "free", "backup", "released"):
+                    continue
+                d = out.setdefault(mac, {"mac": mac, "ip": row.get("address"), "vendor": None, "hostname": None,
+                                         "intf": row.get("if_descr")})
+                d["hostname"] = d["hostname"] or row.get("hostname") or None
+                d["vendor"] = d["vendor"] or row.get("man") or None
+                d["ip"] = d["ip"] or row.get("address")
+        return list(out.values())
 
     async def firmware(self) -> dict:
         """Laatst gekende firmwarestatus. OPNsense controleert zelf; we starten geen nieuwe controle."""
