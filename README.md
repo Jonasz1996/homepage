@@ -46,6 +46,9 @@ pveum role add HomepagePower -privs VM.PowerMgmt && pveum aclmod /vms -user home
 pveum user token add homepage@pve dashboard --privsep 0
 ```
 
+Snapshots verwijderen vanuit **hw → snapshots** vraagt daarnaast `VM.Snapshot`
+(`pveum role modify HomepagePower -privs VM.PowerMgmt,VM.Snapshot`; bestaat de rol al met meer rechten, voeg het er dan bij).
+
 Gebruik `homepage@pve!dashboard` als `username` en het getoonde geheim als `password`.
 Voor PBS (alleen lezen):
 
@@ -189,6 +192,27 @@ Later, deel 3 (Authentik en gsm):
   - **agenda**: per machine wat wanneer loopt, met de zware jobs (back-ups, syncs, verify, gc) apart en een lijst
     van **botsingen**: zware jobs die tegelijk dezelfde datastore of machine belasten
   - **verbanden**: wat van welke machine naar welke andere gaat, als schema en als lijst
+- **hw** (knop in de titelbalk): gezondheid van de hardware en van de homepage zelf
+  - **schijven**: elke 10 minuten SMART van elke schijf (vervangen en wachtende sectoren, onherstelbare fouten,
+    slijtage van SSD's en NVMe, uren in gebruik) en de ZFS-pools (status, vulling, laatste scrub). Via SSH als root
+    op de fysieke machines uit de terminal; containers en VM's worden overgeslagen, slapende harde schijven niet
+    gewekt (`smartctl -n standby`). Nodig op elke node: `apt install smartmontools` (staat al op Proxmox)
+  - **temperatuur**: processor en schijven, 30 dagen grafiek, melding boven de grens (standaard 85 °C en 55 °C).
+    Op een Raspberry Pi ook **throttling en te lage spanning** (nu en sinds het opstarten)
+  - een melding als een schijf achteruitgaat (een teller stijgt, slijtage voorbij 80/90/95 %), een pool slechter
+    wordt of een scrub fouten vindt
+  - **snapshots**: elke 6 uur alle snapshots van VM's en CT's via de Proxmox-API, met hun leeftijd. Ouder dan 14 dagen
+    (instelbaar) = vergeten, met een melding. Verwijderen kan vanuit het overzicht (recente 2FA); daarvoor heeft het
+    Proxmox-token het recht `VM.Snapshot` nodig (zet het bij in de eigen rol van `homepage@pve`)
+  - **domeinen**: dagelijks vervaldatum, registrar en nameservers via RDAP (rdap.org). Meldingen 30, 7 en 1 dag op
+    voorhand, en als de nameservers veranderen. DNS Belgium geeft voor .be geen vervaldatum: vul die zelf in
+  - **homepage zelf**: leeft de worker (zo niet, dan meldt de API het), is er een back-up van vannacht en is die
+    leesbaar (`pg_restore --list`), hoe groot is de database per tabel, hoe vol de schijf
+  - **kopie buiten de container**: elk uur de nieuwste dumps naar `/mnt/homepage-backup`, samen met `secret.key`
+    versleuteld met een wachtzin die nergens bewaard wordt (scrypt + AES-GCM). Koppel er een NAS-share, PBS-opslag of
+    USB-schijf aan, bv. `pct set <id> -mp0 /mnt/nas/homepage,mp=/mnt/homepage-backup` en
+    `chown homepage: /mnt/homepage-backup` in de container, daarna `systemctl restart homepage-worker`. Terugzetten
+    staat in `LEESMIJ.txt` in die map
 - **effecten** zoals in aiverslag: een achtergrond van punten en 0/1 die voor de muis wijken, een ripple op elke knop,
   bliksem en vonken bij een geslaagde actie (herstarten, wekken), een vuurbal met flits en schudden bij verwijderen
   en uitloggen, en een bliksem op het belletje als er een nieuwe storing binnenkomt. Uit te zetten met `Ctrl+K` →
@@ -201,7 +225,7 @@ Later, deel 3 (Authentik en gsm):
 - **Android-app (WebView)**: laad `https://homepage.jbogaert.be/` en zet `javaScriptEnabled`, `domStorageEnabled` en
   cookies aan (`CookieManager.setAcceptCookie(true)`). Third-party cookies zijn niet nodig:
   alles blijft op dezelfde site als Authentik op een subdomein staat. Rechtstreeks openen kan met
-  `/?open=history`, `updates`, `network`, `cron` of `terminal`. Links naar andere services kan de app in dezelfde WebView
+  `/?open=history`, `updates`, `network`, `cron`, `health` of `terminal`. Links naar andere services kan de app in dezelfde WebView
   openen (`shouldOverrideUrlLoading` false teruggeven voor `*.jbogaert.be`)
 
 Optimalisaties:

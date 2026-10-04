@@ -362,3 +362,16 @@ class CronRun(Base):
     # schema | manueel
     trigger: Mapped[str] = mapped_column(String(12), default="schema")
     output: Mapped[str | None] = mapped_column(Text)
+
+
+class Reading(Base):
+    """Een meetwaarde van een sensor (temperatuur van cpu of schijf), elke 10 minuten. 30 dagen bewaard."""
+
+    __tablename__ = "readings"
+
+    # "ssh:3" (SSH-host 3)
+    target: Mapped[str] = mapped_column(String(80), primary_key=True)
+    # "cpu" of "disk:<serienummer>"
+    sensor: Mapped[str] = mapped_column(String(80), primary_key=True)
+    ts: Mapped[datetime] = mapped_column(primary_key=True, default=utcnow, index=True)
+    value: Mapped[float] = mapped_column(Float)

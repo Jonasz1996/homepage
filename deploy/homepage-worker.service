@@ -19,6 +19,8 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadOnlyPaths=/opt/homepage /etc/homepage
+# Kopie van de back-up buiten de container (zie README, "De homepage zelf"); "-" = mag ontbreken.
+ReadWritePaths=-/mnt/homepage-backup
 
 [Install]
 WantedBy=multi-user.target
