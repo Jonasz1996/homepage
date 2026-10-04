@@ -299,3 +299,66 @@ class Event(Base):
     service_id: Mapped[int | None] = mapped_column(ForeignKey("services.id", ondelete="SET NULL"), index=True)
     # Extra gegevens, bv. {"down_s": 340} bij een herstelde storing.
     data: Mapped[dict] = mapped_column(Json, default=dict)
+
+
+class CronJob(Base):
+    """Eén geplande taak op een machine: een cronregel, systemd-timer, Proxmox-backupjob, PBS-sync, ...
+    De scanner houdt deze lijst bij; verdwijnt een job, dan krijgt hij removed_at (de geschiedenis blijft)."""
+
+    __tablename__ = "cron_jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # Vaste sleutel: machine + bron + schema + commando (of het job-id bij Proxmox/PBS).
+    key: Mapped[str] = mapped_column(String(200), unique=True)
+    # Waar hij draait: "ssh:3" (SSH-host 3) of "ssh:3:ct:105" (container 105, bereikt via node 3).
+    target: Mapped[str] = mapped_column(String(80), index=True)
+    target_name: Mapped[str] = mapped_column(String(120))
+    host_id: Mapped[int | None] = mapped_column(ForeignKey("ssh_hosts.id", ondelete="SET NULL"), index=True)
+    vmid: Mapped[int | None] = mapped_column(Integer)
+    # cron | timer | periodic | pve-backup | pve-repl | pbs-sync | pbs-verify | pbs-prune | pbs-gc
+    kind: Mapped[str] = mapped_column(String(16))
+    source: Mapped[str] = mapped_column(String(255), default="")
+    user: Mapped[str] = mapped_column(String(64), default="")
+    schedule: Mapped[str] = mapped_column(String(200), default="")
+    # cron | calendar | interval | reboot | none
+    sched_type: Mapped[str] = mapped_column(String(12), default="cron")
+    command: Mapped[str] = mapped_column(Text, default="")
+    # De regel zoals hij in het bestand staat (om runs uit de cronlog te herkennen en om te bewaken).
+    raw: Mapped[str] = mapped_column(Text, default="")
+    name: Mapped[str] = mapped_column(String(200), default="")
+    alias: Mapped[str | None] = mapped_column(String(120))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    system: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Id waarmee de wrapper (hp-cron) zijn runs meldt; gezet zodra de job bewaakt wordt.
+    wid: Mapped[str | None] = mapped_column(String(16), index=True)
+    monitored: Mapped[bool] = mapped_column(Boolean, default=False)
+    muted: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Waar de job aan komt: [{"type": "host"|"pbs"|"storage"|"node"|..., "ref": ..., "label": ..., "via": ...}]
+    targets: Mapped[list] = mapped_column(Json, default=list)
+    extra: Mapped[dict] = mapped_column(Json, default=dict)
+    tz: Mapped[str] = mapped_column(String(64), default="")
+    next_run_at: Mapped[datetime | None]
+    last_run_at: Mapped[datetime | None]
+    # ok | fout | gemist | gestart (liep, resultaat onbekend) | bezig
+    last_status: Mapped[str | None] = mapped_column(String(12))
+    last_exit: Mapped[int | None] = mapped_column(Integer)
+    last_duration: Mapped[float | None] = mapped_column(Float)
+    runs_24h: Mapped[int] = mapped_column(Integer, default=0)
+    first_seen: Mapped[datetime] = mapped_column(default=utcnow)
+    last_seen: Mapped[datetime] = mapped_column(default=utcnow)
+    removed_at: Mapped[datetime | None]
+
+
+class CronRun(Base):
+    __tablename__ = "cron_runs"
+    __table_args__ = (Index("ix_cron_runs_job_started", "job_id", "started_at", unique=True),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("cron_jobs.id", ondelete="CASCADE"))
+    started_at: Mapped[datetime]
+    ended_at: Mapped[datetime | None]
+    exit_code: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(12))
+    # schema | manueel
+    trigger: Mapped[str] = mapped_column(String(12), default="schema")
+    output: Mapped[str | None] = mapped_column(Text)

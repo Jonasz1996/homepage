@@ -172,6 +172,23 @@ Later, deel 3 (Authentik en gsm):
     tegelijk, zoeken in de uitvoer (Ctrl+Shift+F), lettergrootte (Ctrl+scroll), tab dupliceren (Ctrl+Shift+D), van tab
     wisselen (Ctrl+Shift+←/→), klikbare links, de uitvoer opslaan als .log, bevestiging bij het plakken van meerdere
     regels, keepalive zodat een stille sessie niet wegvalt
+- **cron** (knop in de titelbalk): alles wat er gepland staat op al je machines, elk kwartier opnieuw gescand
+  - via SSH (de standaard login, als root) op elke host waarvan je de hostsleutel al bevestigde; een Proxmox-node
+    neemt ook zijn draaiende containers mee (`pct exec`). Gelezen worden crontabs, `/etc/cron.d`, cron.daily en
+    co, systemd-timers (met hun laatste run en uitvoer), Proxmox-back-up- en replicatiejobs en de sync-, verify-,
+    prune- en GC-jobs van PBS met hun taken. Ook de scripts die een job aanroept worden gelezen
+  - per job het schema in gewone taal ("ma–vr om 03:30"), de volgende keren in de tijdzone van de machine, de
+    laatste runs en waar hij aan komt (rsync naar de NAS, back-up naar pbs-pi, rclone naar Google Drive, ...)
+  - **mislukt** (exitcode, PBS/Proxmox-taak) en **niet gelopen** (de geplande keer ontbreekt in de cronlog) geven
+    een melding; nieuwe, gewijzigde en verdwenen jobs komen op de tijdlijn. Per job "meldingen uit"
+  - **bewaken**: zet een cronregel via `/usr/local/bin/hp-cron`, dan meldt elke run zijn exitcode, duur en
+    uitvoer. Alleen die ene regel wordt aangepast, met eerst een kopie in `/var/backups/hp-cron/`. Uitzetten zet
+    de regel terug zoals hij was
+  - **▶ nu uitvoeren** met live uitvoer (vraagt een recente 2FA), en **live**: de cronlog van een machine terwijl
+    hij binnenkomt, met de uitvoer van bewaakte jobs
+  - **agenda**: per machine wat wanneer loopt, met de zware jobs (back-ups, syncs, verify, gc) apart en een lijst
+    van **botsingen**: zware jobs die tegelijk dezelfde datastore of machine belasten
+  - **verbanden**: wat van welke machine naar welke andere gaat, als schema en als lijst
 - **effecten** zoals in aiverslag: een achtergrond van punten en 0/1 die voor de muis wijken, een ripple op elke knop,
   bliksem en vonken bij een geslaagde actie (herstarten, wekken), een vuurbal met flits en schudden bij verwijderen
   en uitloggen, en een bliksem op het belletje als er een nieuwe storing binnenkomt. Uit te zetten met `Ctrl+K` →
@@ -184,7 +201,7 @@ Later, deel 3 (Authentik en gsm):
 - **Android-app (WebView)**: laad `https://homepage.jbogaert.be/` en zet `javaScriptEnabled`, `domStorageEnabled` en
   cookies aan (`CookieManager.setAcceptCookie(true)`). Third-party cookies zijn niet nodig:
   alles blijft op dezelfde site als Authentik op een subdomein staat. Rechtstreeks openen kan met
-  `/?open=history`, `updates`, `network` of `terminal`. Links naar andere services kan de app in dezelfde WebView
+  `/?open=history`, `updates`, `network`, `cron` of `terminal`. Links naar andere services kan de app in dezelfde WebView
   openen (`shouldOverrideUrlLoading` false teruggeven voor `*.jbogaert.be`)
 
 Optimalisaties:
