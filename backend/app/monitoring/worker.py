@@ -23,6 +23,8 @@ from .capacity import SAMPLE_EVERY, check_forecasts, sample
 from .network import NETWORK_EVERY, PUBLIC_IP_EVERY, sample_power, watch_gateways, watch_public_ip, watch_tunnels
 from .report import weekly_notification
 from .updates import UPDATES_EVERY, run_updates
+from .upgrade import auto_updates, cleanup_snapshots
+from . import healing
 from .watchers import watch_npm, watch_pbs
 
 log = logging.getLogger("homepage.worker")
@@ -43,6 +45,7 @@ class Worker:
         self.self_cleanup = True
         self.http = HttpClients()
         self.started = datetime.now(timezone.utc).replace(microsecond=0)
+        self.auto_task: asyncio.Task | None = None
 
     async def detect_timescale(self) -> None:
         async with self.maker() as db:
@@ -89,6 +92,8 @@ class Worker:
                     return
                 await record(db, service, outcome)
                 await db.commit()
+            if not outcome.ok:
+                await healing.check(self.maker, sid, self.http)
         except Exception:
             log.exception("check voor service %s mislukt", sid)
         finally:
@@ -120,6 +125,19 @@ class Worker:
         async with self.maker() as db:
             await run_updates(db, self.http)
             await db.commit()
+        await cleanup_snapshots(self.maker, self.http)
+
+    async def auto_updates(self) -> None:
+        """Elke minuut kijken of het tijd is voor de nachtelijke beveiligingsupdates."""
+        try:
+            ran = await auto_updates(self.maker, self.http)
+        except Exception:
+            log.exception("nachtelijke updates mislukt")
+            return
+        if ran:
+            async with self.maker() as db:
+                await run_updates(db, self.http)
+                await db.commit()
 
     async def capacity(self) -> None:
         """Elke 10 minuten: gebruik uit Proxmox bewaren en kijken of er opslag vol dreigt te lopen."""
@@ -221,6 +239,10 @@ class Worker:
                 if time.monotonic() - last_beat > HEARTBEAT_EVERY:
                     last_beat = time.monotonic()
                     self.spawn(self.beat())
+                    if not (self.auto_task and not self.auto_task.done()):
+                        self.auto_task = asyncio.create_task(self.auto_updates())
+                        self.tasks.add(self.auto_task)
+                        self.auto_task.add_done_callback(self.tasks.discard)
                 if time.monotonic() - last_cleanup > 3600:
                     async with self.maker() as db:
                         if self.self_cleanup:
