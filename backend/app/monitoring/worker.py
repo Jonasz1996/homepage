@@ -8,6 +8,7 @@ import time
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from ..cron.scan import CRON_EVERY, run_scan as cron_scan
 from ..db import get_engine
 from ..models import Service
 from ..ssh_discovery import SYNC_EVERY, auto_sync
@@ -131,6 +132,12 @@ class Worker:
             if result and (result["added"] or result["updated"]):
                 log.info("SSH-hosts uit Proxmox: %(added)s nieuw, %(updated)s bijgewerkt", result)
 
+    async def cron(self) -> None:
+        """Elk kwartier: cronjobs, timers en Proxmox/PBS-jobs van alle machines, met hun runs."""
+        async with self.maker() as db:
+            await cron_scan(db)
+            await db.commit()
+
     def spawn(self, coro) -> None:
         task = asyncio.create_task(coro)
         self.tasks.add(task)
@@ -149,6 +156,7 @@ class Worker:
         last_network = time.monotonic() - NETWORK_EVERY - 1
         last_ip = time.monotonic() - PUBLIC_IP_EVERY - 1
         last_ssh = time.monotonic() - SYNC_EVERY + 120
+        last_cron = time.monotonic() - CRON_EVERY + 180
         while True:
             try:
                 for sid, check, url in await self.due_services():
@@ -171,6 +179,9 @@ class Worker:
                 if time.monotonic() - last_ssh > SYNC_EVERY:
                     last_ssh = time.monotonic()
                     self.spawn(self.ssh_sync())
+                if time.monotonic() - last_cron > CRON_EVERY:
+                    last_cron = time.monotonic()
+                    self.spawn(self.cron())
                 if time.monotonic() - last_cleanup > 3600:
                     async with self.maker() as db:
                         if self.self_cleanup:

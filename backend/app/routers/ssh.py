@@ -311,7 +311,7 @@ async def import_hosts(items: list[ImportItem], request: Request, user: User = D
 
 # --- WebSocket ----------------------------------------------------------------
 
-async def _ws_user(ws: WebSocket, db: AsyncSession) -> tuple[User | None, str]:
+async def _ws_user(ws: WebSocket, db: AsyncSession, reauth: bool = True) -> tuple[User | None, str]:
     origin = ws.headers.get("origin")
     if not origin or urlsplit(origin).netloc != ws.headers.get("host"):
         return None, "Verkeerde origin"
@@ -321,7 +321,7 @@ async def _ws_user(ws: WebSocket, db: AsyncSession) -> tuple[User | None, str]:
     aware = lambda dt: dt.replace(tzinfo=dt.tzinfo or timezone.utc)  # noqa: E731
     if sess is None or aware(sess.expires_at) < now or not (sess.mfa_ok and sess.user.totp_enabled):
         return None, "Niet ingelogd"
-    if now - aware(sess.auth_at) > timedelta(minutes=get_settings().reauth_minutes):
+    if reauth and now - aware(sess.auth_at) > timedelta(minutes=get_settings().reauth_minutes):
         return None, "reauth_required"
     return sess.user, ""
 
