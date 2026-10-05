@@ -93,5 +93,6 @@ class NginxProxyManager(Integration):
                        cell("ja" if h.get("certificate_id") else "nee", "ok" if h.get("certificate_id") else "warn"),
                        cell("ja" if h.get("enabled") else "nee", None if h.get("enabled") else "muted")]
                       for h in hosts]},
+            {"kind": "npm-routes", "title": "rechtstreeks (checks zonder DNS)"},
             {"kind": "npm-import", "title": "importeren"},
         ]}

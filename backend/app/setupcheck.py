@@ -15,7 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .health import scan as hw, security
 from .integrations import IntegrationError, build
 from .models import AppState, CronJob, LogEntry, PushMonitor, Service, ServiceState, SshHost, WebhookSource
-from .monitoring import cluster, configs, coverage, devices, pbssync, restoretest, upgrade, watchdog, webpush, zabbix as zbx
+from .monitoring import (cluster, configs, coverage, devices, pbssync, restoretest, routes, upgrade, watchdog, webpush,
+                         zabbix as zbx)
 from .monitoring.engine import active
 from .ssh_login import defaults as ssh_defaults
 from .ssh_pin import STATE_KEY as PIN_KEY
@@ -308,6 +309,40 @@ async def checks_row(db: AsyncSession, svcs: list[Service]) -> dict:
     return row(key, "monitoring", title, "half" if todo else "ok", text, todo[:8], fix)
 
 
+async def routes_row(db: AsyncSession, npm: list[Service]) -> dict:
+    """Gaan de checks rechtstreeks naar de server achter NPM (zonder DNS), en zo niet, wat houdt ze tegen?"""
+    title, key = "Checks rechtstreeks, zonder DNS", "monitoring:rechtstreeks"
+    fix = {"window": "detail", "service_id": npm[0].id}
+    o = await routes.overview(db)
+    if not o["enabled"]:
+        return row(key, "monitoring", title, "none", "Uitgezet op de NPM-tegel: elke check vraagt DNS en gaat door NPM.",
+                   ["Klik de NPM-tegel open → rechtstreeks → aanzetten."], fix, optional=True)
+    if not o["at"]:
+        return row(key, "monitoring", title, "half", "De proxy hosts zijn nog niet opgehaald: de worker doet dat elke "
+                   "5 minuten.", fix=fix)
+    todo = [f"NPM: {e}" for e in o["errors"]]
+    walled = [b for b in o["blocked"] if not b["refused"]]
+    refused = [b for b in o["blocked"] if b["refused"]]
+    if walled:
+        tiles = [t for b in walled for t in b["tiles"]]
+        todo.append(f"{len(tiles)} tegel{'s' if len(tiles) != 1 else ''} gaan nog door NPM omdat het dashboard de "
+                    f"server niet bereikt: {_list([b['endpoint'] for b in walled], 6)}. Laat in OPNsense het "
+                    "dashboard naar die poorten toe (net → firewall), en klik dan op de NPM-tegel → rechtstreeks → "
+                    "nu vernieuwen.")
+        fix = {"window": "net", "tab": "firewall"}
+    if refused:
+        todo.append(f"{_list([b['endpoint'] for b in refused], 6)} weigert de verbinding: staat de service uit, "
+                    "luistert ze op een andere poort dan in NPM, of weigert een firewallregel (reject) het dashboard? "
+                    "Tot dan gaan die checks door NPM.")
+    if not any(active(s.check) for s in npm):
+        todo.append("De NPM-tegel heeft zelf geen check: valt NPM uit, dan zie je dat niet meer op je andere tegels. "
+                    "✎ bewerken → NPM-tegel → Monitoring: een http-check op het adres van NPM.")
+    c = o["counts"]
+    text = (f"{c['direct']} check{'s' if c['direct'] != 1 else ''} rechtstreeks naar de server, {c['npm']} via NPM "
+            f"zonder DNS, {c['naam']} via de naam." if o["rows"] else "Geen enkele check op een naam die NPM kent.")
+    return row(key, "monitoring", title, "half" if todo else "ok", text, todo[:8], fix)
+
+
 async def watcher_row(db: AsyncSession) -> dict:
     """Ziet iemand het als de hele container uitvalt? Dat kan alleen iets buiten het dashboard: Zabbix."""
     title, fix = "Iemand die het dashboard zelf bewaakt", {"window": "health", "tab": "homepage"}
@@ -522,6 +557,7 @@ async def run(db: AsyncSession, clients, results: dict[int, dict]) -> dict:
                      ["Tegel of API van type adguard met je AdGuard-login."], "Werkt.", optional=True),
         await wake(db, svcs),
         await checks_row(db, svcs),
+        *([await routes_row(db, of("npm"))] if of("npm") else []),
         await webpush_row(db),
         await watcher_row(db),
         await zabbix_row(db, of("zabbix"), results),

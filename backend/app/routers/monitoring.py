@@ -11,6 +11,7 @@ from ..db import get_db
 from ..deps import audit, current_session, current_user, notify, recent_auth
 from ..layout import record_revision
 from ..models import CheckResult, Group, Service, ServiceState, Session, User
+from ..monitoring import routes
 from ..monitoring.engine import active, down_after, reset_state
 
 router = APIRouter(prefix="/api", tags=["monitoring"])
@@ -215,6 +216,8 @@ async def history(service_id: int, range: str = Query("24h", pattern="^(1h|24h|7
     return {
         "range": range,
         "bucket_seconds": size,
+        # Gaat de check rechtstreeks naar de server achter NPM (zonder DNS), en zo niet, waarom niet.
+        "route": routes.describe(svc.check, svc.url, await routes.load(db)),
         "uptime": total_ok / total if total else None,
         "uptime_all": await _uptime_all(db, service_id, now),
         "checks": total,
