@@ -1,0 +1,189 @@
+"""Meldingen op je gsm (web push): toestellen aanmelden, testen, wijzigen en afmelden.
+
+Aanmelden vraagt een recente 2FA-bevestiging. Vernieuwt de browser zelf het pushadres (kan maanden na het
+inloggen gebeuren), dan geeft de service worker dat door met het geheim dat hij bij het aanmelden kreeg.
+"""
+
+import hashlib
+import hmac
+import json
+import secrets
+from typing import Literal
+from urllib.parse import urlsplit
+
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel, Field
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..db import get_db
+from ..deps import audit, client_ip, current_user, notify, recent_auth
+from ..models import PushSubscription, User
+from ..monitoring import webpush
+from ..security import LoginLimiter, encrypt
+
+router = APIRouter(prefix="/api/webpush", tags=["webpush"])
+
+renew_limiter = LoginLimiter()
+RENEW_MAX_FAILURES = 10
+_DUMMY = "0" * 64
+
+Level = Literal["err", "warn", "info"]
+
+
+def make_client() -> httpx.AsyncClient:
+    """Voor de testknop (tests vervangen dit door een nep-pushdienst)."""
+    return httpx.AsyncClient(timeout=webpush.TIMEOUT)
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+class KeysIn(BaseModel):
+    p256dh: str = Field(max_length=200)
+    auth: str = Field(max_length=100)
+
+
+class SubscriptionIn(BaseModel):
+    endpoint: str = Field(max_length=1000)
+    keys: KeysIn
+
+
+class SubscribeIn(SubscriptionIn):
+    label: str = Field(min_length=1, max_length=80)
+    min_level: Level = "err"
+
+
+class ChangeIn(BaseModel):
+    label: str | None = Field(default=None, min_length=1, max_length=80)
+    min_level: Level | None = None
+
+
+class RenewIn(BaseModel):
+    id: int
+    renew: str = Field(max_length=200)
+    subscription: SubscriptionIn
+
+
+def _data(body: SubscriptionIn) -> dict:
+    if not webpush.endpoint_ok(body.endpoint):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Dit pushadres wordt niet aanvaard")
+    if webpush.check_keys(body.keys.p256dh, body.keys.auth) is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Ongeldige sleutels van de browser")
+    return {"endpoint": body.endpoint, "p256dh": body.keys.p256dh, "auth": body.keys.auth}
+
+
+def _origin(request: Request) -> str | None:
+    return request.headers.get("origin") or f"{request.url.scheme}://{request.url.netloc}"
+
+
+def _out(s: PushSubscription) -> dict:
+    return {"id": s.id, "label": s.label, "min_level": s.min_level, "created_at": s.created_at,
+            "last_ok_at": s.last_ok_at, "last_error": s.last_error, "fail_count": s.fail_count}
+
+
+async def _get(db: AsyncSession, sid: int) -> PushSubscription:
+    s = await db.get(PushSubscription, sid)
+    if s is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Niet gevonden")
+    return s
+
+
+def _host(endpoint: str) -> str | None:
+    return urlsplit(endpoint).hostname
+
+
+@router.get("/key")
+async def public_key(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    state = await webpush.keys(db)
+    await db.commit()
+    return {"public_key": state["public"]}
+
+
+@router.get("/subscriptions")
+async def list_subscriptions(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    rows = (await db.execute(select(PushSubscription).order_by(PushSubscription.id))).scalars()
+    return [_out(s) for s in rows]
+
+
+@router.post("/subscriptions", status_code=status.HTTP_201_CREATED)
+async def subscribe(body: SubscribeIn, request: Request, user: User = Depends(recent_auth),
+                    db: AsyncSession = Depends(get_db)):
+    data = _data(body)
+    await webpush.keys(db)
+    await webpush.set_sub(db, _origin(request))
+    renew = secrets.token_urlsafe(32)
+    h = webpush.endpoint_hash(body.endpoint)
+    s = (await db.execute(select(PushSubscription).where(PushSubscription.endpoint_hash == h))).scalar_one_or_none()
+    if s is None:
+        s = PushSubscription(user_id=user.id, endpoint_hash=h, fail_count=0, warned=False)
+        db.add(s)
+    # Hetzelfde toestel opnieuw: dezelfde rij, met nieuwe sleutels en een nieuw vernieuwgeheim.
+    s.user_id, s.data, s.min_level = user.id, encrypt(json.dumps(data)), body.min_level
+    s.label = body.label.strip() or "toestel"
+    s.renew_hash, s.fail_count, s.warned, s.last_error = _sha(renew), 0, False, None
+    await audit(db, request, user, "webpush_added", label=s.label, min_level=s.min_level, host=_host(body.endpoint))
+    await db.commit()
+    return {"id": s.id, "renew": renew}
+
+
+@router.patch("/subscriptions/{sid}")
+async def change_subscription(sid: int, body: ChangeIn, request: Request, user: User = Depends(recent_auth),
+                              db: AsyncSession = Depends(get_db)):
+    s = await _get(db, sid)
+    if body.label is not None:
+        s.label = body.label.strip() or s.label
+    if body.min_level is not None:
+        s.min_level = body.min_level
+    await audit(db, request, user, "webpush_changed", label=s.label, min_level=s.min_level)
+    await db.commit()
+    return _out(s)
+
+
+@router.delete("/subscriptions/{sid}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_subscription(sid: int, request: Request, user: User = Depends(recent_auth),
+                              db: AsyncSession = Depends(get_db)):
+    s = await _get(db, sid)
+    label = s.label
+    await audit(db, request, user, "webpush_removed", label=label)
+    await db.delete(s)
+    # Bron "auth": komt ook op toestellen die alleen storingen krijgen (wie meldingen stillegt, wil je weten).
+    notify(db, f"Meldingen op {label} uitgezet"[:200], "Dit toestel krijgt geen meldingen meer.", level="warn",
+           source="auth")
+    await db.commit()
+
+
+@router.post("/subscriptions/{sid}/test")
+async def test_subscription(sid: int, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    s = await _get(db, sid)
+    async with make_client() as client:
+        error = await webpush.send_test(db, client, s)
+    await db.commit()
+    return {"ok": error is None, "error": error}
+
+
+@router.put("/subscriptions/renew")
+async def renew_subscription(body: RenewIn, request: Request, db: AsyncSession = Depends(get_db)):
+    """Zonder sessie: de service worker doet dit op de achtergrond. Het vernieuwgeheim is het bewijs."""
+    who = f"webpush:{client_ip(request) or '?'}"
+    if renew_limiter.blocked(who, limit=RENEW_MAX_FAILURES):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Te veel pogingen")
+    s = await db.get(PushSubscription, body.id)
+    same = hmac.compare_digest(s.renew_hash if s else _DUMMY, _sha(body.renew))
+    if s is None or not same:
+        renew_limiter.fail(who)
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Ongeldig vernieuwgeheim")
+    data = _data(body.subscription)
+    h = webpush.endpoint_hash(body.subscription.endpoint)
+    if h != s.endpoint_hash:
+        # Had de pagina dit nieuwe adres al aangemeld, dan is dat hetzelfde toestel: één rij houden.
+        await db.execute(delete(PushSubscription).where(PushSubscription.endpoint_hash == h,
+                                                        PushSubscription.id != s.id))
+    s.endpoint_hash, s.data = h, encrypt(json.dumps(data))
+    s.fail_count, s.warned, s.last_error = 0, False, None
+    await audit(db, request, None, "webpush_renewed", label=s.label, host=_host(body.subscription.endpoint))
+    await db.commit()
+    return {"ok": True, "id": s.id}
+

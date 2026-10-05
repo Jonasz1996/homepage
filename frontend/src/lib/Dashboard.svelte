@@ -77,7 +77,7 @@
     try { where = await api('/outside') } catch { /* oudere backend */ }
   }
   // Knoppen uit het aandacht-overzicht, de instellingen-checklist en de veiligheidscheck: het venster dat het oplost.
-  const SAME = ['updates', 'capacity', 'restoretest', 'planned', 'webhooks', 'configs']
+  const SAME = ['updates', 'capacity', 'restoretest', 'planned', 'webhooks', 'configs', 'webpush']
   function openFix(fix) {
     const w = fix?.window
     const svc = fix?.service_id && allServices.find((s) => s.id === fix.service_id)
@@ -190,6 +190,7 @@
     { label: 'configuratiewijzigingen: opnsense, npm, proxmox, bestanden (diff)', run: () => (modal = { kind: 'configs' }) },
     { label: 'gepland onderhoud: vensters plannen', run: () => (modal = { kind: 'planned' }) },
     { label: 'webhooks: meldingen van proxmox, pbs, uptime kuma, home assistant', run: () => (modal = { kind: 'webhooks' }) },
+    { label: 'meldingen op je gsm (web push)', run: () => (modal = { kind: 'webpush' }) },
     { label: 'cluster: quorum, versies, qdevice, ha, replicatie', run: () => openHealth({ tab: 'cluster' }) },
     { label: 'back-updekking: welke vm/ct op hoeveel pbs\'en, pbs-sync', run: () => openHealth({ tab: 'backups' }) },
     { label: 'bewerken aan/uit', run: () => (editing = !editing) },
@@ -481,7 +482,7 @@
     history.replaceState(null, '', location.pathname)
     const kinds = { history: 'history', report: 'history', updates: 'updates', network: 'network', capacity: 'capacity',
                     security: 'security', configs: 'configs', webhooks: 'webhooks', planned: 'planned',
-                    hersteltest: 'restoretest', api: 'apis' }
+                    hersteltest: 'restoretest', api: 'apis', webpush: 'webpush' }
     if (what === 'logs') openLogs()
     else if (what === 'cron') openCron()
     else if (what === 'health') openHealth()
@@ -489,7 +490,19 @@
     else if (what === 'devices') modal = { kind: 'network', tab: 'apparaten' }
     else if (what === 'kaart') modal = { kind: 'network', tab: 'kaart' }
     else if (what === 'aandacht' || what === 'instellingen') modal = { kind: 'attention', tab: what === 'aandacht' ? 'nu' : what }
+    else if (what === 'melding') openPushed(q.get('n'))
     else if (kinds[what]) modal = { kind: kinds[what], tab: what === 'report' ? 'report' : undefined }
+  }
+  // Tik op een pushbericht (/?open=melding&n=<id>): hetzelfde openen als een klik in het meldingencentrum.
+  async function openPushed(id) {
+    if (!/^\d+$/.test(id || '')) return
+    try {
+      const n = await api(`/notifications/${id}`)
+      if (!n.read) api(`/notifications/${id}/read`, { method: 'POST' }).catch(() => {})
+      // Een service openen kan pas als de indeling er is.
+      for (let i = 0; i < 50 && !loaded; i++) await new Promise((r) => setTimeout(r, 100))
+      openNotification(n)
+    } catch { /* al gewist */ }
   }
 
   // Na een update één keer tonen wat er nieuw is (per gebruiker onthouden op de server).
@@ -546,7 +559,7 @@
         <button class="mini buiten" onclick={() => (modal = { kind: 'security', tab: 'outside' })}
                 title="Je bent van buitenaf verbonden ({where.why}): terminal, updates, acties en downloads staan uit, tenzij je ze aanzet">buiten</button>
       {/if}
-      <Notifications onopen={openNotification} onwebhooks={() => (modal = { kind: 'webhooks' })} />
+      <Notifications onopen={openNotification} onwebhooks={() => (modal = { kind: 'webhooks' })} onwebpush={() => (modal = { kind: 'webpush' })} />
       <button class="mini burger" class:on={menuOpen} onclick={() => (menuOpen = !menuOpen)} aria-label="Menu" aria-expanded={menuOpen}>☰{#if att.counts.err}<i class="nd e"></i>{/if}</button>
       <!-- Op de gsm klapt dit open onder ☰; op een groot scherm staan de knoppen gewoon in de titelbalk. -->
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -797,6 +810,8 @@
   <Lazy load={() => import('./ApiManager.svelte')} onclose={() => { modal = null; load(); loadWidgets() }} />
 {:else if modal?.kind === 'webhooks'}
   <Lazy load={() => import('./Webhooks.svelte')} services={allServices} onclose={() => (modal = null)} />
+{:else if modal?.kind === 'webpush'}
+  <Lazy load={() => import('./PushDevices.svelte')} onclose={() => (modal = null)} />
 {:else if modal?.kind === 'planned'}
   <Lazy load={() => import('./Planned.svelte')} services={allServices} groups={groupOptions} onclose={() => (modal = null)} />
 {:else if modal?.kind === 'restoretest'}

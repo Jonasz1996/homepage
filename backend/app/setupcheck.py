@@ -5,6 +5,8 @@ none, wat er ontbreekt (todo) en welk venster het oplost (fix). optional: "nog n
 """
 
 import asyncio
+import hashlib
+import re
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import distinct, func, select
@@ -12,12 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .health import scan as hw, security
 from .integrations import IntegrationError, build
-from .models import AppState, CronJob, LogEntry, Service, ServiceState, SshHost, WebhookSource
-from .monitoring import cluster, configs, coverage, devices, pbssync, restoretest, upgrade, watchdog, zabbix as zbx
+from .models import AppState, CronJob, LogEntry, PushMonitor, Service, ServiceState, SshHost, WebhookSource
+from .monitoring import cluster, configs, coverage, devices, pbssync, restoretest, upgrade, watchdog, webpush, zabbix as zbx
 from .monitoring.engine import active
 from .ssh_login import defaults as ssh_defaults
 from .ssh_pin import STATE_KEY as PIN_KEY
 
+PUSH_URL = re.compile(r"/api/push/([A-Za-z0-9_-]{16,})")
 GROUPS = (("proxmox", "Proxmox en back-ups"), ("netwerk", "Netwerk"), ("monitoring", "Monitoring en meldingen"),
           ("ssh", "SSH, cron, updates en logs"), ("beveiliging", "Beveiliging"))
 PRIV_TIMEOUT = 8
@@ -273,6 +276,22 @@ async def checks_row(db: AsyncSession, svcs: list[Service]) -> dict:
         elif st and st.redirected_to and not s.check.get("same_host"):
             todo.append(f"{s.name}: verwijst door naar {st.redirected_to}, dus de check ziet de loginpagina en niet "
                         "de app. Check een pad zonder login (bv. /api/health), of vink 'down als hij doorverwijst' aan.")
+    monitors = {m.service_id: m for m in (await db.execute(select(PushMonitor))).scalars()}
+    for s in running:
+        if s.check.get("type") != "push":
+            continue
+        if s.id not in monitors:
+            todo.append(f"{s.name}: push-check zonder adres. Klik de tegel open en kies push-adres maken.")
+        elif not monitors[s.id].last_at:
+            todo.append(f"{s.name}: nog geen signaal ontvangen. Pas het adres aan in je script en laat het één keer lopen.")
+    # Cronjobs die nog een push-adres aanroepen dat het dashboard niet kent: meestal nog dat van Uptime Kuma.
+    known = {m.token_hash for m in monitors.values()}
+    for j in (await db.execute(select(CronJob).where(CronJob.removed_at.is_(None), CronJob.enabled.is_(True),
+                                                     CronJob.command.contains("/api/push/")))).scalars():
+        tokens = PUSH_URL.findall(j.command or "")
+        if tokens and not any(hashlib.sha256(t.encode()).hexdigest() in known for t in tokens):
+            todo.append(f"Cronjob {j.alias or j.name} op {j.target_name} roept een push-adres aan dat het dashboard "
+                        "niet kent (nog van Uptime Kuma?). Maak een push-check en vervang het adres.")
     kuma = [w for w in (await db.execute(select(WebhookSource).where(WebhookSource.kind == "uptimekuma"))).scalars()
             if w.enabled and w.last_at and datetime.now(timezone.utc) - w.last_at.replace(tzinfo=w.last_at.tzinfo
                                                                                       or timezone.utc) < timedelta(days=7)]
@@ -304,6 +323,22 @@ async def watcher_row(db: AsyncSession) -> dict:
                    "Zabbix nog aan?", how, fix)
     return row("wachter", "monitoring", title, "ok", f"{seen.get('ip') or 'Iets'} vraagt /api/healthz op, laatst om "
                f"{_local(at)}.", fix=fix)
+
+
+async def webpush_row(db: AsyncSession) -> dict:
+    title, fix = "Meldingen op je gsm", {"window": "webpush"}
+    st = await webpush.status(db)
+    if not st["devices"]:
+        return row("webpush", "monitoring", title, "none", "Nog geen toestel: storingen zie je alleen als je het "
+                   "dashboard open hebt.", ["🔔 → gsm → Dit toestel meldingen laten krijgen, op je gsm (iPhone: eerst "
+                   "op het beginscherm zetten)."], fix)
+    n = st["devices"]
+    text = f"{n} toestel{'len' if n != 1 else ''}" + (f", laatst afgeleverd {_local(st['last_ok'])}." if st["last_ok"]
+                                                       else ".")
+    if st["failing"]:
+        return row("webpush", "monitoring", title, "half", text, [f"Afleveren mislukt op {_list(st['failing'])}: "
+                   "zet het daar opnieuw aan (🔔 → gsm)."], fix)
+    return row("webpush", "monitoring", title, "ok", text, fix=fix)
 
 
 async def hardware(db: AsyncSession) -> dict:
@@ -487,6 +522,7 @@ async def run(db: AsyncSession, clients, results: dict[int, dict]) -> dict:
                      ["Tegel of API van type adguard met je AdGuard-login."], "Werkt.", optional=True),
         await wake(db, svcs),
         await checks_row(db, svcs),
+        await webpush_row(db),
         await watcher_row(db),
         await zabbix_row(db, of("zabbix"), results),
         await home_assistant(db, clients, of("homeassistant"), results),

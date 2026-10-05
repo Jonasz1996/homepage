@@ -41,3 +41,76 @@ self.addEventListener('fetch', (e) => {
     return hit || net
   }))
 })
+
+// --- Web push: meldingen van het dashboard, ook als het tabblad dicht is ------------------------------------
+
+self.addEventListener('push', (e) => {
+  let d = {}
+  try { d = e.data ? e.data.json() : {} } catch { d = { title: e.data?.text() } }
+  const tag = d.tag || undefined
+  e.waitUntil(self.registration.showNotification(d.title || 'homepage', {
+    body: d.body || '',
+    tag,
+    // Een storing die een oudere melding van dezelfde service vervangt, moet opnieuw trillen.
+    renotify: d.level === 'err' && !!tag,
+    icon: '/icon-192.png',
+    badge: '/badge-96.png',
+    data: { url: d.url || '/' },
+  }))
+})
+
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close()
+  const url = new URL(e.notification.data?.url || '/', self.location.origin)
+  // Alleen eigen pagina's openen.
+  const target = url.origin === self.location.origin ? url.href : self.location.origin + '/'
+  e.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+    const own = wins.find((c) => new URL(c.url).origin === self.location.origin)
+    if (own) {
+      try {
+        await own.focus()
+        if (await own.navigate(target)) return
+      } catch { /* niet door deze service worker geladen: dan een nieuw venster */ }
+    }
+    await self.clients.openWindow(target)
+  })())
+})
+
+// De browser vernieuwt soms zelf het pushadres (maanden na het aanmelden): dan meldt de service worker het
+// nieuwe adres aan met het geheim dat de pagina bij het aanzetten in IndexedDB zette. Geen sessie nodig.
+function pushStore(mode, fn) {
+  return new Promise((resolve, reject) => {
+    const open = indexedDB.open('homepage', 1)
+    open.onupgradeneeded = () => open.result.createObjectStore('kv')
+    open.onerror = () => reject(open.error)
+    open.onsuccess = () => {
+      const tx = open.result.transaction('kv', mode)
+      const req = fn(tx.objectStore('kv'))
+      tx.oncomplete = () => { open.result.close(); resolve(req.result) }
+      tx.onerror = () => { open.result.close(); reject(tx.error) }
+    }
+  })
+}
+
+function keyBytes(b64) {
+  const s = atob(b64.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (b64.length % 4)) % 4))
+  return Uint8Array.from(s, (c) => c.charCodeAt(0))
+}
+
+self.addEventListener('pushsubscriptionchange', (e) => {
+  e.waitUntil((async () => {
+    const saved = await pushStore('readonly', (s) => s.get('webpush')).catch(() => null)
+    if (!saved?.id || !saved?.renew || !saved?.applicationServerKey) return
+    const sub = e.newSubscription || await self.registration.pushManager.subscribe({
+      userVisibleOnly: true, applicationServerKey: keyBytes(saved.applicationServerKey),
+    })
+    const j = sub.toJSON()
+    await fetch('/api/webpush/subscriptions/renew', {
+      method: 'PUT',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'homepage' },
+      body: JSON.stringify({ id: saved.id, renew: saved.renew, subscription: { endpoint: j.endpoint, keys: j.keys } }),
+    })
+  })())
+})

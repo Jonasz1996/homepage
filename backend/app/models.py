@@ -611,3 +611,40 @@ class PushMonitor(Base):
     missed_at: Mapped[datetime | None]
     count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class PushSubscription(Base):
+    """Een toestel (browser of app op het beginscherm) dat meldingen krijgt via web push."""
+
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    # sha256 van het pushadres: zo is hetzelfde toestel terug te vinden zonder het adres leesbaar te bewaren.
+    endpoint_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    # Versleuteld: {endpoint, p256dh, auth}.
+    data: Mapped[str] = mapped_column(Text)
+    label: Mapped[str] = mapped_column(String(80))
+    # err | warn | info: vanaf welke ernst dit toestel meldingen krijgt.
+    min_level: Mapped[str] = mapped_column(String(8), default="err", server_default="err")
+    # sha256 van het geheim waarmee de service worker een vernieuwd pushadres doorgeeft (zonder sessie).
+    renew_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    last_ok_at: Mapped[datetime | None]
+    last_error: Mapped[str | None] = mapped_column(String(300))
+    fail_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Al gemeld dat het misloopt (één keer, tot het weer lukt).
+    warned: Mapped[bool] = mapped_column(Boolean, default=False, server_default=sa_false())
+
+
+class PushQueue(Base):
+    """Nog te versturen pushberichten, per toestel (met nieuwe pogingen als de pushdienst even niet antwoordt)."""
+
+    __tablename__ = "push_queue"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    subscription_id: Mapped[int] = mapped_column(ForeignKey("push_subscriptions.id", ondelete="CASCADE"), index=True)
+    notification_id: Mapped[int | None] = mapped_column(ForeignKey("notifications.id", ondelete="CASCADE"))
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    next_at: Mapped[datetime] = mapped_column(default=utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)

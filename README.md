@@ -384,7 +384,7 @@ Later, deel 3 (Authentik en gsm):
 - **instellingen** (! → instellingen, of `/?open=instellingen`): per functie of ze werkt, half ingesteld is (met wat
   er ontbreekt) of nog niet: Proxmox (ook welke rechten elk token mist), PBS, de hersteltest, OPNsense (ook de
   rechten voor apparaten en de config-kopie), NPM, Cloudflare, AdGuard, Wake-on-LAN (welke nodes nog geen
-  MAC-adres hebben), de checks op je tegels, wie het dashboard zelf bewaakt, Zabbix, Home Assistant (welke nodes nog geen sensor hebben), schijven, domeinen, de webhooks
+  MAC-adres hebben), de checks op je tegels, meldingen op je gsm, wie het dashboard zelf bewaakt, Zabbix, Home Assistant (welke nodes nog geen sensor hebben), schijven, domeinen, de webhooks
   van Proxmox, PBS en Home Assistant, Portainer, de SSH-login, hosts zonder bevestigde host key, cron, logs,
   nachtelijke updates en de beveiliging. Optionele functies die nog niet ingesteld zijn, staan grijs
 - **effecten** zoals in aiverslag: een achtergrond van punten en 0/1 die voor de muis wijken, een ripple op elke knop,
@@ -451,7 +451,19 @@ meer. Tokens komen niet in de logs van nginx en uvicorn.
 Portainer). Down als de container stopt of *unhealthy* is. De tegel hangt dan automatisch af van Portainer: valt
 Portainer uit, dan één melding.
 
-<!-- webpush -->
+**Meldingen op je gsm (web push).** Het dashboard kan meldingen zelf naar je gsm of browser sturen, ook als het
+tabblad dicht is: geen Telegram, ntfy of mail, maar de pushdienst die al in je browser zit (Google voor
+Chrome/Android, Apple voor iPhone, Mozilla voor Firefox). Er verandert niets tot je het op een toestel aanzet: open
+het belletje → **gsm** (of Ctrl+K → "meldingen op je gsm") en kies **Dit toestel meldingen laten krijgen**; dat vraagt
+je 2FA-code. Per toestel kies je welke meldingen: alleen storingen en herstel, ook waarschuwingen, of alles. Herstel,
+aanmeldingen vanaf een nieuw IP en het weekrapport komen altijd, en meer dan 10 per minuut worden samengevat in één
+bericht. Per tegel kan je onder **bewerken → Monitoring → Melden** kiezen voor *alleen hier*: dan gaat die tegel nooit
+naar je gsm. Op een iPhone moet het dashboard eerst als app op je beginscherm staan (Delen → Zet op beginscherm, iOS
+16.4 of nieuwer); op Android werkt het in Chrome of als app via Toevoegen aan startscherm. Het werkt alleen via
+https. De berichten zijn end-to-end versleuteld (RFC 8291). De server moet uitgaand 443 kunnen naar
+`fcm.googleapis.com`, `*.push.apple.com` en `*.push.services.mozilla.com` (zie de firewall-weergave). Een tik op een bericht
+opent het dashboard op de juiste plek. Meldt de pushdienst een toestel af, of lukt het afleveren drie keer niet, dan
+zie je dat in het meldingencentrum en op je andere toestellen. Valt de worker uit, dan stuurt de API de meldingen.
 
 **Het dashboard zelf bewaken.** De worker en de API houden elkaar in het oog: valt de worker uit, dan meldt de API
 dat (en stuurt hij de meldingen naar je gsm); antwoordt de API niet meer, dan meldt de worker dat. Een check die
