@@ -43,6 +43,16 @@
   let integrations = $state([])
   api('/integrations').then((r) => (integrations = r)).catch(() => {})
   let integ = $derived(integrations.find((i) => i.name === type))
+  // API uit API-beheer: dan komen adres en sleutels daarvandaan.
+  let apiId = $state(s.api_id ?? null)
+  let apis = $state([])
+  api('/apis').then((r) => (apis = r.apis)).catch(() => {})
+  let apiSel = $derived(apis.find((a) => a.id === apiId))
+  let apiCats = $derived.by(() => {
+    const m = new Map()
+    for (const a of apis) { if (!m.has(a.category)) m.set(a.category, []); m.get(a.category).push(a) }
+    return [...m]
+  })
 
   let preview = $derived(iconUrl(icon))
   $effect(() => { preview; iconBroken = false })
@@ -74,7 +84,8 @@
     for (const row of newSecrets) if (row.key.trim() && row.value) secrets[row.key.trim()] = row.value
     return {
       group_id, name, url: url || null, icon: icon || null, description: description || null,
-      type: type || 'link', check, config, parent_id: parentId || null,
+      type: apiId ? (apiSel?.kind || type) : type === 'rest' || !type ? 'link' : type, api_id: apiId,
+      check, config, parent_id: parentId || null,
       secrets: Object.keys(secrets).length ? secrets : null,
     }
   }
@@ -212,9 +223,25 @@
       <p class="help">Een service is pas down na 3 mislukte checks op rij. Bij HTTPS wordt ook het certificaat gevolgd (melding 14 en 3 dagen vooraf).</p>
     </details>
 
-    <details class="adv" open={type !== 'link' || secretKeys.length > 0}>
+    <details class="adv" open={type !== 'link' || secretKeys.length > 0 || !!apiId}>
       <summary>Integratie en API</summary>
       <div class="grid">
+        <div class="full">
+          <label class="lbl" for="sf-api">API (uit API-beheer)</label>
+          <select id="sf-api" bind:value={apiId}>
+            <option value={null}>geen: eigen instellingen hieronder</option>
+            {#each apiCats as [cat, list] (cat)}
+              <optgroup label={cat}>{#each list as a (a.id)}<option value={a.id}>{a.name} · {a.kind_label}</option>{/each}</optgroup>
+            {/each}
+          </select>
+          {#if apiSel}
+            <p class="help">Adres, sleutels en calls komen van <b>{apiSel.name}</b> ({apiSel.url}). Instellingen hieronder, zoals
+              <code>node</code>, vullen aan; aanpassen doe je in <code>api</code> in de titelbalk.</p>
+          {:else}
+            <p class="help">Stel API's één keer in via <code>api</code> in de titelbalk en kies ze hier. Of vul hieronder een type en sleutels in voor alleen deze tegel.</p>
+          {/if}
+        </div>
+        {#if !apiId}
         <div class="full">
           <label class="lbl" for="sf-type">Type</label>
           <input id="sf-type" bind:value={type} list="sf-types" />
@@ -233,11 +260,13 @@
             <p class="help">Voor dit type is er nog geen integratie; de tegel werkt als gewone snelkoppeling.</p>
           {/if}
         </div>
+        {/if}
         <div class="full">
           <label class="lbl" for="sf-config">Instellingen (JSON, niet geheim)</label>
           <textarea id="sf-config" bind:value={configText} placeholder={'{\n  "url": "https://192.168.0.50:8006",\n  "node": "pve50"\n}'}></textarea>
         </div>
       </div>
+      {#if !apiId}
       <span class="lbl">Geheimen (versleuteld bewaard, nooit zichtbaar in de browser)</span>
       {#each secretKeys as k (k)}
         <div class="row secret">
@@ -257,6 +286,7 @@
         </div>
       {/each}
       <button type="button" class="mini" onclick={() => newSecrets.push({ key: '', value: '' })}>+ geheim</button>
+      {/if}
     </details>
 
     <p class="err">{error}</p>

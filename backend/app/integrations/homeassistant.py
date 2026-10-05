@@ -52,6 +52,10 @@ class HomeAssistant(Integration):
         "insecure": "true bij een zelfondertekend certificaat",
     }
     secret_help = {"token": "long-lived access token (profiel → Beveiliging, onderaan)"}
+    call_prefix = "/api"
+
+    async def call_auth(self) -> dict:
+        return {"headers": self.headers()}
 
     def headers(self) -> dict:
         return {"Authorization": f"Bearer {self.need('token')[0]}"}
