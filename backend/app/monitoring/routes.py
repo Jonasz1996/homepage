@@ -84,6 +84,8 @@ class Route:
 def _forward(item: dict) -> tuple[str, str, int] | None:
     scheme = str(item.get("forward_scheme") or "http").lower()
     host = str(item.get("forward_host") or "").strip()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]  # IPv6 zoals NPM het wil; endpoint() en de URL zetten de haken zelf
     try:
         port = int(item.get("forward_port") or (443 if scheme == "https" else 80))
     except (TypeError, ValueError):
@@ -93,7 +95,11 @@ def _forward(item: dict) -> tuple[str, str, int] | None:
     return scheme, host, port
 
 
-def _why_not(scheme_host_port: tuple[str, str, int] | None) -> str | None:
+# Waar Docker zijn netwerken legt (172.17.0.1 is de server van NPM, gezien vanuit zijn container).
+_DOCKER = ipaddress.ip_network("172.16.0.0/12")
+
+
+def _why_not(scheme_host_port: tuple[str, str, int] | None, via: str | None = None) -> str | None:
     """Waarom dit doel niet rechtstreeks kan (None = kan)."""
     if scheme_host_port is None:
         return "geen geldig doel in NPM"
@@ -104,7 +110,20 @@ def _why_not(scheme_host_port: tuple[str, str, int] | None) -> str | None:
         return f"het doel ({host}) is geen IP-adres"
     if ip.is_loopback or ip.is_unspecified:
         return "het doel is NPM zelf (localhost)"
+    v = _is_ip(via or "")
+    if ip in _DOCKER and not (v is not None and v in _DOCKER):
+        # Een Docker-netwerk op de server van NPM: alleen NPM zelf kan daar.
+        return f"het doel ({host}) is een Docker-netwerk bij NPM"
     return None
+
+
+def _norm(name) -> str:
+    """Een naam zoals we hem vergelijken: kleine letters, zonder punt op het einde, IDN als punycode."""
+    name = str(name).strip().lower().rstrip(".")
+    try:
+        return name.encode("idna").decode("ascii")
+    except UnicodeError:
+        return name
 
 
 _COMMENT = re.compile(r"#[^\n]*")
@@ -127,7 +146,7 @@ def _expiry(value) -> str | None:
 
 
 def _names(item: dict) -> list[str]:
-    return [n for n in (str(x).strip().lower().rstrip(".") for x in item.get("domain_names") or []) if n]
+    return [n for n in (_norm(x) for x in item.get("domain_names") or []) if n]
 
 
 def build_hosts(proxy_hosts: list[dict], certs: list[dict] | None, npm_id: int, via: str | None = None,
@@ -150,7 +169,7 @@ def build_hosts(proxy_hosts: list[dict], certs: list[dict] | None, npm_id: int, 
         if not isinstance(h, dict):
             continue
         fwd = _forward(h)
-        why = _why_not(fwd)
+        why = _why_not(fwd, via)
         if not h.get("enabled", True):
             why = "staat uit in NPM"
         elif (h.get("meta") or {}).get("nginx_online") is False:
@@ -169,7 +188,7 @@ def build_hosts(proxy_hosts: list[dict], certs: list[dict] | None, npm_id: int, 
                 why = why or "aparte locatie met een regex of = in NPM"
                 continue
             lf = _forward(loc)
-            lwhy = "het doel heeft een pad" if lf and "/" in lf[1] else _why_not(lf)
+            lwhy = "het doel heeft een pad" if lf and "/" in lf[1] else _why_not(lf, via)
             if _own_config(loc):
                 lwhy = "eigen nginx-configuratie in NPM"
             locations.append({"path": str(loc["path"]), "scheme": lf[0] if lf else None, "host": lf[1] if lf else None,
@@ -206,6 +225,7 @@ class Plan:
     why: str | None = None
     blocked: str | None = None
     firewall: tuple[str, int] | None = None
+    firewall_npm: bool = False  # de firewallregel is voor NPM zelf, niet voor de server erachter
 
 
 class Table:
@@ -220,7 +240,7 @@ class Table:
     def entry(self, name: str | None) -> dict | None:
         if not name:
             return None
-        name = name.lower().rstrip(".")
+        name = _norm(name)
         if name in self.hosts:
             return self.hosts[name]
         # Een wildcard in NPM (*.lab.jbogaert.be): de langste die past, zoals nginx.
@@ -287,6 +307,10 @@ class Table:
             # Zonder passend certificaat beantwoordt NPM https voor deze naam niet (of met een fout certificaat):
             # via NPM ziet de check dat zoals vroeger.
             target, why = None, "NPM heeft voor deze naam geen passend certificaat"
+        elif target is not None and scheme == "https" and self._cert(e) is None:
+            # Niet te lezen in NPM (rechten, of nog niet opgehaald): rechtstreeks zagen we een verlopen certificaat
+            # niet, via NPM wel (en dan met de echte vervaldatum).
+            target, why = None, "de vervaldatum van het certificaat is niet te lezen in NPM"
         if target is not None and scheme == "http" and e.get("ssl_forced"):
             # NPM stuurt http door naar https: via NPM krijgt de check die doorverwijzing, en gaat daarna (https)
             # rechtstreeks, met het certificaat.
@@ -301,7 +325,7 @@ class Table:
             elif not probe.get("ok"):
                 if probe.get("error") == REFUSED:
                     # De server antwoordt, maar niets luistert: de service staat uit (of een firewall weigert actief).
-                    why = f"{where} weigert de verbinding: draait de service?"
+                    why = f"{where} weigert de verbinding: draait de service (of weigert een firewall)?"
                 else:
                     why = f"{where} niet bereikbaar vanaf het dashboard" + (
                         f" ({probe['error']})" if probe.get("error") else "") + ", firewall?"
@@ -331,26 +355,24 @@ class Table:
             port = target.rpartition(":")[2]
             if not port.isdigit():
                 return None
-            port = int(port)
-            if port in NPM_PORTS.values():
-                # De poort van NPM: naar de poort van de server erachter (of NPM op zijn IP, zelfde poort).
-                route, why, blocked, fw = self.explain(name, "/")
-                if route is not None:
-                    return Plan(route, endpoint(route.host, port if route.npm else route.port), why, blocked, fw)
-                return Plan(None, None, why, blocked, fw)
+            # Een tcp-check op een naam opende altijd een verbinding met NPM, en dat blijft zo (zonder DNS). Naar de
+            # server erachter zou hij down gaan als die uitvalt, en na de volgende ronde weer "up" via NPM.
             route = self.npm_for(name)
-            return Plan(route, endpoint(route.host, port) if route else None,
-                        f"poort {port} gaat niet door NPM: naar het IP van NPM, zoals de naam")
+            if route is None:
+                return Plan(None, None, "NPM niet bereikbaar vanaf het dashboard")
+            return Plan(route, endpoint(route.host, int(port)), "een tcp-check op een naam test NPM, zoals altijd",
+                        firewall=(route.host, int(port)), firewall_npm=True)
         # Een ping op een naam pingt NPM (zo was het altijd): of de server erachter ping toelaat, weten we niet.
         route = self.npm_for(name)
-        return Plan(route, route.host if route else None, "een ping op een naam pingt NPM (vul het IP van de server "
-                    "in als doel om die zelf te pingen)")
+        return Plan(route, route.host if route else None, "een ping op een naam pingt NPM, zoals altijd (vul het IP "
+                    "van de server in als doel om die zelf te pingen)" if route else "NPM niet bereikbaar vanaf het "
+                    "dashboard")
 
 
 def _covers_entry(e: dict, name: str | None) -> bool:
     """[] = geen certificaat aan de host; None = niet op te halen (dan gaan we ervan uit dat het past)."""
     names = e.get("cert_names")
-    return names is None or bool(names) and _covers(names, (name or "").lower().rstrip("."))
+    return names is None or bool(names) and _covers(names, _norm(name or ""))
 
 
 # --- de tabel in het geheugen (voor de checks) ---------------------------------------------------------------------
@@ -444,6 +466,11 @@ async def refresh(db: AsyncSession, clients, now: datetime | None = None, force_
     old_hosts: dict[str, dict] = prev.get("hosts") or {}
     per_npm: list[dict[str, dict]] = []
     errors: dict[str, str] = {}
+
+    def kept(sid: int) -> dict[str, dict]:
+        """De routes van deze NPM uit de vorige ronde (ook namen die in meer dan één NPM staan)."""
+        return {n: e_ for n, e_ in old_hosts.items() if sid in (e_.get("npms") or [e_.get("npm")])}
+
     for svc in (await db.execute(select(Service).where(Service.type == "npm").order_by(Service.id))).scalars().all():
         try:
             integ = build(svc, clients)
@@ -452,22 +479,29 @@ async def refresh(db: AsyncSession, clients, now: datetime | None = None, force_
         except IntegrationError as e:
             # NPM even niet bereikbaar: de routes van die tegel blijven zoals ze waren.
             errors[str(svc.id)] = str(e)[:200]
-            per_npm.append({n: e_ for n, e_ in old_hosts.items() if e_.get("npm") == svc.id})
+            per_npm.append(kept(svc.id))
             continue
         certs = await _list(integ, "/nginx/certificates")
-        others = [(await _list(integ, "/nginx/redirection-hosts") or [], "NPM stuurt deze naam door (redirection host)"),
-                  (await _list(integ, "/nginx/dead-hosts") or [], "404-host in NPM")]
+        redirects = await _list(integ, "/nginx/redirection-hosts")
+        dead = await _list(integ, "/nginx/dead-hosts")
+        if (certs is None or redirects is None or dead is None) and (old := kept(svc.id)):
+            # Half gelukt: liever de vorige ronde dan certificaten of doorverwijzingen die plots "weg" zijn.
+            errors[str(svc.id)] = "certificaten, redirection- of 404-hosts niet op te halen"
+            per_npm.append(old)
+            continue
+        others = [(redirects or [], "NPM stuurt deze naam door (redirection host)"), (dead or [], "404-host in NPM")]
         per_npm.append(build_hosts(proxy_hosts if isinstance(proxy_hosts, list) else [], certs, svc.id, via, others))
     hosts: dict[str, dict] = {}
-    seen: dict[str, int] = {}
+    owners: dict[str, set[int]] = {}
     for found in per_npm:
         for name, entry in found.items():
-            seen[name] = seen.get(name, 0) + 1
+            owners.setdefault(name, set()).update(entry.get("npms") or [entry.get("npm")])
             hosts.setdefault(name, entry)
-    for name, n in seen.items():
-        if n > 1:
+    for name, ids in owners.items():
+        if len(ids) > 1:
             # Welke NPM de naam in DNS krijgt, weten we niet: via de naam, zoals vroeger.
-            hosts[name] = {**hosts[name], "why": "staat in meer dan één NPM", "via": None, "locations": []}
+            hosts[name] = {**hosts[name], "why": "staat in meer dan één NPM", "via": None, "locations": [],
+                           "npms": sorted(ids)}
     old_probes: dict[str, dict] = prev.get("probes") or {}
     wanted = _endpoints(hosts)
     recheck = set(_suspect)

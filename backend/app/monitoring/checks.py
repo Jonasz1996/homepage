@@ -8,7 +8,6 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.cookiejar import CookieJar, DefaultCookiePolicy
-from http.cookies import CookieError, SimpleCookie
 from urllib.parse import urlsplit
 
 import dns.asyncresolver
@@ -201,11 +200,29 @@ async def _read(r: httpx.Response, need: bool) -> bytes:
     return data
 
 
+def _ascii_host(u: httpx.URL) -> str:
+    """De naam zoals nginx hem doorgeeft: IDN als punycode, zonder punt op het einde."""
+    return u.raw_host.decode("ascii").rstrip(".").lower()
+
+
 def _host_header(u: httpx.URL) -> str:
-    host = u.host or ""
+    host = _ascii_host(u)
     if ":" in host:
         host = f"[{host}]"
     return f"{host}:{u.port}" if u.port else host
+
+
+def _origin(u: httpx.URL) -> tuple[str, str, int]:
+    return u.scheme, _ascii_host(u), u.port or (443 if u.scheme == "https" else 80)
+
+
+def _next_headers(headers: dict, here: httpx.URL, nxt: httpx.URL) -> dict:
+    """Zoals httpx bij een doorverwijzing: Authorization alleen naar dezelfde plek (of van http naar https op dezelfde
+    host), en een eigen Cookie-header alleen bij de eerste vraag."""
+    a, b = _origin(here), _origin(nxt)
+    keep_auth = a == b or (a[1] == b[1] and a[0] == "http" and a[2] == 80 and b[0] == "https" and b[2] == 443)
+    return {k: v for k, v in headers.items()
+            if k.lower() != "cookie" and (keep_auth or k.lower() != "authorization")}
 
 
 def _redirected(method: str, body: str | None, code: int) -> tuple[str, str | None]:
@@ -215,48 +232,22 @@ def _redirected(method: str, body: str | None, code: int) -> tuple[str, str | No
     return method, body
 
 
-def _logical_next(logical: httpx.URL, route, location: str) -> httpx.URL:
-    """Waar een doorverwijzing van de server heen gaat, in namen: een Location met het IP en de poort van de server
-    zelf (sommige apps kennen alleen hun eigen adres) is dezelfde naam."""
-    nxt = logical.join(location)
-    port = nxt.port or (443 if nxt.scheme == "https" else 80)
-    if (nxt.host or "").lower() == route.host.lower().strip("[]") and port == route.port:
-        nxt = nxt.copy_with(scheme=logical.scheme, host=logical.host, port=logical.port)
-    return nxt
-
-
 class _ChainCookies:
-    """Cookies binnen één check, per naam (een app die een cookie zet en dan doorverwijst). De clients voor checks
-    zonder DNS bewaren er geen: daar is het IP de sleutel, en dan kregen alle apps achter NPM (of op dezelfde server)
-    elkaars cookies."""
+    """Cookies binnen één check (een app die een cookie zet en dan doorverwijst), met de regels van een gewone
+    cookiejar maar op het adres met de naam. De clients voor checks zonder DNS bewaren er geen: daar is het IP de
+    sleutel, en dan kregen alle apps achter NPM (of op dezelfde server) elkaars cookies."""
 
     def __init__(self) -> None:
-        self._c: dict[tuple[str, str], str] = {}  # (domein, naam) -> waarde
+        self.jar = httpx.Cookies()
 
-    @staticmethod
-    def _under(host: str, domain: str) -> bool:
-        return host == domain or host.endswith("." + domain)
+    def take(self, logical: httpx.URL, r: httpx.Response) -> None:
+        self.jar.extract_cookies(httpx.Response(r.status_code, headers=r.headers,
+                                                request=httpx.Request(r.request.method, logical)))
 
-    def take(self, host: str, r: httpx.Response) -> None:
-        host = host.lower()
-        for raw in r.headers.get_list("set-cookie"):
-            c = SimpleCookie()
-            try:
-                c.load(raw)
-            except CookieError:
-                continue
-            for name, m in c.items():
-                domain = (m["domain"] or "").lstrip(".").lower() or host
-                if not self._under(host, domain):
-                    continue  # zoals een browser: een cookie voor een ander domein telt niet
-                if str(m["max-age"]).strip().lstrip("-").isdigit() and int(m["max-age"]) <= 0:
-                    self._c.pop((domain, name), None)
-                else:
-                    self._c[(domain, name)] = m.coded_value
-
-    def header(self, host: str) -> str | None:
-        host = host.lower()
-        return "; ".join(f"{n}={v}" for (d, n), v in self._c.items() if self._under(host, d)) or None
+    def header(self, logical: httpx.URL) -> str | None:
+        req = httpx.Request("GET", logical)
+        self.jar.set_cookie_header(req)
+        return req.headers.get("cookie")
 
 
 async def check_http_direct(logical: httpx.URL, check: dict, clients: "HttpClients | None", table, route) -> Outcome:
@@ -287,6 +278,12 @@ async def check_http_direct(logical: httpx.URL, check: dict, clients: "HttpClien
     hops = 0
     try:
         while True:
+            if (not route.npm and logical.scheme == "https" and route.cert and not check.get("insecure")
+                    and route.cert <= datetime.now(timezone.utc)):
+                # Via de naam faalt de TLS-handshake met NPM (ook op een tussenstap), net als in de browser;
+                # rechtstreeks zien we het alleen in NPM.
+                return Outcome(False, error=f"Certificaat verlopen op {route.cert:%d/%m/%Y} (volgens NPM)",
+                               cert_expires=route.cert)
             host = _host_header(logical)
             ext = {}
             if route.npm:
@@ -294,26 +291,26 @@ async def check_http_direct(logical: httpx.URL, check: dict, clients: "HttpClien
                 # in Host. Geen verbinding hergebruiken: die hoort bij de naam van de vorige check.
                 hdrs = {**headers, "Host": host, "Connection": "close"}
                 if logical.scheme == "https":
-                    ext["sni_hostname"] = logical.host
+                    ext["sni_hostname"] = _ascii_host(logical)
                 client = bare_for(bool(check.get("insecure")))
             else:
                 hdrs = {**headers, "Host": host, "X-Forwarded-Proto": logical.scheme,
                         "X-Forwarded-Scheme": logical.scheme, "X-Forwarded-Host": host}
                 # Net als NPM: een https-server erachter heeft meestal een eigen certificaat, dat niemand controleert.
                 client = bare_for(route.scheme == "https" or bool(check.get("insecure")))
-            jar = cookies.header(logical.host or "")
-            if jar and not any(k.lower() == "cookie" for k in hdrs):
+            jar = cookies.header(logical)
+            if jar:
                 hdrs["Cookie"] = jar
             hop_timeout = timeout if route.npm else httpx.Timeout(timeout, connect=min(timeout, DIRECT_CONNECT))
             try:
                 async with client.stream(method, route.url(logical), headers=hdrs, content=body, timeout=hop_timeout,
                                          follow_redirects=False, extensions=ext) as r:
-                    cookies.take(logical.host or "", r)
+                    cookies.take(logical, r)
                     if follow and r.is_redirect:
                         if hops >= MAX_REDIRECTS:
                             # Zoals httpx: een kringetje van doorverwijzingen is een fout, geen 302.
                             return Outcome(False, error="Exceeded maximum allowed redirects.")
-                        nxt = _logical_next(logical, route, r.headers.get("location", ""))
+                        nxt = logical.join(r.headers.get("location", ""))
                         code = r.status_code
                     else:
                         ms = (time.perf_counter() - start) * 1000
@@ -322,24 +319,22 @@ async def check_http_direct(logical: httpx.URL, check: dict, clients: "HttpClien
                         data = await _read(r, need_body and method != "HEAD")
                         end_host = (logical.host or "").lower()
                         if r.is_redirect:
-                            end_host = (_logical_next(logical, route, r.headers.get("location", "")).host or "").lower()
+                            end_host = (logical.join(r.headers.get("location", "")).host or "").lower()
                         ok, error, moved = _verdict(check, r.status_code, start_host, end_host, data,
                                                     need_body and method != "HEAD")
-                        if (ok and cert and not route.npm and not check.get("insecure")
-                                and cert <= datetime.now(timezone.utc)):
-                            # Via de naam weigert de check (en de browser) een verlopen certificaat; rechtstreeks
-                            # zien we het alleen in NPM.
-                            ok, error = False, f"Certificaat verlopen op {cert:%d/%m/%Y} (volgens NPM)"
                         return Outcome(ok, round(ms, 1), r.status_code, error, cert, moved)
             except (httpx.ConnectError, httpx.ConnectTimeout) as e:
                 # De server niet te bereiken: misschien is hij verhuisd en is de route nog van voor de wijziging in
-                # NPM. Dan via NPM, zoals de link: is de server echt weg, dan geeft NPM een 502.
-                alt = None if route.npm else table.npm_for(logical.host, logical.scheme)
+                # NPM. De volgende ronde probeert hem opnieuw; nu via NPM, zoals de link: is de server echt weg, dan
+                # geeft NPM een 502.
+                alt = None
+                if not route.npm:
+                    from .routes import suspect
+                    suspect(route.where)
+                    alt = table.npm_for(logical.host, logical.scheme)
                 if alt is None:
                     return Outcome(False, error=f"{'Time-out' if isinstance(e, httpx.TimeoutException) else _short(e)}"
                                                 f" ({route.label})"[:300])
-                from .routes import suspect
-                suspect(route.where)
                 route = alt
                 continue
             except httpx.TimeoutException:
@@ -348,6 +343,7 @@ async def check_http_direct(logical: httpx.URL, check: dict, clients: "HttpClien
                 return Outcome(False, error=f"{_short(e)} ({route.label})"[:300])
             hops += 1
             method, body = _redirected(method, body, code)
+            headers = _next_headers(headers, logical, nxt)
             nxt_route = (table.find(nxt.host, nxt.path or "/", nxt.scheme, nxt.port)
                          if nxt.scheme in ("http", "https") else None)
             if nxt_route is None:
@@ -564,12 +560,6 @@ async def _run_check(check: dict, url: str | None, clients: HttpClients | None =
     if kind == "tcp":
         if plan is not None and plan.target:
             target = plan.target
-            if not plan.route.npm:
-                outcome = await check_tcp(target, _seconds(check.get("timeout"), 5))
-                if not outcome.ok:
-                    from .routes import suspect
-                    suspect(plan.route.where)
-                return outcome
         return await check_tcp(target, _seconds(check.get("timeout"), 5))
     if kind == "ping":
         if plan is not None and plan.target:

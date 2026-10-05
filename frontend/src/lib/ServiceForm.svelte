@@ -286,7 +286,7 @@
         {/if}
       </div>
       {#if ['http', 'tcp', 'ping'].includes(checkType)}
-        <label class="chk"><input type="checkbox" bind:checked={direct} /> rechtstreeks naar de server achter NPM (geen DNS; de link blijft de naam)</label>
+        <label class="chk"><input type="checkbox" bind:checked={direct} /> zonder DNS: naar de server achter NPM, of naar het IP van NPM (de link blijft de naam)</label>
       {/if}
       {#if checkType === 'http'}
         <label class="chk tls"><input type="checkbox" bind:checked={checkInsecure} /> certificaatfouten negeren (zelfondertekend, bv. Proxmox op :8006)</label>

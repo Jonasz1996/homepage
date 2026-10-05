@@ -331,9 +331,9 @@ async def routes_row(db: AsyncSession, npm: list[Service]) -> dict:
                     "nu vernieuwen.")
         fix = {"window": "net", "tab": "firewall"}
     if refused:
-        todo.append(f"{_list([b['endpoint'] for b in refused], 6)} weigert de verbinding (de server antwoordt, maar "
-                    "niets luistert op die poort): staat de service uit, of luistert ze op een andere poort dan in "
-                    "NPM? Tot dan gaan die checks door NPM.")
+        todo.append(f"{_list([b['endpoint'] for b in refused], 6)} weigert de verbinding: staat de service uit, "
+                    "luistert ze op een andere poort dan in NPM, of weigert een firewallregel (reject) het dashboard? "
+                    "Tot dan gaan die checks door NPM.")
     if not any(active(s.check) for s in npm):
         todo.append("De NPM-tegel heeft zelf geen check: valt NPM uit, dan zie je dat niet meer op je andere tegels. "
                     "✎ bewerken → NPM-tegel → Monitoring: een http-check op het adres van NPM.")

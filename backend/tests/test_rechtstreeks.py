@@ -121,8 +121,10 @@ def test_tabel_uit_npm():
     assert t.find("x.lab.jbogaert.be", "/", "https").npm is True  # *.lab heeft geen certificaat
     assert t.find("grafana.lab.jbogaert.be", "/", "https").npm is False  # wel: *.lab.jbogaert.be
     assert routes._covers(["*.jbogaert.be"], "jelly.jbogaert.be") and not routes._covers(["*.jbogaert.be"], "a.b.jbogaert.be")
-    # Certificaten niet op te halen: dan gaan we ervan uit dat het certificaat van de host past.
-    assert table(certs=None).find("grafana.lab.jbogaert.be", "/", "https").npm is False
+    # Certificaten niet op te halen (rechten in NPM): https via NPM, dat het echte certificaat toont; http rechtstreeks.
+    assert table(certs=None).explain("grafana.lab.jbogaert.be", "/", "https")[:2] == (
+        routes.Route("https", NPM_IP, 443, None, npm=True), "de vervaldatum van het certificaat is niet te lezen in NPM")
+    assert table(certs=None).find("grafana.lab.jbogaert.be", "/", "http").npm is False
     # Meerdere namen, locaties zoals nginx: de langste die past.
     assert t.find("app2.jbogaert.be", "/").where == "192.168.0.30:3000"
     assert t.find("app.jbogaert.be", "/api/v1").where == "192.168.0.31:4000"
@@ -140,7 +142,7 @@ def test_tabel_uit_npm():
     assert table(via=None).explain("dicht.jbogaert.be")[0] is None
     assert table(probes_ok=False).find("jelly.jbogaert.be") is None
     assert table(probes_ok=False).explain("jelly.jbogaert.be")[1] == (
-        "192.168.0.27:8096 weigert de verbinding: draait de service?")
+        "192.168.0.27:8096 weigert de verbinding: draait de service (of weigert een firewall)?")
     # Een eigen poort in het adres: NPM luistert alleen op 80 en 443, dus via de naam.
     assert t.explain("jelly.jbogaert.be", "/", "https", 8443) == (
         None, "het adres heeft een eigen poort (:8443)", None, None)
@@ -155,13 +157,16 @@ def test_uitleg_per_tegel():
     t = table()
     d = routes.describe
     assert d({"type": "http"}, "https://jelly.jbogaert.be/web", t) == {"direct": True, "to": "http://192.168.0.27:8096"}
-    assert d({"type": "tcp"}, "https://jelly.jbogaert.be", t) == {"direct": True, "to": "192.168.0.27:8096"}
-    assert d({"type": "tcp", "target": "jelly.jbogaert.be:443"}, None, t) == {"direct": True, "to": "192.168.0.27:8096"}
-    # Een andere poort, en ping: naar NPM op zijn IP, zoals de naam (welke poorten de server openzet, weten we niet).
-    assert d({"type": "tcp", "target": "jelly.jbogaert.be:22"}, None, t) == {
-        "direct": False, "npm": NPM_IP, "to": f"{NPM_IP}:22", "blocked": None,
-        "why": "poort 22 gaat niet door NPM: naar het IP van NPM, zoals de naam"}
+    # tcp en ping: naar NPM op zijn IP, zoals de naam altijd deed (alleen zonder DNS). Rechtstreeks zou een tcp-check
+    # down gaan als de server uitvalt, en na de volgende ronde weer "up" via NPM.
+    for target, to in (("jelly.jbogaert.be:443", f"{NPM_IP}:443"), ("jelly.jbogaert.be:22", f"{NPM_IP}:22")):
+        assert d({"type": "tcp", "target": target}, None, t) == {
+            "direct": False, "npm": NPM_IP, "to": to, "blocked": None,
+            "why": "een tcp-check op een naam test NPM, zoals altijd"}
+    assert d({"type": "tcp"}, "https://jelly.jbogaert.be", t)["to"] == f"{NPM_IP}:443"
     assert d({"type": "ping"}, "https://jelly.jbogaert.be", t)["to"] == NPM_IP
+    assert d({"type": "ping"}, "https://jelly.jbogaert.be", table(probes_ok=False)) == {
+        "direct": False, "why": "NPM niet bereikbaar vanaf het dashboard", "blocked": None}
     assert d({"type": "http", "direct": False}, "https://jelly.jbogaert.be", t)["why"] == "uitgezet voor deze tegel"
     assert d({"type": "http"}, "https://jelly.jbogaert.be", table(enabled=False))["why"] == "uitgezet op de NPM-tegel"
     dicht = d({"type": "http"}, "https://dicht.jbogaert.be", t)
@@ -216,6 +221,11 @@ class Server:
                 return httpx.Response(302, headers=[("location", "/lees"), ("set-cookie", "sess=abc; Path=/; HttpOnly"),
                                                     ("set-cookie", "wijd=1; Domain=.jbogaert.be"),
                                                     ("set-cookie", "vreemd=1; Domain=ander.be")])
+            if path == "/zet2":
+                return httpx.Response(302, headers=[
+                    ("location", "/lees"), ("set-cookie", "p=1; Path=/; Secure; HttpOnly; Partitioned"),
+                    ("set-cookie", "oud=1; Path=/; expires=Thursday, 01-Jan-2099 00:00:00 GMT"),
+                    ("set-cookie", "x=deleted; expires=Thu, 01-Jan-1970 00:00:01 GMT")])
             if path == "/lees":
                 return httpx.Response(200, text=f"cookie:{req.headers.get('cookie', '')}")
         if host == "192.168.0.70" and path == "/login":
@@ -250,10 +260,12 @@ async def test_rechtstreekse_http_check():
 async def test_doorverwijzingen_in_namen():
     s, t = Server(), table()
     clients = HttpClients(httpx.MockTransport(s))
-    # Een Location met het eigen IP en de eigen poort van de server is dezelfde naam: geen "doorverwezen".
+    # Een Location met het eigen IP van de server (NPM past Location niet aan): zoals vroeger naar dat IP, en dat is
+    # "doorverwezen" (ook in de browser kom je daar terecht).
     o = await run_check({"type": "http", "same_host": True}, "https://jelly.jbogaert.be/eigen-adres", clients, t)
-    assert o.ok and o.redirected_to is None, o
-    assert s.seen[-1].headers["host"] == "jelly.jbogaert.be" and s.seen[-1].headers["x-forwarded-proto"] == "https"
+    assert not o.ok and o.redirected_to == "192.168.0.27", o
+    assert str(s.seen[-1].url) == "http://192.168.0.27:8096/web/index.html"
+    assert (await run_check({"type": "http"}, "https://jelly.jbogaert.be/eigen-adres", clients, t)).ok
     # Naar een andere naam achter NPM: ook rechtstreeks, en "doorverwezen naar" klopt.
     s.seen.clear()
     o = await run_check({"type": "http"}, "https://jelly.jbogaert.be/sso", clients, t)
@@ -293,16 +305,52 @@ async def test_cookies_blijven_bij_de_check():
                         clients, t)
     assert o.ok and str(s.seen[-1].url) == "http://192.168.0.27:8096/lees", o
     assert "vreemd" not in s.seen[-1].headers["cookie"]  # een cookie voor een ander domein telt niet
+    # Zoals een gewone cookiejar: Partitioned, een oude datumvorm, en een verlopen cookie (= wissen).
+    o = await run_check({"type": "http", "keyword": "cookie:p=1; oud=1"}, "https://jelly.jbogaert.be/zet2", clients, t)
+    assert o.ok and "x=" not in s.seen[-1].headers["cookie"], (o, s.seen[-1].headers["cookie"])
     for url in ("https://jelly.jbogaert.be/lees", "https://forced.jbogaert.be/lees"):  # zelfde server, andere naam
         o = await run_check({"type": "http"}, url, clients, t)
         assert o.ok and str(s.seen[-1].url) == "http://192.168.0.27:8096/lees" and "cookie" not in s.seen[-1].headers
     for name in ("dicht", "uit"):  # via NPM op zijn IP
         o = await run_check({"type": "http"}, f"http://{name}.jbogaert.be/", clients, t)
         assert o.ok and s.seen[-1].url.host == NPM_IP and "cookie" not in s.seen[-1].headers, name
-    # Een eigen Cookie-header in de check gaat voor.
-    o = await run_check({"type": "http", "headers": {"Cookie": "mijn=1"}, "keyword": "cookie:mijn=1"},
+    # Zoals httpx: een eigen Cookie-header (van voor die geweigerd werd) alleen bij de eerste vraag.
+    o = await run_check({"type": "http", "headers": {"Cookie": "mijn=1"}, "keyword": "cookie:sess=abc; wijd=1"},
                         "https://jelly.jbogaert.be/zet", clients, t)
-    assert o.ok and s.seen[-1].headers["cookie"] == "mijn=1", o
+    assert o.ok and s.seen[-2].headers["cookie"] == "mijn=1", o
+    await clients.aclose()
+
+
+async def test_namen_doelen_en_headers():
+    """IDN en een punt op het einde zoals nginx ze doorgeeft, IPv6 en Docker-netwerken als doel, en Authorization
+    (van een oude check) niet naar een andere host na een doorverwijzing, zoals httpx."""
+    hosts = routes.build_hosts([
+        {"id": 1, "domain_names": ["bücher.jbogaert.be"], "forward_scheme": "http", "forward_host": "192.168.0.27",
+         "forward_port": 8096, "certificate_id": 5, "enabled": True},
+        {"id": 2, "domain_names": ["v6.jbogaert.be"], "forward_scheme": "http", "forward_host": "[fd00::5]",
+         "forward_port": 8096, "enabled": True},
+        {"id": 3, "domain_names": ["ha.jbogaert.be"], "forward_scheme": "http", "forward_host": "172.17.0.1",
+         "forward_port": 8123, "enabled": True},
+        *HOSTS], CERTS, npm_id=1, via=NPM_IP)
+    t = routes.Table({"hosts": hosts, "probes": {routes.endpoint(h, p): {"ok": True} for h, p in
+                                                 routes._endpoints(hosts)}})
+    assert t.find("xn--bcher-kva.jbogaert.be", "/", "https").where == "192.168.0.27:8096"
+    assert t.find("BÜCHER.jbogaert.be.", "/", "https").where == "192.168.0.27:8096"
+    v6 = t.find("v6.jbogaert.be")
+    assert v6.where == "[fd00::5]:8096" and str(v6.url(httpx.URL("http://v6.jbogaert.be/x"))) == "http://[fd00::5]:8096/x"
+    assert t.explain("ha.jbogaert.be")[1] == "het doel (172.17.0.1) is een Docker-netwerk bij NPM"
+    assert routes._why_not(("http", "172.17.0.1", 80), via="172.20.0.2") is None  # NPM zelf in zo'n netwerk
+    s = Server()
+    clients = HttpClients(httpx.MockTransport(s))
+    o = await run_check({"type": "http"}, "https://BÜCHER.jbogaert.be./web/index.html", clients, t)
+    assert o.ok and s.seen[-1].headers["host"] == "xn--bcher-kva.jbogaert.be", o
+    assert s.seen[-1].headers["x-forwarded-host"] == "xn--bcher-kva.jbogaert.be"
+    old = {"type": "http", "headers": {"Authorization": "Bearer x"}}
+    await run_check(old, "https://jelly.jbogaert.be/web", clients, t)
+    assert [r.headers.get("authorization") for r in s.seen[-2:]] == ["Bearer x", "Bearer x"]
+    await run_check(old, "https://jelly.jbogaert.be/extern", clients, t)
+    assert [r.headers.get("authorization") for r in s.seen[-2:]] == ["Bearer x", None]
+    assert s.seen[-1].url.host == "login.voorbeeld.be"
     await clients.aclose()
 
 
@@ -315,9 +363,13 @@ async def test_https_doel_fouten_en_uitzonderingen():
     assert clients._bare.keys() == {True} and not clients._clients
     o = await run_check({"type": "http"}, "https://jelly.jbogaert.be/traag", clients, t)
     assert not o.ok and o.error == "Time-out (rechtstreeks naar 192.168.0.27:8096)"
-    # Een verlopen certificaat in NPM: via de naam weigert de browser dat, dus ook hier down (tenzij genegeerd).
+    # Een verlopen certificaat in NPM: via de naam weigert de browser dat, dus ook hier down (tenzij genegeerd), ook
+    # als die naam maar een tussenstap is.
     o = await run_check({"type": "http"}, "https://oudcert.jbogaert.be/web/index.html", clients, t)
     assert not o.ok and o.error == "Certificaat verlopen op 01/01/2026 (volgens NPM)", o
+    n = len(s.seen)
+    o = await run_check({"type": "http"}, "https://oudcert.jbogaert.be/sso", clients, t)
+    assert not o.ok and o.error == "Certificaat verlopen op 01/01/2026 (volgens NPM)" and len(s.seen) == n, o
     assert (await run_check({"type": "http", "insecure": True}, "https://oudcert.jbogaert.be/web/index.html",
                             clients, t)).ok
     # Via de naam: per tegel uitgezet, een eigen poort, of NPM kent de naam niet.
@@ -347,10 +399,12 @@ async def test_https_doel_fouten_en_uitzonderingen():
     o = await run_check({"type": "http"}, "https://jelly.jbogaert.be/verhuisd", clients, t)
     assert o.ok and s.seen[-1].url.host == NPM_IP and s.seen[-2].url.host == "192.168.0.27", o
     assert routes._suspect == {"192.168.0.27:8096"}
-    # Via NPM lukt het ook niet: een fout, met waarheen.
+    # Geen NPM om op terug te vallen: een fout, met waarheen, en de volgende ronde probeert de server opnieuw.
+    routes._suspect.clear()
     o = await run_check({"type": "http"}, "https://jelly.jbogaert.be/verhuisd", clients,
                         table(via=None))
     assert not o.ok and o.error.endswith("(rechtstreeks naar 192.168.0.27:8096)"), o
+    assert routes._suspect == {"192.168.0.27:8096"}
     # Zonder tabel (bv. een test of de knop "probeer"): zoals vroeger.
     o = await run_check({"type": "http"}, "https://jelly.jbogaert.be/web", clients)
     assert o.status_code == 599
@@ -379,9 +433,9 @@ async def test_tcp_en_ping_rechtstreeks(monkeypatch):
     await run_check({"type": "tcp", "target": "dicht.jbogaert.be:22"}, None, None, t)
     await run_check({"type": "ping"}, "https://dicht.jbogaert.be", None, t)
     await run_check({"type": "tcp"}, "https://dicht.jbogaert.be", None, table(via=None))
-    # 80/443 naar de poort van de server; een andere poort en ping naar NPM op zijn IP, zoals de naam vroeger.
-    assert seen == [("tcp", "192.168.0.27:8096"), ("tcp", f"{NPM_IP}:22"), ("ping", NPM_IP),
-                    ("ping", "jelly.jbogaert.be"), ("tcp", "192.168.0.27:8096"), ("tcp", f"{NPM_IP}:443"),
+    # Naar NPM op zijn IP, zoals de naam vroeger (zonder DNS); zonder IP van NPM via de naam.
+    assert seen == [("tcp", f"{NPM_IP}:443"), ("tcp", f"{NPM_IP}:22"), ("ping", NPM_IP),
+                    ("ping", "jelly.jbogaert.be"), ("tcp", f"{NPM_IP}:443"), ("tcp", f"{NPM_IP}:443"),
                     ("tcp", f"{NPM_IP}:22"), ("ping", NPM_IP), ("tcp", "dicht.jbogaert.be:443")]
 
 
@@ -399,12 +453,14 @@ def test_firewall_zoals_de_check():
                        svc("F", "https://jelly.jbogaert.be", {"type": "ping"}),
                        svc("G", "https://jelly.jbogaert.be", {"type": "http", "direct": False})], [], [], table())
     assert used == [("192.168.0.27", "tcp", 8096, "A (check, rechtstreeks)"),
-                    ("192.168.0.27", "tcp", 8096, "B (check, rechtstreeks)"),
-                    ("jelly.jbogaert.be", "tcp", 22, "C (check)"),
+                    (NPM_IP, "tcp", 443, "B (check, via NPM)"),
+                    (NPM_IP, "tcp", 22, "C (check, via NPM)"),
                     ("jelly.jbogaert.be", "tcp", 8443, "D (check)"),
                     ("192.168.0.80", "tcp", 8080, "E (check, rechtstreeks)"),
                     ("jelly.jbogaert.be", "icmp", None, "F (ping)"),
-                    ("jelly.jbogaert.be", "tcp", 443, "G (check)")]
+                    ("jelly.jbogaert.be", "tcp", 443, "G (check)"),
+                    (NPM_IP, "tcp", 443, "NPM (checks zonder DNS)"), (NPM_IP, "tcp", 80, "NPM (checks zonder DNS)")]
+    assert ports.uses([], [], [], table(enabled=False)) == []
 
 
 # --- vernieuwen, de API en de rest ---------------------------------------------------------------------------------
@@ -413,13 +469,16 @@ class Npm:
     """NPM op 192.168.0.245; een tweede NPM (192.168.0.246) heeft alleen jelly."""
 
     def __init__(self):
-        self.down = False
+        self.down = self.other_down = False
         self.hosts = HOSTS
+        self.broken: set[str] = set()
 
     def __call__(self, req: httpx.Request) -> httpx.Response:
-        if self.down:
-            return httpx.Response(502, text="bad gateway")
         path, other = req.url.path, req.url.host == "192.168.0.246"
+        if self.down or (other and self.other_down):
+            return httpx.Response(502, text="bad gateway")
+        if path in self.broken:
+            return httpx.Response(500, text="kapot")
         if path == "/api/tokens":
             return httpx.Response(200, json={"token": "jwt"})
         if path == "/api/nginx/proxy-hosts":
@@ -517,6 +576,19 @@ async def test_vernieuwen(authed, probes):
     assert v["hosts"]["pve.jbogaert.be"]["why"] is None
     t = routes.Table(v)
     assert t.find("jelly.jbogaert.be") is None and t.find("pve.jbogaert.be").where == "192.168.0.50:8006"
+    # De tweede NPM even weg: de naam blijft "in meer dan één NPM" (anders ging hij plots rechtstreeks).
+    npm.other_down = True
+    npm_integration._tokens.clear()
+    v = await routes.refresh(db, clients, now=NOW + timedelta(minutes=90))
+    assert v["hosts"]["jelly.jbogaert.be"]["why"] == "staat in meer dan één NPM" and list(v["errors"]) != [str(nid)]
+    assert len(v["errors"]) == 1
+    # Half gelukt (de certificaten niet op te halen): de vorige ronde blijft, met de fout erbij.
+    before = v["hosts"]["pve.jbogaert.be"]
+    npm.other_down = False
+    npm.broken = {"/api/nginx/certificates"}
+    v = await routes.refresh(db, clients, now=NOW + timedelta(minutes=95))
+    assert v["hosts"]["pve.jbogaert.be"] == before and before["cert_names"]
+    assert v["errors"][str(nid)] == "certificaten, redirection- of 404-hosts niet op te halen"
     await agen.aclose()
     await clients.aclose()
 
@@ -577,7 +649,7 @@ async def test_api_overzicht_aan_uit_en_checklist(authed, probes, monkeypatch):
     o = (await authed.get("/api/npm/routes")).json()
     assert o["blocked"] == [{"endpoint": "192.168.0.80:8080", "tiles": ["Dicht"], "refused": True}]
     why = {x["name"]: x for x in o["rows"]}["Dicht"]["why"]
-    assert why == "192.168.0.80:8080 weigert de verbinding: draait de service?"
+    assert why == "192.168.0.80:8080 weigert de verbinding: draait de service (of weigert een firewall)?"
     rows = {x["key"]: x for g_ in (await authed.get("/api/attention/setup")).json()["groups"] for x in g_["rows"]}
     row = rows["monitoring:rechtstreeks"]
     assert row["fix"] == {"window": "detail", "service_id": nid} and len(row["todo"]) == 1, row

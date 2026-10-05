@@ -59,14 +59,17 @@ def uses(services: list[Service], apis: list[ApiConnection], hosts: list[SshHost
             target = target_for(check, s.url) if kind else None
         except ValueError:
             target = None
-        # De server achter NPM die de check gebruikt zodra het dashboard hem bereikt (zie Table.plan).
-        fw = plan.firewall if table is not None and (plan := table.plan(check, s.url)) else None
+        # Waar de check heen gaat zonder DNS: de server achter NPM (zodra het dashboard hem bereikt), of NPM op zijn
+        # IP (zie Table.plan).
+        plan = table.plan(check, s.url) if table is not None else None
+        fw = plan.firewall if plan else None
+        how = "via NPM" if plan and plan.firewall_npm else "rechtstreeks"
         if target:
             if kind == "http" and (hp := _from_url(target)):
-                out.append((fw[0], "tcp", fw[1], f"{s.name} (check, rechtstreeks)") if fw
+                out.append((fw[0], "tcp", fw[1], f"{s.name} (check, {how})") if fw
                            else (hp[0], "tcp", hp[1], f"{s.name} (check)"))
             elif kind == "tcp" and (hp := _hostport(target)):
-                out.append((fw[0], "tcp", fw[1], f"{s.name} (check, rechtstreeks)") if fw
+                out.append((fw[0], "tcp", fw[1], f"{s.name} (check, {how})") if fw
                            else (hp[0], "tcp", hp[1], f"{s.name} (check)"))
             elif kind == "ping":
                 out.append((target, "icmp", None, f"{s.name} (ping)"))
@@ -74,6 +77,11 @@ def uses(services: list[Service], apis: list[ApiConnection], hosts: list[SshHost
             url = api_url.get(s.api_id) if s.api_id else (s.config or {}).get("url") or s.url
             if hp := _from_url(url):
                 out.append((hp[0], "tcp", hp[1], f"{s.name} ({s.type})"))
+    if table is not None and table.enabled:
+        # NPM zelf, op zijn IP: daar gaan checks heen die niet rechtstreeks kunnen, en elke check als zijn server
+        # even niet te bereiken is.
+        for via in sorted({e["via"] for e in table.hosts.values() if e.get("via")}):
+            out += [(via, "tcp", port, "NPM (checks zonder DNS)") for port in (443, 80)]
     for a in apis:
         if hp := _from_url(a.url):
             out.append((hp[0], "tcp", hp[1], f"API {a.name}"))

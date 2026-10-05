@@ -492,10 +492,9 @@ minuten de proxy hosts op, en stuurt hij de checks rechtstreeks naar de server d
 `http://192.168.0.27:8096`). Hij stuurt dezelfde headers mee als NPM (`Host`, `X-Forwarded-Proto`), zodat de app
 het niet merkt. Klik je op een tegel, dan opent nog altijd de naam.
 
-- **HTTP** gaat zo rechtstreeks, en ook een **TCP-check op poort 80 of 443** (naar de poort van de server). Een
-  doorverwijzing naar een andere naam achter NPM gaat ook rechtstreeks; een naam die NPM niet kent (een externe
-  login) gaat zoals vroeger. De vervaldatum van het certificaat komt uit NPM, en een verlopen certificaat geeft een
-  fout, zoals in de browser
+- **HTTP** gaat zo rechtstreeks. Een doorverwijzing naar een andere naam achter NPM gaat ook rechtstreeks; een
+  naam die NPM niet kent (een externe login) gaat zoals vroeger. De vervaldatum van het certificaat komt uit NPM,
+  en een verlopen certificaat geeft een fout, zoals in de browser
 - **via NPM, zonder DNS**: lukt rechtstreeks niet, dan gaat de check naar het IP van NPM (de host van de NPM-tegel)
   met de naam erbij: door NPM zoals vroeger, maar zonder DNS. De reden staat in het mini dashboard van de tegel:
   - het dashboard bereikt de server niet, meestal door de firewall tussen de VLAN's. Bereikt het hem later wel, dan
@@ -503,18 +502,21 @@ het niet merkt. Klik je op een tegel, dan opent nog altijd de naam.
     verhuisd naar een ander IP), dan probeert de check het meteen via NPM
   - NPM doet zelf iets met de naam: de proxy host staat uit of offline, er staat een toegangslijst of eigen
     nginx-configuratie op (bv. de login van Authentik), een redirection- of 404-host, een locatie met een regex
-  - het doel is geen IP-adres (een containernaam) of NPM zelf (localhost)
+  - het doel is geen IP-adres (een containernaam), NPM zelf (localhost) of een Docker-netwerk bij NPM (172.17.x)
   - https zonder passend certificaat in NPM, of http waarbij NPM naar https doorstuurt (na die doorverwijzing gaat
     de check wel rechtstreeks)
-  - ping, en TCP op een andere poort: welke poorten de server zelf openzet, weet het dashboard niet. Die gaan naar
-    NPM, zoals de naam altijd deed. Wil je de server zelf pingen, vul dan zijn IP in als doel
+  - ping en TCP: die testten altijd NPM (de naam wijst ernaar), en dat blijft zo. Rechtstreeks zou een TCP-check
+    down gaan als de server uitvalt, en na de volgende ronde weer "up" via NPM. Wil je de server zelf pingen of
+    een poort erop testen, vul dan zijn IP in als doel
 - **via de naam, met DNS** (zoals vroeger): een naam die NPM niet kent, een adres met een eigen poort
   (`https://naam:8443`), een naam die in meer dan één NPM staat, of als NPM zelf niet te bereiken is
 - **firewall**: de container moet de servers zelf bereiken, niet alleen NPM. De NPM-tegel → *rechtstreeks* toont welke
-  IP's en poorten niet lukken, en **net → firewall** geeft de regel voor OPNsense. Klik daarna op *nu vernieuwen*
+  IP's en poorten niet lukken, en **net → firewall** geeft de regel voor OPNsense. Klik daarna op *nu vernieuwen*.
+  Staat er *weigert de verbinding*, dan staat de service meestal uit (of luistert ze op een andere poort dan in
+  NPM); alleen een firewallregel met *reject* geeft hetzelfde
 - **NPM zelf**: een check die rechtstreeks gaat, ziet een storing van NPM niet meer. Geef de NPM-tegel daarom zijn
   eigen check (http op `http://192.168.0.245:81`)
-- **uitzetten**: per tegel onder **✎ bewerken → Monitoring** (*rechtstreeks naar de server achter NPM*), of voor
+- **uitzetten**: per tegel onder **✎ bewerken → Monitoring** (*zonder DNS*), of voor
   alles samen op de NPM-tegel. Uit = via de naam, met DNS, zoals vroeger. API-koppelingen (Zabbix, Portainer, ...)
   gebruiken altijd het adres dat je zelf invulde: zet daar een IP als je DNS wil sparen
 

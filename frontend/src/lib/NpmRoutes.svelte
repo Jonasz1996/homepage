@@ -85,8 +85,8 @@
     {/if}
     {#if refused.length}
       <div class="fw">
-        Deze servers weigeren de verbinding: ze antwoorden, maar niets luistert op die poort. Staat de service uit, of
-        luistert ze op een andere poort dan in NPM? Tot dan gaan die checks door NPM:
+        Deze servers weigeren de verbinding. Staat de service uit, luistert ze op een andere poort dan in NPM, of weigert
+        een firewallregel (reject) het dashboard? Tot dan gaan die checks door NPM:
         <ul>
           {#each refused as b (b.endpoint)}<li><code>{b.endpoint}</code> <span class="dim">{b.tiles.join(', ')}</span></li>{/each}
         </ul>
