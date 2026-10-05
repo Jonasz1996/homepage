@@ -1,3 +1,4 @@
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -43,10 +44,18 @@ def _ok_count():
 NOT_MAINT = CheckResult.maintenance.is_not(True)
 
 
-@router.get("/status")
-async def all_status(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    now = datetime.now(timezone.utc)
-    states = (await db.execute(select(ServiceState))).scalars().all()
+# De uptime over 24 uur verandert nauwelijks per minuut, maar telt wel alle checks van een dag op. Het dashboard
+# vraagt /status elke paar seconden: één keer per minuut rekenen is genoeg. (engine, verloopt, uptime per service)
+UPTIME_TTL = 60
+_uptime_cache: tuple[object, float, dict[int, float | None]] | None = None
+
+
+async def _uptime_24h(db: AsyncSession, now: datetime) -> dict[int, float | None]:
+    global _uptime_cache
+    hit = _uptime_cache
+    # Per database-engine (de tests maken er per test een nieuwe).
+    if hit and hit[0] is db.bind and hit[1] > time.monotonic():
+        return hit[2]
     uptime = {
         sid: (ok / total if total else None)
         for sid, ok, total in (await db.execute(
@@ -55,6 +64,15 @@ async def all_status(user: User = Depends(current_user), db: AsyncSession = Depe
             .group_by(CheckResult.service_id)
         )).all()
     }
+    _uptime_cache = (db.bind, time.monotonic() + UPTIME_TTL, uptime)
+    return uptime
+
+
+@router.get("/status")
+async def all_status(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    now = datetime.now(timezone.utc)
+    states = (await db.execute(select(ServiceState))).scalars().all()
+    uptime = await _uptime_24h(db, now)
     spark: dict[int, list] = defaultdict(list)
     rows = (await db.execute(
         select(CheckResult.service_id, CheckResult.latency_ms, CheckResult.ok)

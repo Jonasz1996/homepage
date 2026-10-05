@@ -21,8 +21,9 @@ from ..wol import normalize_mac
 router = APIRouter(prefix="/api", tags=["integrations"])
 
 clients = HttpClients()
-SUMMARY_TTL = 30
-DETAIL_TTL = 10
+# Iets langer dan hoe vaak het dashboard vraagt (60 s / 20 s), zodat een open tabblad de API's niet elke keer raakt.
+SUMMARY_TTL = 90
+DETAIL_TTL = 30
 ACTIONS_TTL = 60
 # (service_id, soort) -> (verloopt, vingerafdruk, resultaat)
 _cache: dict[tuple[int, str], tuple[float, tuple, dict]] = {}
@@ -69,6 +70,8 @@ async def list_integrations(user: User = Depends(current_user)):
 @router.get("/widgets")
 async def widgets(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     services = (await db.execute(select(Service).where(Service.type.in_(list(REGISTRY))))).scalars().all()
+    # Verbinding teruggeven vóór de (soms trage) API's van de integraties: de services zijn al geladen.
+    await db.close()
     sem = asyncio.Semaphore(10)
 
     async def one(s: Service):
@@ -87,6 +90,7 @@ async def integration_detail(service_id: int, user: User = Depends(current_user)
     s = await _service(db, service_id)
     if s.type not in REGISTRY:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Deze service heeft geen integratie")
+    await db.close()
     data = await _cached(s, "detail", DETAIL_TTL, lambda i: i.detail())
     return {"label": REGISTRY[s.type].label, **data}
 
@@ -122,6 +126,8 @@ async def quick_actions(user: User = Depends(current_user), db: AsyncSession = D
     """Alle acties van alle integraties, voor de zoekbalk. Uitvoeren gaat via de actie-endpoint hierboven."""
     services = (await db.execute(select(Service).where(
         Service.type.in_([n for n, c in REGISTRY.items() if c.actions])))).scalars().all()
+    every = (await db.execute(select(Service))).scalars().all()
+    await db.close()
     sem = asyncio.Semaphore(10)
 
     async def one(s: Service):
@@ -131,7 +137,7 @@ async def quick_actions(user: User = Depends(current_user), db: AsyncSession = D
 
     out = [a for chunk in await asyncio.gather(*(one(s) for s in services)) for a in chunk]
     # Wake-on-LAN voor elke service met een MAC-adres (bv. de HP-nodes).
-    for s in (await db.execute(select(Service))).scalars():
+    for s in every:
         if normalize_mac(str((s.config or {}).get("mac") or "")):
             out.append({"id": "wol", "label": "wekken (Wake-on-LAN)", "target": s.name, "service_id": s.id,
                         "service": s.name, "endpoint": f"/services/{s.id}/wol", "confirm": True})

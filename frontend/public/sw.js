@@ -1,6 +1,6 @@
 // Service worker: de app opent ook bij een trage of wegvallende verbinding meteen, en is installeerbaar.
 // De API wordt nooit gecachet (altijd verse status, en niets gevoeligs op het toestel).
-const CACHE = 'homepage-v1'
+const CACHE = 'homepage-__BUILD__'
 const SHELL = ['/', '/manifest.webmanifest', '/favicon.svg', '/icon-192.png']
 
 self.addEventListener('install', (e) => {

@@ -1,7 +1,7 @@
 <script>
   import { boom } from './fx.js'
   import { untrack } from 'svelte'
-  import { api } from './api.js'
+  import { api, withReauth } from './api.js'
   import { iconIsMono, iconUrl } from './icons.js'
   import Modal from './Modal.svelte'
 
@@ -85,7 +85,8 @@
     error = ''
     try {
       const body = buildBody()
-      if (service) await api(`/services/${service.id}`, { method: 'PATCH', body })
+      // Een ander adres of type voor een service met geheimen vraagt een recente 2FA.
+      if (service) await withReauth(() => api(`/services/${service.id}`, { method: 'PATCH', body }))
       else await api('/services', { method: 'POST', body })
       onsaved()
       onclose()

@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, SmallInteger, String, Text
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, SmallInteger, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql.expression import false as sa_false
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -26,6 +26,8 @@ class User(Base):
     # Versleuteld met de Fernet-sleutel.
     totp_secret: Mapped[str | None] = mapped_column(Text)
     totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Laatst gebruikte TOTP-stap: dezelfde code mag maar één keer dienen.
+    totp_last_step: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     last_login_at: Mapped[datetime | None]
     last_login_ip: Mapped[str | None] = mapped_column(String(64))
@@ -134,6 +136,11 @@ class AuditLog(Base):
 
 class Notification(Base):
     __tablename__ = "notifications"
+    __table_args__ = (
+        # Het aantal ongelezen meldingen (badge) wordt bij elke poll geteld: een kleine index op alleen die rijen.
+        Index("ix_notifications_unread", "id", postgresql_where=text("read_at IS NULL"),
+              sqlite_where=text("read_at IS NULL")),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     ts: Mapped[datetime] = mapped_column(default=utcnow, index=True)
@@ -142,7 +149,7 @@ class Notification(Base):
     title: Mapped[str] = mapped_column(String(200))
     body: Mapped[str | None] = mapped_column(Text)
     source: Mapped[str] = mapped_column(String(40), default="system")
-    service_id: Mapped[int | None] = mapped_column(ForeignKey("services.id", ondelete="SET NULL"))
+    service_id: Mapped[int | None] = mapped_column(ForeignKey("services.id", ondelete="SET NULL"), index=True)
     read_at: Mapped[datetime | None]
 
 
@@ -351,7 +358,9 @@ class CronJob(Base):
 
 class CronRun(Base):
     __tablename__ = "cron_runs"
-    __table_args__ = (Index("ix_cron_runs_job_started", "job_id", "started_at", unique=True),)
+    # started_at apart: de scan haalt alle runs van de laatste dagen op en ruimt oude runs op.
+    __table_args__ = (Index("ix_cron_runs_job_started", "job_id", "started_at", unique=True),
+                      Index("ix_cron_runs_started_at", "started_at"))
 
     id: Mapped[int] = mapped_column(primary_key=True)
     job_id: Mapped[int] = mapped_column(ForeignKey("cron_jobs.id", ondelete="CASCADE"))

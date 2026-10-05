@@ -40,9 +40,11 @@
     rest = ''
     if (!target) return
     state = 'verbinden…'
-    ws = new WebSocket(wsUrl(`/cron/ws/tail/${encodeURIComponent(target)}`))
+    const sock = ws = new WebSocket(wsUrl(`/cron/ws/tail/${encodeURIComponent(target)}`))
     ws.binaryType = 'arraybuffer'
     ws.onmessage = async (e) => {
+      // Een vorige verbinding (ander doel of opnieuw verbonden) mag de nieuwe niet meer storen.
+      if (sock !== ws) return
       if (typeof e.data === 'string') {
         const m = JSON.parse(e.data)
         if (m.t === 'ready') state = 'live'
@@ -60,7 +62,7 @@
       await tick()
       if (el && !paused) el.scrollTop = el.scrollHeight
     }
-    ws.onclose = () => { if (state === 'live' || state === 'verbinden…') state = 'verbinding gesloten' }
+    ws.onclose = () => { if (sock === ws && (state === 'live' || state === 'verbinden…')) state = 'verbinding gesloten' }
   }
 
   $effect(() => {
