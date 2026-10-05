@@ -4,6 +4,7 @@
   import { ApiError, api, poll } from './api.js'
   import { bytes, value } from './format.js'
   import NpmImport from './NpmImport.svelte'
+  import NpmRoutes from './NpmRoutes.svelte'
 
   // Gegevens en acties van de integratie in het mini dashboard.
   let { service, groups = [], onchanged } = $props()
@@ -148,6 +149,8 @@
             <pre>{sec.text}</pre>
           {:else if sec.kind === 'npm-import'}
             <NpmImport {service} {groups} {onchanged} />
+          {:else if sec.kind === 'npm-routes'}
+            <NpmRoutes />
           {/if}
         </div>
       {/each}

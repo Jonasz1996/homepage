@@ -35,6 +35,8 @@
   let remindHours = $state(c0.remind_hours || 0)
   let notifyMode = $state(c0.notify || 'push')
   let paused = $state(!!c0.paused)
+  // Rechtstreeks naar de server achter NPM (zonder DNS); uit = via de naam, zoals vroeger.
+  let direct = $state(c0.direct !== false)
   let certNotify = $state(c0.cert_notify !== false)
   let accept = $state(c0.accept || (c0.expect_status ? String(c0.expect_status) : ''))
   let followRedirects = $state(c0.follow_redirects !== false)
@@ -124,6 +126,7 @@
       ...(Number(remindHours) ? { remind_hours: Number(remindHours) } : {}),
       ...(notifyMode !== 'push' ? { notify: notifyMode } : {}),
       ...(paused ? { paused: true } : {}),
+      ...(['http', 'tcp', 'ping'].includes(t) && !direct ? { direct: false } : {}),
       ...(json ? { json_path: jsonPath.trim(), json_value: String(jsonValue).trim() || null } : {}),
       ...((t === 'http' || t === 'api') && secs ? { timeout: secs } : {}),
     }
@@ -282,6 +285,9 @@
           </div>
         {/if}
       </div>
+      {#if ['http', 'tcp', 'ping'].includes(checkType)}
+        <label class="chk"><input type="checkbox" bind:checked={direct} /> rechtstreeks naar de server achter NPM (geen DNS; de link blijft de naam)</label>
+      {/if}
       {#if checkType === 'http'}
         <label class="chk tls"><input type="checkbox" bind:checked={checkInsecure} /> certificaatfouten negeren (zelfondertekend, bv. Proxmox op :8006)</label>
         <div class="grid">

@@ -15,8 +15,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
-from ..models import ApiConnection, Service, SshHost
+from ..models import ApiConnection, AppState, Service, SshHost
 from .checks import target_for
+from .routes import KEY as ROUTES_KEY
+from .routes import Table
 from .webpush import endpoint_hosts
 
 RESOLVE_TIMEOUT = 3.0
@@ -44,21 +46,35 @@ def _hostport(target: str) -> tuple[str, int] | None:
         return None
 
 
-def uses(services: list[Service], apis: list[ApiConnection], hosts: list[SshHost]) -> list[tuple[str, str, int | None, str]]:
-    """(host, protocol, poort, wie): alle uitgaande verbindingen. Poort None = ping."""
+def uses(services: list[Service], apis: list[ApiConnection], hosts: list[SshHost], table: Table | None = None
+         ) -> list[tuple[str, str, int | None, str]]:
+    """(host, protocol, poort, wie): alle uitgaande verbindingen. Poort None = ping. Met de routes van NPM: een check
+    op een naam achter NPM gaat rechtstreeks naar de server (ook als de firewall dat nu nog tegenhoudt)."""
     api_url = {a.id: a.url for a in apis}
     out: list[tuple[str, str, int | None, str]] = []
     for s in services:
         check = s.check or {}
         kind = check.get("type")
-        target = target_for(check, s.url) if kind else None
+        try:
+            target = target_for(check, s.url) if kind else None
+        except ValueError:
+            target = None
+        routed = table if table is not None and check.get("direct") is not False else None
         if target:
             if kind == "http" and (hp := _from_url(target)):
-                out.append((hp[0], "tcp", hp[1], f"{s.name} (check)"))
+                fw = routed.forward(hp[0], urlsplit(target).path or "/") if routed else None
+                out.append((fw[0], "tcp", fw[1], f"{s.name} (check, rechtstreeks)") if fw
+                           else (hp[0], "tcp", hp[1], f"{s.name} (check)"))
             elif kind == "tcp" and (hp := _hostport(target)):
-                out.append((hp[0], "tcp", hp[1], f"{s.name} (check)"))
+                fw = routed.forward(hp[0]) if routed else None
+                if fw:
+                    port = hp[1] if (check.get("target") or "").strip() else fw[1]
+                    out.append((fw[0], "tcp", port, f"{s.name} (check, rechtstreeks)"))
+                else:
+                    out.append((hp[0], "tcp", hp[1], f"{s.name} (check)"))
             elif kind == "ping":
-                out.append((target, "icmp", None, f"{s.name} (ping)"))
+                fw = routed.forward(target) if routed else None
+                out.append((fw[0] if fw else target, "icmp", None, f"{s.name} (ping)"))
         if s.type and s.type != "link":
             url = api_url.get(s.api_id) if s.api_id else (s.config or {}).get("url") or s.url
             if hp := _from_url(url):
@@ -123,7 +139,8 @@ async def overview(db: AsyncSession) -> dict:
     services = list((await db.execute(select(Service))).scalars())
     apis = list((await db.execute(select(ApiConnection))).scalars())
     hosts = list((await db.execute(select(SshHost))).scalars())
-    conns = uses(services, apis, hosts)
+    rt = await db.get(AppState, ROUTES_KEY)
+    conns = uses(services, apis, hosts, Table(rt.value if rt else None))
     # Web push naar je gsm('s): 443 naar de pushdienst (fcm.googleapis.com, *.push.apple.com, *.push.services.mozilla.com).
     conns += [(host, "tcp", 443, f"web push ({label})") for host, label in await endpoint_hosts(db)]
     dns = nameservers()

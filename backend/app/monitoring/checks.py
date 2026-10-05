@@ -22,6 +22,12 @@ CHECK_TIMEOUT = 25.0
 # Zoveel van de pagina lezen voor een woord- of JSON-controle.
 MAX_BODY = 1_000_000
 _PING_TIME = re.compile(r"time[=<]([\d.]+)\s*ms")
+# Zelf doorverwijzingen volgen (rechtstreekse checks): hoogstens zoveel, zoals httpx.
+MAX_REDIRECTS = 10
+
+
+def endpoint_of(host: str, port: int) -> str:
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
 
 @dataclass
@@ -127,14 +133,7 @@ BODY_TYPES = {"json": "application/json", "form": "application/x-www-form-urlenc
 
 
 async def check_http(target: str, check: dict, client: httpx.AsyncClient | None = None) -> Outcome:
-    need_body = bool((check.get("keyword") or "").strip() or (check.get("json_path") or "").strip())
-    method = check.get("method") if check.get("method") in ("GET", "HEAD", "POST") else "GET"
-    follow = check.get("follow_redirects") is not False
-    timeout = _seconds(check.get("timeout"), TIMEOUT)
-    headers = {"User-Agent": "homepage-monitor/1.0", **{str(k): str(v) for k, v in (check.get("headers") or {}).items()}}
-    body = check.get("body") if method == "POST" else None
-    if body is not None:
-        headers.setdefault("Content-Type", BODY_TYPES.get(check.get("body_type") or "", "application/json"))
+    need_body, method, follow, timeout, headers, body = _request_parts(check)
     own = client is None
     client = client or httpx.AsyncClient(verify=not check.get("insecure"), timeout=TIMEOUT, follow_redirects=True)
     start = time.perf_counter()
@@ -143,27 +142,12 @@ async def check_http(target: str, check: dict, client: httpx.AsyncClient | None 
                                  follow_redirects=follow) as r:
             ms = (time.perf_counter() - start) * 1000
             cert = _cert_expiry(r) if r.url.scheme == "https" else None
-            data = b""
-            if need_body and method != "HEAD":
-                async for chunk in r.aiter_bytes():
-                    data += chunk
-                    if len(data) >= MAX_BODY:
-                        break
-        # Doorverwezen naar een andere host: meestal de loginpagina van Authentik of Cloudflare Access. Die antwoordt
-        # 200, ook als de app erachter dood is.
+            data = await _read(r, need_body and method != "HEAD")
         start_host = (urlsplit(target).hostname or "").lower()
         end_host = (r.url.host or "").lower()
         if not follow and r.is_redirect:
             end_host = (urlsplit(str(r.url.join(r.headers.get("location", "")))).hostname or "").lower()
-        moved = end_host if end_host and end_host != start_host else None
-        ok = accepted(r.status_code, check)
-        rule = _accept_rule(check)
-        error = None if ok else f"HTTP {r.status_code}" + (f" (verwacht {rule})" if rule else "")
-        if ok and moved and check.get("same_host"):
-            ok, error = False, f"Doorverwezen naar {moved} (loginpagina?)"
-        if ok and need_body and method != "HEAD":
-            error = _content_error(check, data)
-            ok = error is None
+        ok, error, moved = _verdict(check, r.status_code, start_host, end_host, data, need_body and method != "HEAD")
         return Outcome(ok, round(ms, 1), r.status_code, error, cert, moved)
     except httpx.TimeoutException:
         return Outcome(False, error="Time-out")
@@ -172,6 +156,159 @@ async def check_http(target: str, check: dict, client: httpx.AsyncClient | None 
     finally:
         if own:
             await client.aclose()
+
+
+def _verdict(check: dict, code: int, start_host: str, end_host: str, data: bytes, content: bool
+             ) -> tuple[bool, str | None, str | None]:
+    """(ok, fout, doorverwezen naar) voor een antwoord."""
+    # Doorverwezen naar een andere host: meestal de loginpagina van Authentik of Cloudflare Access. Die antwoordt
+    # 200, ook als de app erachter dood is.
+    moved = end_host if end_host and end_host != start_host else None
+    ok = accepted(code, check)
+    rule = _accept_rule(check)
+    error = None if ok else f"HTTP {code}" + (f" (verwacht {rule})" if rule else "")
+    if ok and moved and check.get("same_host"):
+        ok, error = False, f"Doorverwezen naar {moved} (loginpagina?)"
+    if ok and content:
+        error = _content_error(check, data)
+        ok = error is None
+    return ok, error, moved
+
+
+def _request_parts(check: dict) -> tuple[bool, str, bool, float, dict, str | None]:
+    need_body = bool((check.get("keyword") or "").strip() or (check.get("json_path") or "").strip())
+    method = check.get("method") if check.get("method") in ("GET", "HEAD", "POST") else "GET"
+    follow = check.get("follow_redirects") is not False
+    timeout = _seconds(check.get("timeout"), TIMEOUT)
+    headers = {"User-Agent": "homepage-monitor/1.0", **{str(k): str(v) for k, v in (check.get("headers") or {}).items()}}
+    body = check.get("body") if method == "POST" else None
+    if body is not None:
+        headers.setdefault("Content-Type", BODY_TYPES.get(check.get("body_type") or "", "application/json"))
+    return need_body, method, follow, timeout, headers, body
+
+
+async def _read(r: httpx.Response, need: bool) -> bytes:
+    data = b""
+    if need:
+        async for chunk in r.aiter_bytes():
+            data += chunk
+            if len(data) >= MAX_BODY:
+                break
+    return data
+
+
+def _host_header(u: httpx.URL) -> str:
+    host = u.host or ""
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{host}:{u.port}" if u.port else host
+
+
+def _redirected(method: str, body: str | None, code: int) -> tuple[str, str | None]:
+    """Zoals een browser (en httpx): na 303, en na 301/302 op een POST, wordt het een GET zonder body."""
+    if (code == 303 and method != "HEAD") or (code in (301, 302) and method == "POST"):
+        return "GET", None
+    return method, body
+
+
+def _logical_next(logical: httpx.URL, route, location: str) -> httpx.URL:
+    """Waar een doorverwijzing van de server heen gaat, in namen: een Location met het IP en de poort van de server
+    zelf (sommige apps kennen alleen hun eigen adres) is dezelfde naam."""
+    nxt = logical.join(location)
+    port = nxt.port or (443 if nxt.scheme == "https" else 80)
+    if (nxt.host or "").lower() == route.host.lower().strip("[]") and port == route.port:
+        nxt = nxt.copy_with(scheme=logical.scheme, host=logical.host, port=logical.port)
+    return nxt
+
+
+async def check_http_direct(logical: httpx.URL, check: dict, clients: "HttpClients | None", table, route) -> Outcome:
+    """Zoals check_http, maar zonder DNS (monitoring/routes.py): rechtstreeks naar de server achter NPM, met de headers
+    die NPM meestuurt, of (route.npm) naar het IP van NPM zelf, met de naam in Host en SNI. Doorverwijzingen volgen we
+    zelf, in namen: zo blijft "doorverwezen naar een andere host" kloppen, en gaat een doorverwijzing naar een andere
+    naam achter NPM ook zonder DNS. Een naam die NPM niet kent (een externe login): vanaf daar zoals vroeger."""
+    need_body, method, follow, timeout, headers, body = _request_parts(check)
+    start_host = (logical.host or "").lower()
+    own: list[httpx.AsyncClient] = []
+
+    def client_for(insecure: bool) -> httpx.AsyncClient:
+        if clients is not None:
+            return clients.get(insecure)
+        c = httpx.AsyncClient(verify=not insecure, timeout=TIMEOUT)
+        own.append(c)
+        return c
+
+    start = time.perf_counter()
+    hops = 0
+    try:
+        while True:
+            host = _host_header(logical)
+            ext = {}
+            if route.npm:
+                # NPM kiest de proxy host op de naam: in SNI (het certificaat wordt gecontroleerd zoals vroeger) en
+                # in Host. Geen verbinding hergebruiken: die hoort bij de naam van de vorige check.
+                hdrs = {**headers, "Host": host, "Connection": "close"}
+                if logical.scheme == "https":
+                    ext["sni_hostname"] = logical.host
+                client = client_for(bool(check.get("insecure")))
+            else:
+                hdrs = {**headers, "Host": host, "X-Forwarded-Proto": logical.scheme,
+                        "X-Forwarded-Scheme": logical.scheme, "X-Forwarded-Host": host}
+                # Net als NPM: een https-server erachter heeft meestal een eigen certificaat, dat niemand controleert.
+                client = client_for(route.scheme == "https" or bool(check.get("insecure")))
+            try:
+                async with client.stream(method, route.url(logical), headers=hdrs, content=body, timeout=timeout,
+                                         follow_redirects=False, extensions=ext) as r:
+                    if follow and r.is_redirect:
+                        if hops >= MAX_REDIRECTS:
+                            # Zoals httpx: een kringetje van doorverwijzingen is een fout, geen 302.
+                            return Outcome(False, error="Exceeded maximum allowed redirects.")
+                        nxt = _logical_next(logical, route, r.headers.get("location", ""))
+                        code = r.status_code
+                    else:
+                        ms = (time.perf_counter() - start) * 1000
+                        # Via NPM: het certificaat dat NPM voor de naam toont (zoals vroeger); rechtstreeks: dat uit NPM.
+                        cert = None if logical.scheme != "https" else (route.npm and _cert_expiry(r)) or route.cert
+                        data = await _read(r, need_body and method != "HEAD")
+                        end_host = (logical.host or "").lower()
+                        if r.is_redirect:
+                            end_host = (_logical_next(logical, route, r.headers.get("location", "")).host or "").lower()
+                        ok, error, moved = _verdict(check, r.status_code, start_host, end_host, data,
+                                                    need_body and method != "HEAD")
+                        return Outcome(ok, round(ms, 1), r.status_code, error, cert, moved)
+            except httpx.TimeoutException:
+                return Outcome(False, error=f"Time-out ({route.label})")
+            except httpx.HTTPError as e:
+                return Outcome(False, error=f"{_short(e)} ({route.label})"[:300])
+            hops += 1
+            method, body = _redirected(method, body, code)
+            nxt_route = (table.find(nxt.host, nxt.path or "/", nxt.scheme, nxt.port)
+                         if nxt.scheme in ("http", "https") else None)
+            if nxt_route is None:
+                return await _rest_by_name(nxt, check, clients, client_for, method, body, headers, need_body, timeout,
+                                           start, start_host)
+            logical, route = nxt, nxt_route
+    finally:
+        for c in own:
+            await c.aclose()
+
+
+async def _rest_by_name(url: httpx.URL, check: dict, clients, client_for, method: str, body: str | None, headers: dict,
+                        need_body: bool, timeout: float, start: float, start_host: str) -> Outcome:
+    """Een doorverwijzing naar een naam die NPM niet kent: verder zoals een gewone check."""
+    client = client_for(bool(check.get("insecure")))
+    try:
+        async with client.stream(method, url, headers=headers, content=body, timeout=timeout,
+                                 follow_redirects=True) as r:
+            ms = (time.perf_counter() - start) * 1000
+            cert = _cert_expiry(r) if r.url.scheme == "https" else None
+            data = await _read(r, need_body and method != "HEAD")
+    except httpx.TimeoutException:
+        return Outcome(False, error="Time-out")
+    except httpx.HTTPError as e:
+        return Outcome(False, error=_short(e))
+    ok, error, moved = _verdict(check, r.status_code, start_host, (r.url.host or "").lower(), data,
+                                need_body and method != "HEAD")
+    return Outcome(ok, round(ms, 1), r.status_code, error, cert, moved)
 
 
 def _seconds(value, default: float) -> float:
@@ -294,10 +431,11 @@ class HttpClients:
 NOT_HERE = ("push", "container", "api")
 
 
-async def run_check(check: dict, url: str | None, clients: HttpClients | None = None) -> Outcome:
+async def run_check(check: dict, url: str | None, clients: HttpClients | None = None, routes=None) -> Outcome:
+    """routes: de tabel uit monitoring/routes.py; dan gaat een check op een naam achter NPM rechtstreeks."""
     try:
         async with asyncio.timeout(max(CHECK_TIMEOUT, _seconds(check.get("timeout"), 0) + 5)):
-            return await _run_check(check, url, clients)
+            return await _run_check(check, url, clients, routes)
     except TimeoutError:
         return Outcome(False, error="Time-out")
     except Exception as e:  # noqa: BLE001 - een fout in een check is een mislukte check, geen bevroren tegel
@@ -308,7 +446,8 @@ async def check_service(maker, sid: int, check: dict, url: str | None, clients: 
     """Eender welke check van tegel sid, ook de containercheck en de API van de tegel (die hebben de database nodig
     voor de sleutels). Een push-check heeft niets om na te kijken: die wacht op signalen."""
     if check.get("type") not in NOT_HERE:
-        return await run_check(check, url, clients)
+        from . import routes
+        return await run_check(check, url, clients, await routes.table(maker))
     if check.get("type") == "push":
         return Outcome(False, error="Een push-check wacht op signalen")
     from ..models import Service
@@ -325,19 +464,37 @@ async def check_service(maker, sid: int, check: dict, url: str | None, clients: 
         return Outcome(False, error="Time-out")
 
 
-async def _run_check(check: dict, url: str | None, clients: HttpClients | None = None) -> Outcome:
+async def _run_check(check: dict, url: str | None, clients: HttpClients | None = None, routes=None) -> Outcome:
     kind = check.get("type")
     if kind in NOT_HERE:
         return Outcome(False, error=f"Check {kind} loopt via de worker")
     target = target_for(check, url)
     if not target:
         return Outcome(False, error="Geen doel ingesteld")
+    direct = routes if routes is not None and check.get("direct") is not False else None
     if kind == "http":
+        if direct is not None:
+            try:
+                logical = httpx.URL(target)
+            except (httpx.InvalidURL, ValueError):
+                logical = None
+            route = (direct.find(logical.host, logical.path or "/", logical.scheme, logical.port)
+                     if logical is not None and logical.host else None)
+            if route is not None:
+                return await check_http_direct(logical, check, clients, direct, route)
         client = clients.get(bool(check.get("insecure"))) if clients else None
         return await check_http(target, check, client)
     if kind == "tcp":
+        if direct is not None:
+            host, _, port = target.rpartition(":")
+            route = direct.find(host.strip("[]"))
+            if route is not None and port.isdigit():
+                from .routes import tcp_port
+                target = endpoint_of(route.host, tcp_port(route, int(port)))
         return await check_tcp(target, _seconds(check.get("timeout"), 5))
     if kind == "ping":
+        if direct is not None and (route := direct.find(target)) is not None:
+            target = route.host
         return await check_ping(target)
     if kind == "dns":
         return await check_dns(target, check)

@@ -485,6 +485,30 @@ antwoordt 200 als database, worker en checks lopen, anders 503):
 3. Laat de firewall Zabbix toe naar de container op poort 80. In **! → instellingen** staat de rij *Iemand die het
    dashboard zelf bewaakt* op groen zodra Zabbix het adres opvraagt
 
+**Checks rechtstreeks, zonder DNS.** Een tegel als `https://jelly.jbogaert.be` wijst via DNS naar NPM. Zou elke
+check die naam opvragen, dan stelt het dashboard elke minuut honderden DNS-vragen, en test het eigenlijk NPM in
+plaats van de app. Met een NPM-tegel (type npm, adres `http://192.168.0.245:81`) haalt de worker daarom elke 5
+minuten de proxy hosts op, en stuurt hij de checks rechtstreeks naar de server die NPM erachter gebruikt (bv.
+`http://192.168.0.27:8096`). Hij stuurt dezelfde headers mee als NPM (`Host`, `X-Forwarded-Proto`), zodat de app
+het niet merkt. Klik je op een tegel, dan opent nog altijd de naam.
+
+- **HTTP, TCP en ping** gaan zo rechtstreeks. Een doorverwijzing naar een andere naam achter NPM gaat ook
+  rechtstreeks; een naam die NPM niet kent (een externe login) gaat zoals vroeger. De vervaldatum van het certificaat
+  komt uit NPM
+- **niet rechtstreeks**, met de reden in het mini dashboard van de tegel: een proxy host die uit staat in NPM, een
+  doel dat geen IP-adres is (een containernaam), NPM zelf (localhost), een eigen `proxy_pass` in de geavanceerde
+  instellingen van NPM, of een server die het dashboard niet bereikt. Dat laatste is meestal de firewall tussen de
+  VLAN's. Zo'n check gaat dan naar het IP van NPM (de host van de NPM-tegel) met de naam erbij: door NPM zoals
+  vroeger, maar ook zonder DNS. Bereikt het dashboard de server later wel, dan schakelt de tegel vanzelf over zonder
+  status te verliezen. Een adres met een eigen poort (`https://naam:8443`) gaat niet door NPM en blijft via de naam
+- **firewall**: de container moet de servers zelf bereiken, niet alleen NPM. De NPM-tegel → *rechtstreeks* toont welke
+  IP's en poorten niet lukken, en **net → firewall** geeft de regel voor OPNsense. Klik daarna op *nu vernieuwen*
+- **NPM zelf**: een check die rechtstreeks gaat, ziet een storing van NPM niet meer. Geef de NPM-tegel daarom zijn
+  eigen check (http op `http://192.168.0.245:81`)
+- **uitzetten**: per tegel onder **✎ bewerken → Monitoring** (*rechtstreeks naar de server achter NPM*), of voor
+  alles samen op de NPM-tegel. Uit = via de naam, met DNS, zoals vroeger. API-koppelingen (Zabbix, Portainer, ...) gebruiken altijd het adres dat je zelf
+  invulde: zet daar een IP als je DNS wil sparen
+
 **Voor je Uptime Kuma uitzet**:
 
 1. **! → instellingen → Checks op je tegels**: elke service die je in Kuma had, heeft hier een tegel met een check
