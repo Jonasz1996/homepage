@@ -145,7 +145,8 @@ async def _proxmox_one(name: str, integ) -> dict:
     return {"name": name, "level": "ok", "text": "twee tokens: alleen-lezen voor monitoring, een apart voor acties"}
 
 
-async def check_tokens(db: AsyncSession, clients) -> dict:
+async def proxmox_tokens(db: AsyncSession, clients) -> list[tuple[str, object]]:
+    """(naam, integratie) per Proxmox-token, dezelfde cluster met hetzelfde token maar één keer."""
     todo = []
     for a in (await db.execute(select(ApiConnection).where(ApiConnection.kind == "proxmox"))).scalars():
         try:
@@ -164,6 +165,11 @@ async def check_tokens(db: AsyncSession, clients) -> dict:
         if integ.secrets.get("username") and k not in seen:
             seen.add(k)
             uniq.append((name, integ))
+    return uniq
+
+
+async def check_tokens(db: AsyncSession, clients) -> dict:
+    uniq = await proxmox_tokens(db, clients)
     if not uniq:
         return item("tokens", "Rechten van de Proxmox-tokens", "info", "Nog geen Proxmox-token ingesteld.")
     res = await asyncio.gather(*(_proxmox_one(n, i) for n, i in uniq))

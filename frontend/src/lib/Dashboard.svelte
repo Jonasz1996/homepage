@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte'
   import { api, poll, withReauth } from './api.js'
+  import { AREA } from './attention.js'
   import { boom, fxEnabled, flash, RED, setFx, storm } from './fx.js'
   import { CHANGELOG } from './changelog.js'
   import Card from './Card.svelte'
@@ -35,10 +36,10 @@
   let logsOpen = $state(false)
   let logsUsed = $state(false)
   let logsInitial = $state(null)
-  function openLogs(host = null, q = '') {
+  function openLogs(host = null, q = '', setup = false) {
     logsUsed = true
     logsOpen = true
-    logsInitial = { host, q }
+    logsInitial = { host, q, setup }
   }
   let cronOpen = $state(false)
   let cronUsed = $state(false)
@@ -64,23 +65,56 @@
   async function loadHealth() {
     try { health = await api('/health/summary') } catch { /* volgende poging */ }
   }
-  function openTerminal(hostId = null, keys = false) {
+  // sub: een venster van de terminal openen (keys, defaults of discover).
+  function openTerminal(hostId = null, sub = null) {
     termUsed = true
     termOpen = true
-    if (hostId || keys) termRequest = { hostId, keys }
+    if (hostId || sub) termRequest = { hostId, modal: sub }
   }
   // Van buitenaf (via Cloudflare of een publiek IP)? Dan staan terminal, updates, acties en downloads uit.
   let where = $state.raw(null)
   async function loadWhere() {
     try { where = await api('/outside') } catch { /* oudere backend */ }
   }
-  // Knoppen uit de veiligheidscheck (hw → beveiliging): het venster dat het oplost.
+  // Knoppen uit het aandacht-overzicht, de instellingen-checklist en de veiligheidscheck: het venster dat het oplost.
+  const SAME = ['updates', 'capacity', 'restoretest', 'planned', 'webhooks', 'configs']
   function openFix(fix) {
-    if (fix.window === 'security') modal = { kind: 'security', tab: fix.tab }
-    else if (fix.window === 'net') modal = { kind: 'network', tab: fix.tab }
-    else if (fix.window === 'api') modal = { kind: 'apis' }
-    else if (fix.window === 'ssh-keys') openTerminal(null, true)
-    else if (fix.window === 'health') openHealth({ tab: fix.tab })
+    const w = fix?.window
+    const svc = fix?.service_id && allServices.find((s) => s.id === fix.service_id)
+    // Terminal, cron, hw en logs zijn eigen vensters: het aandacht-venster eerst dicht.
+    if (modal?.kind === 'attention') modal = null
+    if (!w) modal = { kind: 'attention' }
+    else if (w === 'security') modal = { kind: 'security', tab: fix.tab }
+    else if (w === 'net') modal = { kind: 'network', tab: fix.tab }
+    else if (w === 'api') modal = { kind: 'apis' }
+    else if (w === 'ssh-keys') openTerminal(null, 'keys')
+    else if (w === 'ssh-defaults') openTerminal(null, 'defaults')
+    else if (w === 'ssh-discover') openTerminal(null, 'discover')
+    else if (w === 'terminal') openTerminal(fix.host_id)
+    else if (w === 'health') openHealth({ tab: fix.tab })
+    else if (w === 'cron') openCron(fix.job ? { job: fix.job } : fix.filter ? { filter: fix.filter } : null)
+    else if (w === 'logs' || w === 'logs-setup') openLogs(null, '', w === 'logs-setup')
+    else if (w === 'detail' && svc) modal = { kind: 'detail', service: svc }
+    else if (w === 'edit' && svc) modal = { kind: 'service', service: svc }
+    else if (SAME.includes(w)) modal = { kind: w }
+  }
+
+  // Aandacht: alles wat nu mis is. De strook bovenaan toont de rode en oranje punten; ✕ verbergt ze tot er iets verandert.
+  let att = $state.raw({ items: [], ignored: [], counts: { err: 0, warn: 0, info: 0 } })
+  async function loadAtt() {
+    try { att = await api('/attention') } catch { /* volgende poging */ }
+  }
+  let urgent = $derived(att.items.filter((i) => i.level !== 'info'))
+  let stripId = $derived(hash(urgent.map((i) => i.key + i.sig).join('|')))
+  let stripHidden = $state(readStr('att-hide'))
+  function hideStrip() {
+    stripHidden = stripId
+    writePref('att-hide', stripId)
+  }
+  function hash(s) {
+    let h = 0
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0
+    return String(h >>> 0)
   }
 
   // Slepen: wat er gesleept wordt en waar het zou landen.
@@ -134,6 +168,8 @@
 
   // Snelle acties in de zoekbalk: commando's van het dashboard zelf en knoppen van de integraties.
   const COMMANDS = [
+    { label: 'aandacht: alles wat nu mis is', run: () => (modal = { kind: 'attention' }) },
+    { label: 'instellingen-checklist: wat werkt, half of nog niet ingesteld', run: () => (modal = { kind: 'attention', tab: 'instellingen' }) },
     { label: 'logs openen', run: () => openLogs() },
     { label: 'terminal openen', run: () => openTerminal() },
     { label: 'cron: alle geplande taken, agenda, verbanden', run: () => openCron() },
@@ -223,6 +259,9 @@
 
   function readPref(k) {
     try { return Number(localStorage.getItem('hp:' + k)) || null } catch { return null }
+  }
+  function readStr(k) {
+    try { return localStorage.getItem('hp:' + k) || '' } catch { return '' }
   }
   function writePref(k, v) {
     try { localStorage.setItem('hp:' + k, String(v)) } catch { /* privé-venster */ }
@@ -447,6 +486,7 @@
     else if (what === 'terminal') openTerminal()
     else if (what === 'devices') modal = { kind: 'network', tab: 'apparaten' }
     else if (what === 'kaart') modal = { kind: 'network', tab: 'kaart' }
+    else if (what === 'aandacht' || what === 'instellingen') modal = { kind: 'attention', tab: what === 'aandacht' ? 'nu' : what }
     else if (kinds[what]) modal = { kind: kinds[what], tab: what === 'report' ? 'report' : undefined }
   }
 
@@ -481,6 +521,8 @@
     loadCron()
     loadHealth()
     loadWhere()
+    loadAtt()
+    const stopAtt = poll(loadAtt, 120000)
     const stopCron = poll(loadCron, 120000)
     const stopHealth = poll(loadHealth, 120000)
     const stopNet = poll(loadNet, 120000)
@@ -488,7 +530,7 @@
     const stopUpdates = poll(loadUpdates, 300000)
     const stopClock = poll(() => (now = new Date()), 15000)
     const stopStatus = poll(loadStatus, 30000)
-    return () => { stopClock(); stopStatus(); stopWidgets(); stopUpdates(); stopNet(); stopCron(); stopHealth() }
+    return () => { stopClock(); stopStatus(); stopWidgets(); stopUpdates(); stopNet(); stopCron(); stopHealth(); stopAtt() }
   })
 </script>
 
@@ -503,10 +545,12 @@
                 title="Je bent van buitenaf verbonden ({where.why}): terminal, updates, acties en downloads staan uit, tenzij je ze aanzet">buiten</button>
       {/if}
       <Notifications onopen={openNotification} onwebhooks={() => (modal = { kind: 'webhooks' })} />
-      <button class="mini burger" class:on={menuOpen} onclick={() => (menuOpen = !menuOpen)} aria-label="Menu" aria-expanded={menuOpen}>☰</button>
+      <button class="mini burger" class:on={menuOpen} onclick={() => (menuOpen = !menuOpen)} aria-label="Menu" aria-expanded={menuOpen}>☰{#if att.counts.err}<i class="nd e"></i>{/if}</button>
       <!-- Op de gsm klapt dit open onder ☰; op een groot scherm staan de knoppen gewoon in de titelbalk. -->
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
       <span class="menu" class:open={menuOpen} onclick={() => (menuOpen = false)}>
+        <button class="mini" class:cronbad={att.counts.err} onclick={() => (modal = { kind: 'attention' })}
+                title="Aandacht: alles wat nu mis is, en welke functies nog ingesteld moeten worden">!<span class="ml">aandacht</span>{#if att.counts.err + att.counts.warn}<b class="n" class:wn={!att.counts.err}>{att.counts.err + att.counts.warn}</b>{/if}</button>
         <button class="mini" onclick={() => openLogs()} title="Logs van je machines">logs</button>
         <button class="mini" onclick={() => openTerminal()} title="SSH-terminal">&gt;_<span class="ml">terminal</span></button>
         <button class="mini" onclick={() => (modal = { kind: 'capacity' })} title="Capaciteit: opslag, cpu en ram">df<span class="ml">capaciteit, stroom</span></button>
@@ -546,6 +590,19 @@
         autocomplete="off"
       />
     </div>
+    {#if urgent.length && stripHidden !== stripId}
+      <div class="attn" role="region" aria-label="Aandacht">
+        {#each urgent.slice(0, 4) as i (i.key)}
+          <button class="ai lv-{i.level}" onclick={() => openFix(i.fix)}>
+            <i></i><b>{i.title}</b><span class="area">{AREA[i.area] || i.area}</span>{#if i.text}<small>{i.text}</small>{/if}
+          </button>
+        {/each}
+        <div class="aend">
+          <button class="mini" onclick={() => (modal = { kind: 'attention' })}>{urgent.length > 3 ? `alle ${urgent.length} bekijken` : 'aandacht'}</button>
+          <button class="mini x" onclick={hideStrip} title="Verbergen tot er iets verandert" aria-label="Verbergen">✕</button>
+        </div>
+      </div>
+    {/if}
     {#if layout.pages.length > 0}
       <nav class="tabs">
         {#each layout.pages as p (p.id)}
@@ -751,6 +808,9 @@
 {:else if modal?.kind === 'news'}
   <Lazy load={() => import('./Changelog.svelte')} entries={modal.entries} version={modal.version}
         onclose={() => { modal = null; markNews() }} />
+{:else if modal?.kind === 'attention'}
+  <Lazy load={() => import('./Attention.svelte')} tab={modal.tab} data={att} onfix={openFix}
+        onchanged={(d) => (att = d)} onclose={() => (modal = null)} />
 {:else if modal?.kind === 'revisions'}
   <Lazy load={() => import('./Revisions.svelte')} onclose={() => (modal = null)} ondone={load} />
 {/if}
@@ -809,6 +869,17 @@
   .nd.e { background: var(--err); box-shadow: 0 0 6px var(--err) }
   .down { color: var(--err) }
   .maint { color: var(--mid) }
+  .attn { display: flex; flex-direction: column; gap: 4px; padding: 0 24px 14px }
+  .ai { all: unset; cursor: pointer; display: flex; gap: 8px; align-items: baseline; padding: 6px 10px; border-radius: 9px;
+        border: 1px solid var(--line); border-left: 3px solid var(--mid); background: var(--fill); min-width: 0; font-size: 12.5px }
+  .ai:hover, .ai:focus-visible { background: var(--fill-h) }
+  .ai.lv-err { border-left-color: var(--err) }
+  .ai i { width: 7px; height: 7px; border-radius: 50%; background: var(--mid); flex-shrink: 0; align-self: center }
+  .ai.lv-err i { background: var(--err); box-shadow: 0 0 6px var(--err) }
+  .ai b { color: var(--text-h); font-weight: 500; white-space: nowrap }
+  .ai .area { font-size: 10.5px; padding: 0 5px; border-radius: 5px; border: 1px solid var(--line-2); color: var(--muted) }
+  .ai small { color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0 }
+  .aend { display: flex; gap: 6px; justify-content: flex-end }
   .head { display: flex; gap: 18px; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; padding-bottom: 12px }
   .hello .hint { margin: 6px 0 0 }
   .search { max-width: 340px }
@@ -876,7 +947,10 @@
     .tiles { grid-template-columns: repeat(auto-fill, minmax(138px, 1fr)) }
     .groups { gap: 12px; margin-top: 12px }
     .head { padding: 18px 16px 12px }
-    .tabs, .tools { padding-left: 16px; padding-right: 16px }
+    .tabs, .tools, .attn { padding-left: 16px; padding-right: 16px }
+    .ai { flex-wrap: wrap }
+    .ai:nth-child(n+4) { display: none }
+    .ai b { white-space: normal }
     .search { max-width: none }
     .clock { display: none }
   }
