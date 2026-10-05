@@ -14,6 +14,7 @@ class Portainer(Integration):
         "url": "https://portainer.jbogaert.be",
         "env": "optioneel: id van één omgeving (endpoint), anders alle",
         "insecure": "true bij een zelfondertekend certificaat",
+        "logs": "false om de containerlogs niet in de logviewer op te halen",
     }
     secret_help = {"key": "API-sleutel (My account → Access tokens)"}
     actions = {"start", "stop", "restart"}

@@ -7,7 +7,7 @@ from .config import get_settings
 from .db import get_maker
 from .deps import COOKIE, csrf_guard, secure_cookie
 from .routers import (auth, capacity, configs, cron, heal, health, hooks, importexport, integrations, layout, logs, monitoring, network, notifications,
-                      oidc, planning, ssh, timeline, upgrade)
+                      oidc, planning, search, ssh, timeline, upgrade)
 
 log = logging.getLogger("homepage.api")
 
@@ -61,6 +61,7 @@ app.include_router(heal.router)
 app.include_router(configs.router)
 app.include_router(hooks.router)
 app.include_router(planning.router)
+app.include_router(search.router)
 
 
 @app.middleware("http")

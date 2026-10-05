@@ -1,11 +1,12 @@
 <script>
-  import { onMount } from 'svelte'
+  import { onMount, untrack } from 'svelte'
   import { api } from './api.js'
 
   // Apparaten op het netwerk (ARP en DHCP van OPNsense). Onbekende staan bovenaan; geef ze een naam.
   let data = $state(null)
   let error = $state('')
-  let q = $state('')
+  let { initialQuery = '' } = $props()
+  let q = $state(untrack(() => initialQuery))
   let edit = $state(null)
   let busy = $state('')
 
