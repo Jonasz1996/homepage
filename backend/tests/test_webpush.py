@@ -283,29 +283,34 @@ async def test_level_filter_and_payload(authed):
     await db.commit()
     sid = (await db.execute(select(Service.id))).scalar_one()
     await agen.aclose()
+    key = f"svc{sid}"
     ids = await _notify(
-        {"title": "NAS down", "body": "Time-out", "level": "err", "source": "monitor", "service_id": sid},
+        {"title": "NAS down", "body": "Time-out", "level": "err", "source": "monitor", "service_id": sid, "key": key},
         {"title": "Schijf 85% vol", "level": "warn", "source": "capaciteit"},
         {"title": "Back-up gelukt", "level": "info", "source": "backup"},
-        {"title": "NAS weer up", "level": "ok", "source": "monitor", "service_id": sid},
         {"title": "Login vanaf nieuw IP", "level": "warn", "source": "auth"},
         {"title": "2FA ingeschakeld", "level": "info", "source": "auth"},
         {"title": "Weekrapport", "level": "info", "source": "rapport"},
     )
     svc = PushService([a, b, c])
     await _run(svc)
+    # Herstel komt op elk toestel dat de storing kreeg; "Back-up gelukt" (ok zonder storing) alleen bij "alles".
+    await _notify({"title": "NAS weer up", "level": "ok", "source": "monitor", "service_id": sid, "key": key,
+                   "recovers": "err"},
+                  {"title": "Hersteltest geslaagd", "level": "ok", "source": "backup"})
+    await _run(svc)
     titles = lambda p: [m["title"] for m in svc.to(p)]  # noqa: E731
-    assert titles(a) == ["NAS down", "NAS weer up", "Login vanaf nieuw IP", "Weekrapport"]
-    assert titles(b) == ["NAS down", "Schijf 85% vol", "NAS weer up", "Login vanaf nieuw IP", "Weekrapport"]
-    assert titles(c) == ["NAS down", "Schijf 85% vol", "Back-up gelukt", "NAS weer up", "Login vanaf nieuw IP",
-                         "2FA ingeschakeld", "Weekrapport"]
+    assert titles(a) == ["NAS down", "Login vanaf nieuw IP", "Weekrapport", "NAS weer up"]
+    assert titles(b) == ["NAS down", "Schijf 85% vol", "Login vanaf nieuw IP", "Weekrapport", "NAS weer up"]
+    assert titles(c) == ["NAS down", "Schijf 85% vol", "Back-up gelukt", "Login vanaf nieuw IP", "2FA ingeschakeld",
+                         "Weekrapport", "NAS weer up", "Hersteltest geslaagd"]
 
     down = next(g for g in svc.got if g["to"] == A and g["msg"]["title"] == "NAS down")
-    assert down["msg"] == {"title": "NAS down", "body": "Time-out", "level": "err", "tag": f"svc{sid}",
+    assert down["msg"] == {"title": "NAS down", "body": "Time-out", "level": "err", "tag": f"k{webpush.topic_for(key)}",
                            "url": f"/?open=melding&n={ids[0]}"}
     h = down["headers"]
     assert h["ttl"] == "86400" and h["content-encoding"] == "aes128gcm" and h["urgency"] == "high"
-    assert h["topic"] == f"svc{sid}"
+    assert h["topic"] == webpush.topic_for(key) and len(h["topic"]) <= 32
     claims = _verify_vapid(h["authorization"], A)
     assert claims["sub"] == "https://homepage.jbogaert.be"
     assert claims["k"] == (await authed.get("/api/webpush/key")).json()["public_key"]
@@ -533,9 +538,10 @@ async def test_renew_with_secret(authed):
     assert r.status_code == 403
     r = await authed.put("/api/webpush/subscriptions/renew", json={"id": first["id"], "renew": first["renew"], "subscription": new.sub()})
     assert r.status_code == 200 and r.json()["id"] == first["id"] and r.json()["renew"] != first["renew"]
-    # Het geheim werkt één keer.
+    # Het geheim werkt één keer: een ander adres ermee aanmelden kan niet meer (exact hetzelfde verzoek herhalen wel,
+    # zie test_vernieuwen_twee_keer_hetzelfde_verzoek).
     r2 = await authed.put("/api/webpush/subscriptions/renew", json={"id": first["id"], "renew": first["renew"],
-                                                                      "subscription": new.sub()})
+                                                                      "subscription": Phone(A + "-ander").sub()})
     assert r2.status_code == 403
     (sub,) = await _rows(PushSubscription)
     data = decrypt_json(sub.data)
@@ -633,11 +639,12 @@ async def test_nieuwer_nieuws_vervangt_een_wachtende_melding(authed):
     await db.commit()
     sid = (await db.execute(select(Service.id))).scalar_one()
     await agen.aclose()
-    await _notify({"title": "NAS down", "level": "err", "source": "monitor", "service_id": sid})
+    await _notify({"title": "NAS down", "level": "err", "source": "monitor", "service_id": sid, "key": f"svc{sid}"})
     svc = PushService([a])
     svc.down = True
     await _run(svc)  # mislukt: wacht 30 s
-    await _notify({"title": "NAS weer bereikbaar", "level": "ok", "source": "monitor", "service_id": sid})
+    await _notify({"title": "NAS weer bereikbaar", "level": "ok", "source": "monitor", "service_id": sid,
+                   "key": f"svc{sid}", "recovers": "err"})
     svc.down = False
     await _run(svc)
     assert [m["title"] for m in svc.to(a)] == ["NAS weer bereikbaar"] and not await _rows(PushQueue)
@@ -679,3 +686,130 @@ async def test_nieuw_wachtwoord_maakt_vernieuwgeheim_ongeldig_en_afgemeld_toeste
     r = await authed.put("/api/webpush/subscriptions/renew", json={"id": first["id"], "renew": renew,
                                                                      "subscription": other.sub()})
     assert r.status_code == 403
+
+
+async def _due_now():
+    """Wat wacht (opnieuw proberen), nu laten gaan, zoals na de wachttijd."""
+    agen, db = await _db()
+    await db.execute(update(PushQueue).values(next_at=datetime.now(timezone.utc) - timedelta(seconds=1)))
+    await db.commit()
+    await agen.aclose()
+
+
+async def test_andere_storing_over_dezelfde_tegel_blijft_staan(authed):
+    """De cluster meldt alles onder de Proxmox-tegel: een replicatie-waarschuwing mag de wachtende "node weg" niet
+    vervangen, en "node terug" komt op een toestel voor storingen ook als er intussen een waarschuwing was."""
+    a, b = Phone(A), Phone(B)
+    await _subscribe(authed, a, "storingen", "err")
+    await _subscribe(authed, b, "waarschuwingen", "warn")
+    node, repl = "cluster|c|node:pve2", "cluster|c|repl:100-0"
+    await _notify({"title": "Node pve2 is weg", "level": "err", "source": "cluster", "key": node})
+    svc = PushService([a, b])
+    svc.down = True
+    await _run(svc)
+    svc.down = False
+    await _notify({"title": "Replicatie 100-0 mislukt", "level": "warn", "source": "cluster", "key": repl})
+    await _run(svc)
+    await _due_now()
+    await _run(svc)
+    assert [m["title"] for m in svc.to(b)] == ["Replicatie 100-0 mislukt", "Node pve2 is weg"]
+    assert [m["title"] for m in svc.to(a)] == ["Node pve2 is weg"]
+    await _notify({"title": "Node pve2 is terug", "level": "ok", "source": "cluster", "key": node, "recovers": "err"},
+                  {"title": "Replicatie 100-0 lukt weer", "level": "ok", "source": "cluster", "key": repl,
+                   "recovers": "warn"})
+    await _run(svc)
+    assert [m["title"] for m in svc.to(a)] == ["Node pve2 is weg", "Node pve2 is terug"]
+    assert [m["title"] for m in svc.to(b)][-2:] == ["Node pve2 is terug", "Replicatie 100-0 lukt weer"]
+    tags = {m["title"]: m["tag"] for m in svc.to(b)}
+    assert tags["Node pve2 is weg"] == tags["Node pve2 is terug"] != tags["Replicatie 100-0 mislukt"]
+
+
+async def test_down_en_herstel_in_dezelfde_ronde(authed):
+    a = Phone(A)
+    await _subscribe(authed, a, "Pixel")
+    await _notify({"title": "NAS down", "level": "err", "source": "monitor", "key": "svc1"},
+                  {"title": "Router down", "level": "err", "source": "monitor", "key": "svc2"},
+                  {"title": "NAS weer bereikbaar", "level": "ok", "source": "monitor", "key": "svc1", "recovers": "err"})
+    svc = PushService([a])
+    await _run(svc)
+    # Alleen het nieuwste over de NAS: anders kan "down" na "weer bereikbaar" aankomen.
+    assert [m["title"] for m in svc.to(a)] == ["Router down", "NAS weer bereikbaar"]
+    assert not await _rows(PushQueue)
+
+
+async def test_samenvatting_mislukt_en_het_herstel_kwam_al(authed):
+    """Een vloed met eerst "down" en op het eind "weer bereikbaar": wat na een mislukte samenvatting blijft wachten,
+    komt later niet alsnog als "down" na het herstel."""
+    a = Phone(A)
+    await _subscribe(authed, a, "Pixel")
+    await _notify({"title": "NAS is nog altijd down", "level": "err", "source": "monitor", "key": "svc1"},
+                  *({"title": f"m{i}", "level": "err"} for i in range(12)))
+
+    class Fails(PushService):
+        def handler(self, request):
+            r = super().handler(request)
+            return httpx.Response(503) if self.got[-1]["msg"]["tag"] == "meer" else r
+    svc = Fails([a])
+    await _run(svc)
+    assert len(svc.to(a)) == 10  # 9 apart en de samenvatting (mislukt)
+    await _notify({"title": "NAS weer bereikbaar", "level": "ok", "source": "monitor", "key": "svc1",
+                   "recovers": "err"})
+    webpush._sent.clear()
+    await _due_now()
+    await _run(svc)
+    titles = [m["title"] for m in svc.to(a)][10:]
+    assert "NAS is nog altijd down" not in titles and titles[-1] == "NAS weer bereikbaar"
+
+
+async def test_afgemeld_alleen_als_het_adres_nog_hetzelfde_is(authed):
+    """De browser vernieuwde zijn adres terwijl er nog een bericht naar het oude onderweg was: de 410 daarvan maakt
+    het vernieuwde toestel niet "afgemeld"."""
+    a = Phone(A)
+    first = await _subscribe(authed, a, "Firefox")
+    agen, db = await _db()
+    (sub,) = (await db.execute(select(PushSubscription))).scalars().all()
+    r = await authed.put("/api/webpush/subscriptions/renew", json={
+        "id": first["id"], "renew": first["renew"], "subscription": Phone(A + "-nieuw").sub()})
+    assert r.status_code == 200
+    await webpush._gone(db, sub)
+    await db.commit()
+    await agen.aclose()
+    (sub,) = await _rows(PushSubscription)
+    assert sub.gone_at is None
+    assert not [n for n in await _rows(Notification) if "krijgt geen meldingen meer" in n.title]
+
+
+async def test_vernieuwen_twee_keer_hetzelfde_verzoek(authed):
+    """Het antwoord ging verloren: de service worker stuurt exact hetzelfde nog eens, en krijgt een geheim dat werkt.
+    Een ander adres met dat oude geheim kan niet."""
+    a = Phone(A)
+    first = await _subscribe(authed, a, "Firefox")
+    new = Phone(A + "-nieuw").sub()
+    body = {"id": first["id"], "renew": first["renew"], "subscription": new}
+    lost = await authed.put("/api/webpush/subscriptions/renew", json=body)
+    assert lost.status_code == 200
+    again = await authed.put("/api/webpush/subscriptions/renew", json=body)
+    assert again.status_code == 200 and again.json()["renew"] != lost.json()["renew"]
+    r = await authed.put("/api/webpush/subscriptions/renew", json={**body, "subscription": Phone(A + "-ander").sub()})
+    assert r.status_code == 403
+    r = await authed.put("/api/webpush/subscriptions/renew", json={**body, "renew": again.json()["renew"],
+                                                                    "subscription": Phone(A + "-later").sub()})
+    assert r.status_code == 200
+    assert (await authed.put("/api/webpush/subscriptions/renew", json=body)).status_code == 403
+
+
+async def test_vernieuwen_tegelijk_een_wint(authed):
+    from fastapi import HTTPException
+
+    from app.routers import webpush as route
+    first = await _subscribe(authed, Phone(A), "Firefox")
+    agen, db = await _db()
+    s = await db.get(PushSubscription, first["id"])
+    other, db2 = await _db()
+    await db2.execute(update(PushSubscription).values(renew_hash="0" * 64))
+    await db2.commit()
+    await other.aclose()
+    with pytest.raises(HTTPException) as e:
+        await route._rotate(db, s, s.renew_hash)
+    assert e.value.status_code == 409
+    await agen.aclose()

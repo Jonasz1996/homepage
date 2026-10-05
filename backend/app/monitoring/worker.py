@@ -94,8 +94,8 @@ class Worker:
 
     async def run_one(self, sid: int, check: dict, url: str | None) -> None:
         self.running.add(sid)
-        checked = identity(check, url)
         try:
+            checked = identity(check, url)
             async with self.sem:
                 try:
                     outcome = await check_service(self.maker, sid, check, url, self.http)

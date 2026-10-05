@@ -22,6 +22,7 @@ def upgrade() -> None:
         sa.Column('label', sa.String(length=80), nullable=False),
         sa.Column('min_level', sa.String(length=8), server_default='err', nullable=False),
         sa.Column('renew_hash', sa.String(length=64), nullable=False),
+        sa.Column('prev_renew_hash', sa.String(length=64), nullable=True),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.Column('last_ok_at', sa.DateTime(timezone=True), nullable=True),
         sa.Column('last_error', sa.String(length=300), nullable=True),

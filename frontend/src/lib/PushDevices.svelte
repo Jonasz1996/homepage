@@ -65,9 +65,10 @@
     // Kent de server dit toestel nog? (bv. weg na "afgemeld" bij de pushdienst, of verwijderd op een ander toestel)
     const sub = await reg.pushManager.getSubscription().catch(() => null)
     const saved = await store('readonly', (s) => s.get('webpush')).catch(() => null)
-    const known = !!saved?.id && items.some((i) => i.id === saved.id)
-    mine = known ? saved.id : null
-    lost = (!!sub && !known) || (!sub && known)
+    const row = saved?.id ? items.find((i) => i.id === saved.id) : null
+    mine = row ? saved.id : null
+    // Afgemeld bij de pushdienst (gone): dit toestel krijgt niets meer, ook al kent de server het nog even.
+    lost = (!!sub && !row) || (!sub && !!row) || !!row?.gone
   }
 
   onMount(async () => {
@@ -87,7 +88,9 @@
       const { public_key } = await api('/webpush/key')
       let sub = await reg.pushManager.getSubscription()
       // Aangemeld met een andere sleutel (bv. na een herinstallatie): eerst afmelden, anders weigert de pushdienst.
-      if (sub && keyText(sub.options?.applicationServerKey) !== public_key) { await sub.unsubscribe(); sub = null }
+      // Ook als de pushdienst dit adres niet meer kent (gone): dan een nieuw adres vragen.
+      const gone = !!items.find((i) => i.id === mine)?.gone
+      if (sub && (gone || keyText(sub.options?.applicationServerKey) !== public_key)) { await sub.unsubscribe(); sub = null }
       sub ||= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(public_key) })
       const j = sub.toJSON()
       const subscription = { endpoint: j.endpoint, keys: j.keys }

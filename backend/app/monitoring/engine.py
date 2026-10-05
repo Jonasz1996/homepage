@@ -20,6 +20,8 @@ MASS_SHARE = 0.6
 MASS_END_SHARE = 0.3
 MASS_MIN = 5
 MASS_KEY = "massastoring"
+# Wat zo kort voor de massastoring apart als down gemeld werd, hoort bij dezelfde golf.
+MASS_WAVE = timedelta(minutes=15)
 # Zonder TimescaleDB ruimt de worker zelf op: checks een jaar (de 1j-grafiek), metingen een half jaar.
 KEEP_CHECKS_DAYS = 365
 KEEP_METRICS_DAYS = 180
@@ -70,7 +72,12 @@ def identity(check: dict | None, url: str | None) -> tuple | None:
     """Wat er gecheckt wordt. Verandert dit, dan hoort de oude status (down, twijfel) niet meer bij de tegel."""
     if not active(check):
         return None
-    return (check.get("type"), target_for(check, url), check.get("portainer_id"), check.get("env"),
+    try:
+        target = target_for(check, url)
+    except ValueError:
+        # Kapot adres (poort buiten bereik, half IPv6-adres): de check zelf meldt dat als fout.
+        target = ("ongeldig", url)
+    return (check.get("type"), target, check.get("portainer_id"), check.get("env"),
             check.get("container"), check.get("path"))
 
 
@@ -81,6 +88,8 @@ def silencing(old: dict | None, new: dict | None) -> str | None:
         return "check gepauzeerd" if new.get("type") else "check verwijderd"
     if old.get("type") and new.get("type") and new.get("notify") == "uit" and old.get("notify") != "uit":
         return "meldingen uitgezet"
+    if old.get("type") and new.get("type") and (old.get("notify") or "push") == "push" and new.get("notify") == "centrum":
+        return "meldingen niet meer op je gsm"
     return None
 
 
@@ -99,13 +108,15 @@ async def reset_state(db: AsyncSession, service_id: int) -> None:
 
 
 def alert(db: AsyncSession, service: Service, title: str, body: str | None, level: str,
-          data: dict | None = None) -> None:
-    """Melding voor een service, zoals ingesteld op de check: hier en op de gsm, alleen hier, of alleen tijdlijn."""
+          data: dict | None = None, key: str | None = None) -> None:
+    """Melding voor een service, zoals ingesteld op de check: hier en op de gsm, alleen hier, of alleen tijdlijn.
+    Down, nog down en weer bereikbaar gaan over dezelfde storing: op de gsm vervangt de nieuwste de vorige."""
     mode = (service.check or {}).get("notify") or "push"
     if mode == "uit":
         event(db, "storing", title, body, level, service.id, data)
         return
-    notify(db, title, body, level=level, source="monitor", service_id=service.id, data=data, push=mode != "centrum")
+    notify(db, title, body, level=level, source="monitor", service_id=service.id, data=data, push=mode != "centrum",
+           key=key or f"svc{service.id}", recovers="err")
 
 
 async def ancestors(db: AsyncSession, service: Service, limit: int = 6) -> list[Service]:
@@ -156,17 +167,36 @@ async def _parent_failing(db: AsyncSession, service: Service) -> Service | None:
     return None
 
 
-async def failing_share(db: AsyncSession) -> tuple[int, int]:
-    """(aantal checks dat nu faalt, aantal lopende checks). Wat al apart als down gemeld is (een pc die meestal uit
-    staat), telt niet mee: anders begint een massastoring te snel, en eindigt ze nooit."""
-    ids = [sid for sid, check in (await db.execute(select(Service.id, Service.check))).all() if active(check)]
+async def failing_share(db: AsyncSession, now: datetime | None = None, start: bool = False) -> tuple[int, int]:
+    """(aantal checks dat nu faalt, aantal lopende checks).
+
+    Wat al apart gemeld is (een pc die meestal uit staat) telt niet mee, en ook niet wat daardoor stil down is (de
+    CT's op een node die down is): anders begint een massastoring te snel, en eindigt ze nooit. Bij het begin (start)
+    telt wat de laatste 15 minuten apart gemeld werd wel mee: dat hoort bij dezelfde golf (snelle checks zijn eerder
+    down dan trage)."""
+    now = now or datetime.now(timezone.utc)
+    svcs = {sid: (check, parent) for sid, check, parent in
+            (await db.execute(select(Service.id, Service.check, Service.parent_id))).all()}
+    ids = [sid for sid, (check, _) in svcs.items() if active(check)]
     if not ids:
         return 0, 0
-    states = (await db.execute(select(ServiceState.status, ServiceState.quiet, ServiceState.fail_count).where(
-        ServiceState.service_id.in_(ids)))).all()
-    reported = sum(1 for status, quiet, _ in states if status == "down" and not quiet)
-    failing = sum(1 for status, quiet, fails in states if fails > 0 and not (status == "down" and not quiet))
-    return failing, len(ids) - reported
+    states = {st.service_id: st for st in (await db.execute(
+        select(ServiceState).where(ServiceState.service_id.in_(ids)))).scalars()}
+    known = {sid for sid, st in states.items() if st.status == "down" and not st.quiet
+             and not (start and (_aware(st.since) or now) > now - MASS_WAVE)}
+    explained = set(known)
+    for sid, st in states.items():
+        if st.status != "down" or not st.quiet:
+            continue
+        seen, p = {sid}, svcs[sid][1]
+        while p and p not in seen and p in svcs:
+            if p in known:
+                explained.add(sid)
+                break
+            seen.add(p)
+            p = svcs[p][1]
+    failing = sum(1 for sid, st in states.items() if st.fail_count > 0 and sid not in explained)
+    return failing, len(ids) - len(explained)
 
 
 async def in_mass_outage(db: AsyncSession) -> bool:
@@ -178,7 +208,7 @@ async def _mass_start(db: AsyncSession, now: datetime) -> bool:
     """Faalt nu het grootste deel van de checks? Dan één melding en geen aparte per service."""
     if await in_mass_outage(db):
         return True
-    failing, total = await failing_share(db)
+    failing, total = await failing_share(db, now, start=True)
     if total < MASS_MIN or failing < MASS_SHARE * total:
         return False
     await ensure_state(db, MASS_KEY, {})
@@ -223,7 +253,7 @@ def _cert_notes(db: AsyncSession, service: Service, state: ServiceState, expires
         return
     when = "verlopen" if days < 0 else f"vervalt over {max(0, int(days))} dagen"
     alert(db, service, f"Certificaat van {service.name} {when}", f"Geldig tot {expires:%d/%m/%Y %H:%M} UTC.",
-          "err" if threshold == 3 else "warn")
+          "err" if threshold == 3 else "warn", key=f"cert{service.id}")
 
 
 async def _still_down(db: AsyncSession, service: Service, state: ServiceState, outcome: Outcome,

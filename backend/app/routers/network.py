@@ -36,7 +36,8 @@ async def _overview(db: AsyncSession) -> dict:
         mac = wol.normalize_mac(str((s.config or {}).get("mac") or ""))
         if mac:
             st = await db.get(ServiceState, s.id)
-            wake.append({"service_id": s.id, "name": s.name, "mac": mac, "status": st.status if st else "unknown"})
+            wake.append({"service_id": s.id, "name": s.name, "mac": mac,
+                         "status": "unknown" if st is None or st.stale else st.status})
     ip = states.get("public_ip", {})
     return {"public_ip": {k: ip.get(k) for k in ("ip", "since", "checked_at", "error", "history")},
             "gateways": per("net_gw", "opnsense"), "tunnels": per("net_tunnel", "cloudflared"),

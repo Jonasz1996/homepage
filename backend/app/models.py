@@ -162,6 +162,11 @@ class Notification(Base):
     read_at: Mapped[datetime | None]
     # Wanneer de worker hem naar de gsm('s) stuurde (web push); meteen gezet als hij daar niet heen moet.
     pushed_at: Mapped[datetime | None]
+    # Over welke storing dit gaat (bv. "svc12" voor up/down van een tegel): nieuwer nieuws over dezelfde storing
+    # vervangt op de gsm het oudere. Leeg: een losse melding.
+    push_key: Mapped[str | None] = mapped_column(String(120))
+    # Bij herstel (ok): het niveau van wat hij herstelt, zodat hij komt op elk toestel dat de storing kreeg.
+    recovers: Mapped[str | None] = mapped_column(String(8))
 
 
 class CheckResult(Base):
@@ -631,6 +636,8 @@ class PushSubscription(Base):
     min_level: Mapped[str] = mapped_column(String(8), default="err", server_default="err")
     # sha256 van het geheim waarmee de service worker een vernieuwd pushadres doorgeeft (zonder sessie).
     renew_hash: Mapped[str] = mapped_column(String(64))
+    # Het vorige vernieuwgeheim, alleen nog goed om exact hetzelfde verzoek te herhalen (antwoord onderweg verloren).
+    prev_renew_hash: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     last_ok_at: Mapped[datetime | None]
     last_error: Mapped[str | None] = mapped_column(String(300))

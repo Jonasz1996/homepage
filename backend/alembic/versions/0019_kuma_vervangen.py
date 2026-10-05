@@ -19,6 +19,8 @@ def upgrade() -> None:
     op.add_column('service_state', sa.Column('stale', sa.Boolean(), server_default=sa.false(), nullable=False))
     op.add_column('services', sa.Column('check_changed_at', sa.DateTime(timezone=True), nullable=True))
     op.add_column('notifications', sa.Column('pushed_at', sa.DateTime(timezone=True), nullable=True))
+    op.add_column('notifications', sa.Column('push_key', sa.String(length=120), nullable=True))
+    op.add_column('notifications', sa.Column('recovers', sa.String(length=8), nullable=True))
     # Bestaande meldingen gaan nooit meer naar een gsm: anders volgt na de update een vloed.
     op.execute("UPDATE notifications SET pushed_at = CURRENT_TIMESTAMP")
     op.create_index('ix_notifications_unpushed', 'notifications', ['id'], unique=False,
@@ -27,6 +29,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index('ix_notifications_unpushed', table_name='notifications')
+    op.drop_column('notifications', 'recovers')
+    op.drop_column('notifications', 'push_key')
     op.drop_column('notifications', 'pushed_at')
     op.drop_column('services', 'check_changed_at')
     op.drop_column('service_state', 'stale')

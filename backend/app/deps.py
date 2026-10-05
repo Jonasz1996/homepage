@@ -126,10 +126,12 @@ def event(db: AsyncSession, kind: str, title: str, body: str | None = None, leve
 
 def notify(db: AsyncSession, title: str, body: str | None = None, level: str = "info",
            source: str = "system", service_id: int | None = None, data: dict | None = None,
-           push: bool = True) -> None:
+           push: bool = True, key: str | None = None, recovers: str | None = None) -> None:
     """Melding in het meldingencentrum, en ook op de tijdlijn (behalve het weekrapport zelf).
-    push=False: niet naar de gsm (web push), alleen hier."""
-    db.add(Notification(title=title, body=body, level=level, source=source, service_id=service_id,
-                        pushed_at=None if push else datetime.now(timezone.utc)))
+    push=False: niet naar de gsm (web push), alleen hier. key: over welke storing het gaat (nieuwer nieuws erover
+    vervangt het oudere op de gsm). recovers: bij herstel, het niveau van de storing die voorbij is."""
+    db.add(Notification(title=title[:200], body=body, level=level, source=source, service_id=service_id,
+                        pushed_at=None if push else datetime.now(timezone.utc), push_key=key and key[:120],
+                        recovers=recovers if level == "ok" else None))
     if source != "rapport":
         event(db, EVENT_KIND.get(source, "melding"), title, body, level, service_id, data)

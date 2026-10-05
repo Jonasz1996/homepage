@@ -244,7 +244,8 @@
     const all = Object.values(status)
     const active = all.filter((s) => !s.maintenance_until)
     return {
-      up: active.filter((s) => s.status === 'up').length,
+      // Een check die niets meer meldt (stale), staat grijs op de tegel: niet meetellen als up.
+      up: active.filter((s) => s.status === 'up' && !s.stale).length,
       down: active.filter((s) => s.status === 'down').length,
       maint: all.length - active.length,
       paused: active.filter((s) => s.paused).length,

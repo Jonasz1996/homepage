@@ -166,12 +166,13 @@ async def run_cluster(db: AsyncSession, http: HttpClients) -> dict:
         if v["level"] == "info":
             continue
         if not old or old["level"] == "info" or (old["level"] == "warn" and v["level"] == "err"):
-            notify(db, v["text"], None, level=v["level"], source="cluster", service_id=v["service_id"])
+            notify(db, v["text"], None, level=v["level"], source="cluster", service_id=v["service_id"],
+                   key=f"cluster|{k}")
     for k, v in alerts.items():
         if k not in now_bad and v["level"] != "info":
             kind, _, key = k.split("|", 1)[1].partition(":")
             notify(db, OK_TEXT[kind].format(name=v["name"], key=key), None, level="ok", source="cluster",
-                   service_id=v.get("service_id"))
+                   service_id=v.get("service_id"), key=f"cluster|{k}", recovers=v["level"])
     value = {"at": now.isoformat(), "items": items, "alerts": now_bad}
     if st:
         st.value = value

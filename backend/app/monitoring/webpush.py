@@ -221,9 +221,16 @@ def accepts(min_level: str, level: str, source: str, recovers: str | None = None
 
 
 def payload_for(n) -> dict:
-    tag = f"svc{n.service_id}" if n.service_id else f"n{n.id}"
+    # Zelfde storing, zelfde tag: op de gsm vervangt "weer bereikbaar" dan "down". Losse meldingen elk apart.
+    tag = f"k{topic_for(n.push_key)}" if n.push_key else f"n{n.id}"
     return {"title": (n.title or "")[:200], "body": (n.body or "")[:1000], "level": n.level, "tag": tag,
             "url": f"/?open=melding&n={n.id}"}
+
+
+def topic_for(key: str | None) -> str | None:
+    """Topic-header (RFC 8030: hoogstens 32 tekens uit het base64url-alfabet): de pushdienst houdt van berichten met
+    hetzelfde topic die nog niet afgeleverd zijn, alleen het nieuwste over."""
+    return hashlib.sha256(key.encode()).hexdigest()[:32] if key else None
 
 
 def _encode(payload: dict) -> bytes:
@@ -292,12 +299,18 @@ def _mark_failed(db: AsyncSession, sub: PushSubscription, error: str) -> None:
 
 async def _gone(db: AsyncSession, sub: PushSubscription, now: datetime | None = None) -> None:
     """De pushdienst kent het toestel niet meer (afgemeld, app verwijderd): niets meer naartoe sturen, en zeggen op de
-    andere. De rij blijft nog even: meldt de browser zich zelf opnieuw aan, dan werkt hij weer."""
-    await db.execute(delete(PushQueue).where(PushQueue.subscription_id == sub.id))
-    if sub.gone_at is None:
-        sub.gone_at = now or datetime.now(timezone.utc)
-        sub.last_error = "de pushdienst kent dit toestel niet meer"
-        notify(db, f"Je toestel {sub.label} krijgt geen meldingen meer"[:200],
+    andere. De rij blijft nog even: meldt de browser zich zelf opnieuw aan, dan werkt hij weer.
+
+    Alleen als het adres dat faalde nog het huidige is: vernieuwde de browser het intussen (de service worker, terwijl
+    dit bericht onderweg was), dan is het toestel niet weg."""
+    res = await db.execute(update(PushSubscription).where(
+        PushSubscription.id == sub.id, PushSubscription.endpoint_hash == sub.endpoint_hash,
+        PushSubscription.gone_at.is_(None)).values(gone_at=now or datetime.now(timezone.utc),
+                                                    last_error="de pushdienst kent dit toestel niet meer")
+        .execution_options(synchronize_session=False))
+    if res.rowcount == 1:
+        await db.execute(delete(PushQueue).where(PushQueue.subscription_id == sub.id))
+        notify(db, f"Je toestel {sub.label} krijgt geen meldingen meer",
                "De pushdienst kent het niet meer (afgemeld of app verwijderd). Zet het opnieuw aan in 'Meldingen op je "
                "gsm'.", level="err", source="homepage")
 
@@ -321,7 +334,7 @@ async def _claim(db: AsyncSession, now: datetime) -> None:
                          .values(pushed_at=now).execution_options(synchronize_session=False))
         return
     rows = (await db.execute(
-        select(Notification.id, Notification.level, Notification.source, Notification.service_id)
+        select(Notification.id, Notification.level, Notification.source, Notification.push_key, Notification.recovers)
         .where(Notification.pushed_at.is_(None), Notification.ts > now - KEEP)
         .order_by(Notification.id).limit(CLAIM_LIMIT))).all()
     for n in rows:
@@ -329,24 +342,22 @@ async def _claim(db: AsyncSession, now: datetime) -> None:
                                .values(pushed_at=now).execution_options(synchronize_session=False))
         if res.rowcount != 1:
             continue  # een ander proces was sneller
-        recovers = None
-        if n.level == "ok" and n.service_id:
-            recovers = (await db.execute(
-                select(Notification.level).where(Notification.service_id == n.service_id, Notification.id < n.id,
-                                                 Notification.level != "ok")
-                .order_by(Notification.id.desc()).limit(1))).scalar()
         for sid, min_level in subs:
-            if not accepts(min_level, n.level, n.source, recovers):
+            if not accepts(min_level, n.level, n.source, n.recovers):
                 continue
-            if n.service_id:
-                # Nieuwer nieuws over dezelfde service: een oudere melding die nog wacht (opnieuw proberen) zou
-                # anders na deze aankomen en hem op de gsm vervangen ("down" na "weer bereikbaar"). Wat nu al klaar
-                # staat, gaat gewoon eerst.
-                older = select(Notification.id).where(Notification.service_id == n.service_id, Notification.id < n.id)
-                await db.execute(delete(PushQueue).where(PushQueue.subscription_id == sid, PushQueue.next_at > now,
-                                                         PushQueue.notification_id.in_(older))
-                                 .execution_options(synchronize_session=False))
+            if n.push_key:
+                # Nieuwer nieuws over dezelfde storing: een oudere melding die nog wacht (opnieuw proberen) zou
+                # anders na deze aankomen ("down" na "weer bereikbaar"). Alleen dezelfde storing: een andere melding
+                # over dezelfde tegel (een andere node in de cluster) blijft gewoon staan.
+                await _supersede(db, sid, n.id, n.push_key)
             db.add(PushQueue(subscription_id=sid, notification_id=n.id, attempts=0, next_at=now, created_at=now))
+
+
+async def _supersede(db: AsyncSession, sub_id: int, notification_id: int, key: str) -> None:
+    """Oudere meldingen over dezelfde storing uit de wachtrij van dit toestel."""
+    older = select(Notification.id).where(Notification.push_key == key, Notification.id < notification_id)
+    await db.execute(delete(PushQueue).where(PushQueue.subscription_id == sub_id, PushQueue.notification_id.in_(older))
+                     .execution_options(synchronize_session=False))
 
 
 async def _send_due(db: AsyncSession, client: httpx.AsyncClient, now: datetime) -> None:
@@ -402,6 +413,20 @@ async def _send_device(db: AsyncSession, client: httpx.AsyncClient, sub: PushSub
             fresh.append(r)
     if not fresh:
         return
+    ids = [r.notification_id for r in fresh if r.notification_id]
+    notes = {n.id: n for n in (await db.execute(select(Notification).where(Notification.id.in_(ids)))).scalars()}
+    # Per storing alleen het nieuwste: "down" en "weer bereikbaar" in dezelfde ronde (of een "down" die opnieuw
+    # geprobeerd werd) mogen niet in de verkeerde volgorde aankomen.
+    newest: dict[str, int] = {}
+    for r in fresh:
+        n = notes.get(r.notification_id)
+        if n is not None and n.push_key:
+            newest[n.push_key] = max(newest.get(n.push_key, 0), n.id)
+    stale = [r.id for r in fresh if (n := notes.get(r.notification_id)) is not None and n.push_key
+             and n.id < newest[n.push_key]]
+    if stale:
+        await db.execute(delete(PushQueue).where(PushQueue.id.in_(stale)))
+        fresh = [r for r in fresh if r.id not in stale]
     budget = PER_MINUTE - _recent(sub.id)
     dropped: list[str] = []
     if len(fresh) > budget:
@@ -413,11 +438,7 @@ async def _send_device(db: AsyncSession, client: httpx.AsyncClient, sub: PushSub
         # Te veel tegelijk: de nieuwste, en één bericht voor de rest (die staan in het meldingencentrum). De rest
         # blijft in de wachtrij tot dat bericht aankwam.
         drop, fresh = fresh[:len(fresh) - (budget - 1)], fresh[len(fresh) - (budget - 1):]
-        ids = [r.notification_id for r in drop if r.notification_id]
-        dropped = list((await db.execute(select(Notification.level).where(Notification.id.in_(ids)))).scalars())
-        dropped += ["info"] * (len(drop) - len(dropped))
-    ids = [r.notification_id for r in fresh if r.notification_id]
-    notes = {n.id: n for n in (await db.execute(select(Notification).where(Notification.id.in_(ids)))).scalars()}
+        dropped = [notes[r.notification_id].level if r.notification_id in notes else "info" for r in drop]
     info = decrypt_json(sub.data)
     for r in fresh:
         n = notes.get(r.notification_id)
@@ -425,8 +446,7 @@ async def _send_device(db: AsyncSession, client: httpx.AsyncClient, sub: PushSub
             await db.execute(delete(PushQueue).where(PushQueue.id == r.id))
             continue
         _sent[sub.id].append(time.monotonic())
-        code, error = await deliver(client, info, payload_for(n), state, key,
-                                    topic=f"svc{n.service_id}" if n.service_id else None)
+        code, error = await deliver(client, info, payload_for(n), state, key, topic=topic_for(n.push_key))
         kind = _kind(code)
         if kind == "gone":
             await _gone(db, sub, now)
@@ -434,6 +454,9 @@ async def _send_device(db: AsyncSession, client: httpx.AsyncClient, sub: PushSub
         if kind == "ok":
             _mark_ok(sub, now)
             await db.execute(delete(PushQueue).where(PushQueue.id == r.id))
+            if n.push_key:
+                # Wat nog over dezelfde storing wacht (ook een samengevatte rest), is nu achterhaald.
+                await _supersede(db, sub.id, n.id, n.push_key)
         elif kind == "retry":
             sub.last_error = f"{error} (wordt opnieuw geprobeerd)"[:300]
             attempts = r.attempts + 1
@@ -462,7 +485,8 @@ async def _send_device(db: AsyncSession, client: httpx.AsyncClient, sub: PushSub
             _mark_ok(sub, now)
             await db.execute(delete(PushQueue).where(PushQueue.id.in_([r.id for r in drop])))
         else:
-            # Niet aangekomen: de weggelaten meldingen later opnieuw (dan opnieuw samengevat), tot een dag oud.
+            # Niet aangekomen: de weggelaten meldingen later opnieuw (samengevat of apart, naargelang de ruimte), tot
+            # een dag oud. Wat intussen over dezelfde storing aankwam, haalt ze weg (_supersede).
             sub.last_error = (error or f"HTTP {code}")[:300]
             attempts = max((r.attempts for r in drop), default=0) + 1
             await db.execute(update(PushQueue).where(PushQueue.id.in_([r.id for r in drop]))
@@ -513,7 +537,7 @@ async def forget_renew(db: AsyncSession, user_id: int) -> None:
     (wie er een kopieerde, kan zo de meldingen niet naar zich toe halen). De toestellen blijven meldingen krijgen;
     vernieuwt de browser later zelf zijn pushadres, dan zet je dat toestel opnieuw aan."""
     await db.execute(update(PushSubscription).where(PushSubscription.user_id == user_id)
-                     .values(renew_hash=hashlib.sha256(os.urandom(32)).hexdigest())
+                     .values(renew_hash=hashlib.sha256(os.urandom(32)).hexdigest(), prev_renew_hash=None)
                      .execution_options(synchronize_session=False))
 
 

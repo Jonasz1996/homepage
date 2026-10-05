@@ -106,14 +106,18 @@ self.addEventListener('pushsubscriptionchange', (e) => {
       userVisibleOnly: true, applicationServerKey: keyBytes(saved.applicationServerKey),
     })
     const j = sub.toJSON()
-    const r = await fetch('/api/webpush/subscriptions/renew', {
+    const body = JSON.stringify({ id: saved.id, renew: saved.renew, subscription: { endpoint: j.endpoint, keys: j.keys } })
+    const send = () => fetch('/api/webpush/subscriptions/renew', {
       method: 'PUT',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'homepage' },
-      body: JSON.stringify({ id: saved.id, renew: saved.renew, subscription: { endpoint: j.endpoint, keys: j.keys } }),
+      body,
     })
+    // Geen antwoord (netwerk weg): nog één keer exact hetzelfde. De server aanvaardt die herhaling ook als het eerste
+    // verzoek toch aankwam, en geeft dan een nieuw geheim.
+    const r = await send().catch(() => new Promise((ok) => setTimeout(ok, 5000)).then(send)).catch(() => null)
     // Elk vernieuwgeheim werkt één keer: het nieuwe bewaren voor de volgende keer.
-    const out = r.ok ? await r.json().catch(() => null) : null
+    const out = r?.ok ? await r.json().catch(() => null) : null
     if (out?.renew) await pushStore('readwrite', (s) => s.put({ ...saved, renew: out.renew }, 'webpush')).catch(() => {})
   })())
 })

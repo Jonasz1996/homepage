@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
@@ -124,7 +124,8 @@ async def subscribe(body: SubscribeIn, request: Request, user: User = Depends(re
     # Hetzelfde toestel opnieuw: dezelfde rij, met nieuwe sleutels en een nieuw vernieuwgeheim.
     s.user_id, s.data, s.min_level = user.id, encrypt(json.dumps(data)), body.min_level
     s.label = body.label.strip() or "toestel"
-    s.renew_hash, s.fail_count, s.warned, s.last_error, s.gone_at = _sha(renew), 0, False, None, None
+    s.renew_hash, s.prev_renew_hash = _sha(renew), None
+    s.fail_count, s.warned, s.last_error, s.gone_at = 0, False, None, None
     await audit(db, request, user, "webpush_added", label=s.label, min_level=s.min_level, host=_host(body.endpoint))
     await db.commit()
     return {"id": s.id, "renew": renew}
@@ -165,6 +166,21 @@ async def test_subscription(sid: int, user: User = Depends(current_user), db: As
     return {"ok": error is None, "error": error}
 
 
+async def _rotate(db: AsyncSession, s: PushSubscription, used: str | None) -> str:
+    """Nieuw vernieuwgeheim, alleen als het bewaarde nog hetzelfde is als bij het lezen: van twee vernieuwingen
+    tegelijk lukt er maar één (de andere krijgt 409 en houdt zo geen geheim over dat niet werkt). used: het geheim
+    dat nu gebruikt werd; dat mag daarna nog één ding, exact hetzelfde verzoek herhalen."""
+    renew = secrets.token_urlsafe(32)
+    values = {"renew_hash": _sha(renew)} | ({"prev_renew_hash": used} if used else {})
+    res = await db.execute(update(PushSubscription).where(PushSubscription.id == s.id,
+                                                          PushSubscription.renew_hash == s.renew_hash)
+                           .values(**values).execution_options(synchronize_session=False))
+    if res.rowcount != 1:
+        await db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "Intussen al vernieuwd")
+    return renew
+
+
 @router.put("/subscriptions/renew")
 async def renew_subscription(body: RenewIn, request: Request, db: AsyncSession = Depends(get_db)):
     """Zonder sessie: de service worker doet dit op de achtergrond. Het vernieuwgeheim is het bewijs."""
@@ -172,10 +188,19 @@ async def renew_subscription(body: RenewIn, request: Request, db: AsyncSession =
     if renew_limiter.blocked(who, limit=RENEW_MAX_FAILURES):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Te veel pogingen")
     s = await db.get(PushSubscription, body.id)
-    same = hmac.compare_digest(s.renew_hash if s else _DUMMY, _sha(body.renew))
-    if s is None or not same:
+    presented = _sha(body.renew)
+    same = hmac.compare_digest(s.renew_hash if s else _DUMMY, presented)
+    # Het vorige geheim mag alleen nog exact hetzelfde verzoek herhalen (het antwoord ging onderweg verloren): zelfde
+    # adres als nu bewaard. Een ander adres ermee aanmelden kan niet.
+    replay = bool(s and s.prev_renew_hash and hmac.compare_digest(s.prev_renew_hash, presented)
+                  and s.endpoint_hash == webpush.endpoint_hash(body.subscription.endpoint))
+    if s is None or not (same or replay):
         renew_limiter.fail(who)
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Ongeldig vernieuwgeheim")
+    if replay:
+        renew = await _rotate(db, s, None)
+        await db.commit()
+        return {"ok": True, "id": s.id, "renew": renew}
     data = _data(body.subscription)
     # Een browser blijft bij zijn eigen pushdienst (Chrome bij Google, Safari bij Apple). Een ander adres bij een
     # andere dienst is dus niet dit toestel.
@@ -191,9 +216,11 @@ async def renew_subscription(body: RenewIn, request: Request, db: AsyncSession =
         # Had de pagina dit nieuwe adres al aangemeld, dan is dat hetzelfde toestel: één rij houden.
         await db.execute(delete(PushSubscription).where(PushSubscription.endpoint_hash == h,
                                                         PushSubscription.id != s.id))
-    # Elk geheim werkt één keer: wie een oud geheim kopieerde, kan er niets meer mee.
-    renew = secrets.token_urlsafe(32)
-    s.endpoint_hash, s.data, s.renew_hash = h, encrypt(json.dumps(data)), _sha(renew)
+    # Elk geheim werkt één keer: wie een oud geheim kopieerde, kan er niets meer mee. Voorwaardelijk, zodat van twee
+    # vernieuwingen tegelijk met hetzelfde geheim er maar één lukt (de andere krijgt 409, en houdt zo geen geheim
+    # over dat niet werkt).
+    renew = await _rotate(db, s, presented)
+    s.endpoint_hash, s.data = h, encrypt(json.dumps(data))
     s.fail_count, s.warned, s.last_error, s.gone_at = 0, False, None, None
     await audit(db, request, None, "webpush_renewed", label=s.label, host=_host(body.subscription.endpoint))
     # Bron "auth": komt op elk toestel. Een vernieuwing die je niet verwacht, zie je zo meteen.
