@@ -348,6 +348,20 @@ Later, deel 3 (Authentik en gsm):
   `secret.key` buiten de container, werkt de kopie van de back-up, zijn er sessies vanaf een publiek IP, wat staat
   er aan van buitenaf, stond er een slot voor het dashboard, is de SSH-sleutel vastgezet en hebben de Proxmox-tokens
   niet te veel rechten. Elk punt heeft een knop naar het venster dat het oplost
+- **aandacht** (knop **!** in de titelbalk, `Ctrl+K` → "aandacht", of `/?open=aandacht`): alles wat nu je aandacht
+  vraagt, gesorteerd op ernst: services down (een CT onder een node die down is, staat bij die node), back-ups en
+  de hersteltest, de cluster, schijven en ZFS, opslag die volloopt, WAN en tunnels, de worker en back-up van het
+  dashboard, Zabbix, cronjobs, updates (ook een mislukte installatie of een herstart die nodig is), certificaten die
+  binnen 14 dagen verlopen, domeinen, tegels waarvan de API een fout geeft, sessies van buitenaf, nieuwe apparaten,
+  oude snapshots en lopend onderhoud. Het leest wat de worker al bijhoudt en vraagt zelf niets aan je machines.
+  Bovenaan het dashboard staan de rode en oranje punten (✕ verbergt ze tot er iets verandert). "negeren" verbergt
+  een punt tot het verandert of opgelost is
+- **instellingen** (! → instellingen, of `/?open=instellingen`): per functie of ze werkt, half ingesteld is (met wat
+  er ontbreekt) of nog niet: Proxmox (ook welke rechten elk token mist), PBS, de hersteltest, OPNsense (ook de
+  rechten voor apparaten en de config-kopie), NPM, Cloudflare, AdGuard, Wake-on-LAN (welke nodes nog geen
+  MAC-adres hebben), Zabbix, Home Assistant (welke nodes nog geen sensor hebben), schijven, domeinen, de webhooks
+  van Proxmox, PBS en Home Assistant, Portainer, de SSH-login, hosts zonder bevestigde host key, cron, logs,
+  nachtelijke updates en de beveiliging. Optionele functies die nog niet ingesteld zijn, staan grijs
 - **effecten** zoals in aiverslag: een achtergrond van punten en 0/1 die voor de muis wijken, een ripple op elke knop,
   bliksem en vonken bij een geslaagde actie (herstarten, wekken), een vuurbal met flits en schudden bij verwijderen
   en uitloggen, en een bliksem op het belletje als er een nieuwe storing binnenkomt. Uit te zetten met `Ctrl+K` →

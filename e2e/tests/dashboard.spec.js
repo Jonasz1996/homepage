@@ -95,7 +95,7 @@ test('bewerkmodus: pagina, groep en tegel', async () => {
 })
 
 // Elke knop in de titelbalk opent een venster dat weer dicht kan.
-const WINDOWS = ['Logs', 'SSH-terminal', 'Capaciteit', 'Internet', 'Tijdlijn', 'Configuratiewijzigingen', 'API-beheer',
+const WINDOWS = ['Aandacht', 'Logs', 'SSH-terminal', 'Capaciteit', 'Internet', 'Tijdlijn', 'Configuratiewijzigingen', 'API-beheer',
   'Cronjobs', 'Gezondheid', 'Openstaande updates', 'Beveiliging']
 
 for (const name of WINDOWS) {
@@ -108,6 +108,16 @@ for (const name of WINDOWS) {
     await expect(close).toHaveCount(0)
   })
 }
+
+test('aandacht: wat nu mis is en de instellingen-checklist', async () => {
+  await page.locator('button.mini[title^="Aandacht"]').click()
+  const win = page.getByRole('dialog')
+  await expect(win.getByRole('button', { name: /^nu/ })).toBeVisible()
+  await win.getByRole('button', { name: /^instellingen/ }).click()
+  await expect(win.locator('.row', { hasText: 'SSH-standaardlogin' })).toBeVisible({ timeout: 20000 })
+  await win.getByRole('button', { name: 'Sluiten' }).click()
+  await expect(win).toHaveCount(0)
+})
 
 test('gsm: knoppen achter het menu', async () => {
   await page.setViewportSize({ width: 390, height: 844 })

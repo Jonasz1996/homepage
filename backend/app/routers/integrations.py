@@ -57,6 +57,11 @@ async def _cached(s: Service, kind: str, ttl: int, fn) -> dict:
     return result
 
 
+def last_errors() -> dict[int, str]:
+    """De laatst gekende fout per tegel (ook als die al verlopen is), voor het aandacht-overzicht."""
+    return {sid: r["error"] for (sid, kind), (_, _, r) in list(_cache.items()) if kind == "summary" and "error" in r}
+
+
 async def _service(db: AsyncSession, service_id: int) -> Service:
     s = await db.get(Service, service_id)
     if s is None:
