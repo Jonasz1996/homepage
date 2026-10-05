@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -50,3 +50,13 @@ async def clear_read(user: User = Depends(current_user), db: AsyncSession = Depe
     await db.execute(delete(Notification).where(Notification.read_at.is_not(None)))
     await db.commit()
     return {"ok": True}
+
+
+# Voor een tik op een pushbericht: /?open=melding&n=<id> opent dezelfde plek als in het meldingencentrum.
+@router.get("/{notification_id}")
+async def get_notification(notification_id: int, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    n = await db.get(Notification, notification_id)
+    if n is None:
+        raise HTTPException(404, "Melding niet gevonden (al gewist?)")
+    return {"id": n.id, "ts": n.ts, "level": n.level, "title": n.title, "body": n.body,
+            "source": n.source, "service_id": n.service_id, "read": n.read_at is not None}

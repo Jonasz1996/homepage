@@ -1,6 +1,6 @@
 """Welke verbindingen het dashboard echt gebruikt, voor een strakke firewallregel tussen de VLAN's.
 
-Uit de tegels (check en integratie), API-beheer en de SSH-hosts: per doel-IP de poorten en wie ze gebruikt.
+Uit de tegels (check en integratie), API-beheer, de SSH-hosts en web push: per doel-IP de poorten en wie ze gebruikt.
 Namen worden opgezocht in DNS (zoals de container ze ziet). Daarnaast wat er binnenkomt (NPM, syslog, webhooks)
 en een voorstel voor aliassen in OPNsense.
 """
@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..config import get_settings
 from ..models import ApiConnection, Service, SshHost
 from .checks import target_for
+from .webpush import endpoint_hosts
 
 RESOLVE_TIMEOUT = 3.0
 RESOLV_CONF = Path("/etc/resolv.conf")
@@ -123,6 +124,8 @@ async def overview(db: AsyncSession) -> dict:
     apis = list((await db.execute(select(ApiConnection))).scalars())
     hosts = list((await db.execute(select(SshHost))).scalars())
     conns = uses(services, apis, hosts)
+    # Web push naar je gsm('s): 443 naar de pushdienst (fcm.googleapis.com, *.push.apple.com, *.push.services.mozilla.com).
+    conns += [(host, "tcp", 443, f"web push ({label})") for host, label in await endpoint_hosts(db)]
     dns = nameservers()
     conns += [(ns, "udp", 53, "DNS") for ns in dns]
     ips = await resolve({c[0] for c in conns})
