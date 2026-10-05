@@ -9,6 +9,17 @@
   let tab = $state(untrack(() => startTab))
   let error = $state('')
 
+  // Incidentnotitie bij een storing.
+  let noteFor = $state(null)
+  let noteText = $state('')
+  async function saveNote(it) {
+    try {
+      const r = await api(`/timeline/events/${it.event_id}/note`, { method: 'PUT', body: { note: noteText } })
+      it.note = r.note
+      noteFor = null
+    } catch (e) { error = e.message }
+  }
+
   const ONE = {
     storing: 'storing', herstart: 'herstart', backup: 'back-up', updates: 'updates', wijziging: 'wijziging', actie: 'actie',
     capaciteit: 'capaciteit', netwerk: 'netwerk', toegang: 'toegang', log: 'log', cron: 'cron', gezondheid: 'gezondheid', melding: 'melding',
@@ -119,6 +130,16 @@
               <span class="kind">{ONE[it.kind] || it.kind}</span>
               <b>{it.title}</b>
               {#if it.body}<p>{it.body}</p>{/if}
+              {#if it.note && noteFor !== it.event_id}<p class="note">{it.note}</p>{/if}
+              {#if it.kind === 'storing' && it.level === 'err' && it.event_id}
+                {#if noteFor === it.event_id}
+                  <textarea bind:value={noteText} rows="3" maxlength="4000" placeholder="Oorzaak en hoe je het oploste"></textarea>
+                  <span class="nb"><button class="mini" onclick={() => saveNote(it)}>bewaren</button>
+                    <button class="mini" onclick={() => (noteFor = null)}>annuleren</button></span>
+                {:else}
+                  <button class="mini nb" onclick={() => { noteFor = it.event_id; noteText = it.note || '' }}>{it.note ? '✎ notitie' : '+ notitie'}</button>
+                {/if}
+              {/if}
             </div>
           </li>
         {/each}
@@ -198,6 +219,9 @@
 </Modal>
 
 <style>
+  .note { white-space: pre-wrap; border-left: 2px solid var(--mid); padding-left: 8px; color: var(--text-h) }
+  .nb { display: inline-flex; gap: 6px; margin-top: 4px }
+  textarea { width: 100%; margin-top: 4px; font: inherit; font-size: 12.5px }
   .tabs { display: flex; gap: 6px; align-items: center; margin-bottom: 8px }
   .tabs .sp { flex: 1 }
   .tabs select { width: auto; padding: 5px 8px }

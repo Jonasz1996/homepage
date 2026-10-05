@@ -236,6 +236,19 @@ Later, deel 3 (Authentik en gsm):
   gemaskeerd), twee willekeurige versies vergelijken, en een oude versie volledig downloaden (recente 2FA). De
   laatste 90 versies per bestand blijven bewaard, versleuteld. Voor OPNsense heeft de API-key het recht
   *Diagnostics: Configuration History* nodig
+- **webhooks** (in het meldingencentrum ◉ → webhooks): een eigen geheim adres per tool. Proxmox VE (8.3+) en PBS
+  (3.3+) sturen hun meldingen (mislukte back-up, replicatie, schijffout, fencing) via *Notifications → Webhook*, Uptime
+  Kuma via een Webhook-melding, Home Assistant via `rest_command`. Wat binnenkomt wordt een melding met de juiste
+  ernst, eventueel gekoppeld aan een service. Het venster toont per tool de exacte instellingen om te plakken. Een
+  adres kan je vernieuwen (het oude werkt dan meteen niet meer); max. 60 meldingen per minuut per adres
+- **hw → cluster**: quorum, welke nodes corosync ziet, HA-resources en replicatie-jobs, elke 2 minuten via de
+  Proxmox-API (rol PVEAuditor volstaat). Een melding als de cluster zijn quorum verliest, een node wegvalt, een
+  HA-resource in error staat of een replicatie mislukt, en opnieuw als het weer in orde is
+- **gepland onderhoud**: in het mini dashboard van een service (of `Ctrl+K` → "gepland onderhoud" voor groepen)
+  onderhoud vooraf plannen: eenmalig, elke dag of op vaste weekdagen (bv. elke zondag 3:00 tot 4:00 tijdens de
+  back-up). Tijdens het venster geen meldingen en telt de uptime het niet mee; het begin komt op de tijdlijn
+- **incidentnotities**: bij een storing op de tijdlijn of in het mini dashboard noteer je de oorzaak en de oplossing.
+  Gaat dezelfde service later weer down, dan toont het mini dashboard die notities meteen bovenaan
 - **net → apparaten**: elke 5 minuten de ARP- en DHCP-tabel van OPNsense (ISC en Kea), met IP, MAC, fabrikant,
   hostnaam en interface. Wat er bij de eerste keer al is, geldt als gekend; een nieuw MAC-adres daarna geeft een
   melding. Geef apparaten een naam of zet ze op "ken ik". Met **volgen** wordt een apparaat elke 6 uur gescand op
@@ -254,7 +267,7 @@ Later, deel 3 (Authentik en gsm):
 - **Android-app (WebView)**: laad `https://homepage.jbogaert.be/` en zet `javaScriptEnabled`, `domStorageEnabled` en
   cookies aan (`CookieManager.setAcceptCookie(true)`). Third-party cookies zijn niet nodig:
   alles blijft op dezelfde site als Authentik op een subdomein staat. Rechtstreeks openen kan met
-  `/?open=history`, `updates`, `network`, `devices`, `configs`, `cron`, `health` of `terminal`. Links naar andere services kan de app in dezelfde WebView
+  `/?open=history`, `updates`, `network`, `devices`, `configs`, `webhooks`, `planned`, `cron`, `health` of `terminal`. Links naar andere services kan de app in dezelfde WebView
   openen (`shouldOverrideUrlLoading` false teruggeven voor `*.jbogaert.be`)
 
 Optimalisaties:
