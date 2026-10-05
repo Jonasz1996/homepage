@@ -8,6 +8,12 @@ Fase 1 en 2 van het [stappenplan](https://claude.ai/code/artifact/fe2b226c-d5ef-
 - inloggen met wachtwoord en verplichte 2FA (TOTP), eerste account via een eenmalige setup-code
 - pagina's, groepen en services, aanpasbaar in een edit mode met slepen
 - import van je homepage.dev `services.yaml` (widget-wachtwoorden en API-sleutels worden versleuteld bewaard)
+- **Uptime Kuma vervangen** (import → Uptime Kuma vervangen, of `Ctrl+K` → "kuma vervangen"): het dashboard haalt je
+  monitors uit Kuma (`/metrics`, met een API-sleutel uit Kuma → Instellingen → API-sleutels, die niet bewaard wordt) en
+  vergelijkt ze met je tegels op adres, poort en naam. Wat ontbreekt wordt met één knop een tegel met de passende check
+  (http, tcp voor poort- en databankmonitors, ping, dns); een tegel zonder check krijgt er een. Docker- en push-monitors
+  neemt het niet over (daarvoor zijn Portainer en cron → bewaken). Staat alles op "gedekt", zet dan in Kuma de
+  meldingen en de webhook naar het dashboard uit en daarna Kuma zelf
 - export naar YAML, en een versiegeschiedenis van de layout waarmee je elke wijziging terugzet
 - eigen meldingencentrum in de titelbalk (bv. login vanaf een nieuw IP)
 - zoeken met `Ctrl+K` of `/`, Enter opent het eerste resultaat
@@ -137,6 +143,13 @@ Extra's, deel 3 (back-ups en capaciteit):
   VM's/CT's en opslag uit Proxmox (met TimescaleDB 180 dagen, gecomprimeerd na 7 dagen). Per opslag een trend over
   7 dagen en "vol over x dagen"; melding als iets binnen 14 dagen en nog eens binnen 3 dagen vol loopt. Na een grote
   opkuis telt alleen de trend van daarna
+- **één node 's nachts uit** (onderaan het venster `df`, knop "voorstel berekenen"): per node of hij leeg kan als zijn
+  VM's en CT's naar de andere nodes verhuizen, op basis van de piek-RAM van de laatste 7 dagen met 20% marge en 2 GB
+  voor Proxmox zelf. Een gast met passthrough (PCI, USB, een apparaat in een CT) houdt een node aan; de Pi (ARM) en de
+  HP's (x86) wisselen geen gasten uit. Je krijgt de `qm migrate`/`pct migrate`-commando's, de lokale schijven en bind
+  mounts om op te letten, wat het bespaart (verbruik uit Home Assistant, anders geschat op 25 W) en een cronregel met
+  `rtcwake` die de node 's avonds uitzet en de BIOS hem 's ochtends weer laat aanzetten. Alleen advies: het dashboard
+  verhuist zelf niets
 
 Later, deel 1 (tijdlijn, weekrapport en updates):
 

@@ -128,6 +128,20 @@ test('hw: back-ups en cluster zonder Proxmox-tegel', async () => {
   await page.getByRole('button', { name: 'Gezondheid sluiten' }).click()
 })
 
+test('Uptime Kuma vervangen en één node \'s nachts uit', async () => {
+  await page.keyboard.press('Control+k')
+  await page.keyboard.type('kuma vervangen')
+  await page.keyboard.press('Enter')
+  const win = page.getByRole('dialog')
+  await expect(win.getByText('Adres van Uptime Kuma')).toBeVisible()
+  await win.getByRole('button', { name: 'Sluiten' }).last().click()
+  await expect(win).toHaveCount(0)
+  await page.locator('button.mini[title^="Capaciteit"]').click()
+  await page.getByRole('button', { name: 'voorstel berekenen' }).click()
+  await expect(page.getByText('Nog geen Proxmox-tegel')).toBeVisible()
+  await page.keyboard.press('Escape')
+})
+
 test('gsm: knoppen achter het menu', async () => {
   await page.setViewportSize({ width: 390, height: 844 })
   const menu = page.getByRole('button', { name: 'Menu' })

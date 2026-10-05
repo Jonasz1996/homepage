@@ -96,6 +96,7 @@
     else if (w === 'logs' || w === 'logs-setup') openLogs(null, '', w === 'logs-setup')
     else if (w === 'detail' && svc) modal = { kind: 'detail', service: svc }
     else if (w === 'edit' && svc) modal = { kind: 'service', service: svc }
+    else if (w === 'kuma') modal = { kind: 'import', tab: 'kuma' }
     else if (SAME.includes(w)) modal = { kind: w }
   }
 
@@ -189,6 +190,7 @@
     { label: 'api-beheer: api\'s, sleutels, eigen calls en endpoints', run: () => (modal = { kind: 'apis' }) },
     { label: 'configuratiewijzigingen: opnsense, npm, proxmox, bestanden (diff)', run: () => (modal = { kind: 'configs' }) },
     { label: 'gepland onderhoud: vensters plannen', run: () => (modal = { kind: 'planned' }) },
+    { label: 'uptime kuma vervangen: monitors overnemen als tegels met een check', run: () => (modal = { kind: 'import', tab: 'kuma' }) },
     { label: 'webhooks: meldingen van proxmox, pbs, uptime kuma, home assistant', run: () => (modal = { kind: 'webhooks' }) },
     { label: 'cluster: quorum, versies, qdevice, ha, replicatie', run: () => openHealth({ tab: 'cluster' }) },
     { label: 'back-updekking: welke vm/ct op hoeveel pbs\'en, pbs-sync', run: () => openHealth({ tab: 'backups' }) },
@@ -785,7 +787,7 @@
     onedit={(svc) => (modal = { kind: 'service', service: svc })}
   />
 {:else if modal?.kind === 'import'}
-  <Lazy load={() => import('./ImportDialog.svelte')} pages={layout.pages} onclose={() => (modal = null)} ondone={load} />
+  <Lazy load={() => import('./ImportDialog.svelte')} pages={layout.pages} groups={groupOptions} tab={modal.tab} onclose={() => (modal = null)} ondone={load} />
 {:else if modal?.kind === 'capacity'}
   <Lazy load={() => import('./Capacity.svelte')} onclose={() => (modal = null)} />
 {:else if modal?.kind === 'history'}

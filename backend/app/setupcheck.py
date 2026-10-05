@@ -306,6 +306,13 @@ async def webhooks(db: AsyncSession) -> list[dict]:
             out.append(row(f"webhook:{kind}", "monitoring", title, "ok",
                            f"Laatste melding op {_local(last)}." if last else "Werkt.", fix=fix,
                            optional=optional))
+    # Uptime Kuma stuurt nog meldingen: het dashboard kan zijn monitors overnemen, daarna mag Kuma uit.
+    kuma = [s for s in srcs if s.kind == "uptimekuma" and s.enabled]
+    if kuma:
+        out.append(row("kuma", "monitoring", "Uptime Kuma vervangen", "half",
+                       "Kuma stuurt nog meldingen naar het dashboard: dubbel werk.",
+                       ["Neem zijn monitors over als tegels met een check (één knop), zet daarna de webhook "
+                        f"{', '.join(s.name for s in kuma)} en Kuma zelf uit."], {"window": "kuma"}, optional=True))
     return out
 
 
