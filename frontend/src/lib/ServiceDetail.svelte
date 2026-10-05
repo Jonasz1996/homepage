@@ -7,6 +7,8 @@
   import Modal from './Modal.svelte'
   import Notes from './Notes.svelte'
   import HealRules from './HealRules.svelte'
+  import Incidents from './Incidents.svelte'
+  import Maintenance from './Maintenance.svelte'
 
   // Mini dashboard van één service: gegevens van de integratie en de monitoring-historiek.
   let { service, groups = [], onclose, onedit, onchanged, onterminal } = $props()
@@ -106,6 +108,9 @@
       {/each}
     {/if}
   </div>
+
+  <Maintenance {service} />
+  {#if service.check?.type}<Incidents {service} down={data?.state?.status === 'down'} />{/if}
 
   <Notes {service} {onchanged} />
 

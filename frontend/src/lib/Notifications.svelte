@@ -5,7 +5,7 @@
 
   // Eigen meldingencentrum: een klein teller-icoon in de titelbalk, uitklapbaar paneel.
   // Klik op een melding: het weekrapport, de updates of de service openen (onopen).
-  let { onopen } = $props()
+  let { onopen, onwebhooks } = $props()
   let open = $state(false)
   let data = $state({ unread: 0, items: [] })
 
@@ -29,7 +29,7 @@
     if (open) await load()
   }
 
-  const SOURCES = ['rapport', 'updates', 'cron', 'config', 'apparaat', 'hardware', 'snapshots', 'domein', 'homepage']
+  const SOURCES = ['rapport', 'updates', 'cron', 'config', 'apparaat', 'hardware', 'snapshots', 'domein', 'homepage', 'cluster']
   const clickable = (n) => SOURCES.includes(n.source) || !!n.service_id
   async function pick(n) {
     if (!clickable(n)) return
@@ -64,6 +64,7 @@
     <div class="panel card">
       <div class="head">
         <span>meldingen</span>
+        {#if onwebhooks}<button class="mini" onclick={() => { open = false; onwebhooks() }} title="Meldingen van Proxmox, PBS, Uptime Kuma, ... ontvangen">webhooks</button>{/if}
         <button class="mini" onclick={readAll}>alles gelezen</button>
         <button class="mini x" onclick={clearRead}>wis gelezen</button>
       </div>

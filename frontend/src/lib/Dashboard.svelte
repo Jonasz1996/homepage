@@ -99,6 +99,9 @@
     { label: 'netwerk: publiek ip, wan, tunnels, wake-on-lan', run: () => (modal = { kind: 'network' }) },
     { label: 'apparaten op het netwerk, poortscan', run: () => (modal = { kind: 'network', tab: 'apparaten' }) },
     { label: 'configuratiewijzigingen: opnsense, npm, proxmox, bestanden (diff)', run: () => (modal = { kind: 'configs' }) },
+    { label: 'gepland onderhoud: vensters plannen', run: () => (modal = { kind: 'planned' }) },
+    { label: 'webhooks: meldingen van proxmox, pbs, uptime kuma, home assistant', run: () => (modal = { kind: 'webhooks' }) },
+    { label: 'cluster: quorum, ha, replicatie', run: () => openHealth({ tab: 'cluster' }) },
     { label: 'bewerken aan/uit', run: () => (editing = !editing) },
     { label: 'effecten aan/uit (vuur, bliksem, ...)', run: () => { setFx(!fxEnabled()); if (fxEnabled()) storm() } },
   ]
@@ -206,7 +209,7 @@
   async function loadUpdates() {
     try { updates = await api('/updates') } catch { /* volgende poging */ }
   }
-  const HEALTH_TAB = { hardware: 'schijven', snapshots: 'snapshots', domein: 'domeinen', homepage: 'homepage' }
+  const HEALTH_TAB = { hardware: 'schijven', snapshots: 'snapshots', domein: 'domeinen', homepage: 'homepage', cluster: 'cluster' }
   function openNotification(n) {
     if (n.source === 'rapport') modal = { kind: 'history', tab: 'report' }
     else if (n.source === 'updates') modal = { kind: 'updates' }
@@ -379,7 +382,7 @@
     if (!what) return
     history.replaceState(null, '', location.pathname)
     const kinds = { history: 'history', report: 'history', updates: 'updates', network: 'network', capacity: 'capacity',
-                    security: 'security', configs: 'configs' }
+                    security: 'security', configs: 'configs', webhooks: 'webhooks', planned: 'planned' }
     if (what === 'logs') openLogs()
     else if (what === 'cron') openCron()
     else if (what === 'health') openHealth()
@@ -414,7 +417,7 @@
   <Card title="homepage" glow>
     {#snippet right()}
       <span class="clock">{clock}</span>
-      <Notifications onopen={openNotification} />
+      <Notifications onopen={openNotification} onwebhooks={() => (modal = { kind: 'webhooks' })} />
       <button class="mini burger" class:on={menuOpen} onclick={() => (menuOpen = !menuOpen)} aria-label="Menu" aria-expanded={menuOpen}>☰</button>
       <!-- Op de gsm klapt dit open onder ☰; op een groot scherm staan de knoppen gewoon in de titelbalk. -->
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -630,6 +633,10 @@
   <Lazy load={() => import('./History.svelte')} tab={modal.tab} onclose={() => (modal = null)} />
 {:else if modal?.kind === 'network'}
   <Lazy load={() => import('./Network.svelte')} initialTab={modal.tab} onclose={() => (modal = null)} onchanged={(d) => (net = d)} />
+{:else if modal?.kind === 'webhooks'}
+  <Lazy load={() => import('./Webhooks.svelte')} services={allServices} onclose={() => (modal = null)} />
+{:else if modal?.kind === 'planned'}
+  <Lazy load={() => import('./Planned.svelte')} services={allServices} groups={groupOptions} onclose={() => (modal = null)} />
 {:else if modal?.kind === 'configs'}
   <Lazy load={() => import('./Configs.svelte')} onclose={() => (modal = null)} />
 {:else if modal?.kind === 'updates'}
