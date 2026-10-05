@@ -44,7 +44,14 @@ def upgrade() -> None:
     available = bind.exec_driver_sql(
         "SELECT 1 FROM pg_available_extensions WHERE name = 'timescaledb'"
     ).scalar()
-    if available:
+    # Geïnstalleerd maar niet in shared_preload_libraries (timescaledb-tune niet gelukt): dan laat PostgreSQL
+    # CREATE EXTENSION de verbinding afbreken. Zonder TimescaleDB verder werken in plaats van vast te lopen.
+    # (Zonder rechten om dat te lezen geeft pg_settings geen rij: dan zoals vroeger gewoon proberen.)
+    loaded = bind.exec_driver_sql("SELECT setting FROM pg_settings WHERE name = 'shared_preload_libraries'").scalar()
+    loaded = loaded is None or "timescaledb" in loaded
+    if bind.exec_driver_sql("SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'").scalar():
+        available = loaded = True
+    if available and loaded:
         op.execute("CREATE EXTENSION IF NOT EXISTS timescaledb")
         op.execute("SELECT create_hypertable('check_results', 'ts', migrate_data => TRUE, if_not_exists => TRUE)")
         op.execute(

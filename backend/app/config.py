@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     # Zelfcontrole: waar de dagelijkse pg_dump staat, en een gemounte map (NAS, PBS, USB) voor de kopie buiten de
     # container. De worker mag alleen in die map schrijven (ReadWritePaths in homepage-worker.service).
     backup_dir: Path = Path("/var/backups/homepage")
+    # Welke versie er draait (install.sh schrijft het): voor "wat is er nieuw" en homepage-terugzetten.
+    version_file: Path = Path("/etc/homepage/versie")
     offsite_dir: Path = Path("/mnt/homepage-backup")
 
 
