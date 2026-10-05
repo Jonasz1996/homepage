@@ -6,7 +6,7 @@
   import Devices from './Devices.svelte'
 
   // Internet: publiek IP, WAN-gateways (OPNsense), Cloudflare-tunnels en Wake-on-LAN; en de apparaten op het LAN.
-  let { onclose, onchanged, initialTab } = $props()
+  let { onclose, onchanged, initialTab, initialQuery = '' } = $props()
   let tab = $state(untrack(() => initialTab) || 'internet')
 
   let data = $state(null)
@@ -52,7 +52,7 @@
     <button class="mini" class:on={tab === 'apparaten'} onclick={() => (tab = 'apparaten')}>apparaten</button>
   </div>
   {#if tab === 'apparaten'}
-    <Devices />
+    <Devices {initialQuery} />
   {:else}
   {#if error}<p class="err">{error}</p>{/if}
   {#if data}

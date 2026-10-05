@@ -31,11 +31,11 @@
   let termRequest = $state(null)
   let logsOpen = $state(false)
   let logsUsed = $state(false)
-  let logsHost = $state(null)
-  function openLogs(host = null) {
+  let logsInitial = $state(null)
+  function openLogs(host = null, q = '') {
     logsUsed = true
     logsOpen = true
-    logsHost = host
+    logsInitial = { host, q }
   }
   let cronOpen = $state(false)
   let cronUsed = $state(false)
@@ -81,9 +81,40 @@
     if (!q) return []
     return layout.pages
       .flatMap((p) => p.groups.flatMap((g) => g.services))
-      .filter((s) => [s.name, s.description, s.url, s.notes].some((v) => v && v.toLowerCase().includes(q)))
+      .filter((s) => found.service_ids.includes(s.id) || [s.name, s.description, s.url, s.notes].some((v) => v && v.toLowerCase().includes(q)))
       .slice(0, 40)
   })
+
+  // Overal zoeken: notities, cronjobs, SSH-hosts, apparaten, configuratie en logregels (en IP/MAC opzoeken).
+  const NONE = { groups: [], service_ids: [] }
+  let found = $state.raw(NONE)
+  let searchGen = 0
+  let searchTimer
+  $effect(() => {
+    const q = query.trim()
+    clearTimeout(searchTimer)
+    const my = ++searchGen
+    if (q.length < 2) { found = NONE; return }
+    searchTimer = setTimeout(async () => {
+      try {
+        const r = await api(`/search?q=${encodeURIComponent(q)}`)
+        if (my === searchGen) found = r
+      } catch { /* de zoekbalk werkt verder op wat het dashboard zelf weet */ }
+    }, 250)
+  })
+  let foundGroups = $derived(query.trim().length >= 2 ? found.groups : [])
+  function openFound(kind, it) {
+    const k = it.kind || kind
+    if (k === 'note') {
+      const svc = allServices.find((s) => s.id === it.service_id)
+      if (svc) modal = { kind: 'detail', service: svc }
+    } else if (k === 'cron') openCron({ job: it.job_id })
+    else if (k === 'host') openTerminal(it.host_id)
+    else if (k === 'device') modal = { kind: 'network', tab: 'apparaten', q: it.mac }
+    else if (k === 'config') modal = { kind: 'configs', item: it.item }
+    else if (k === 'log') openLogs(it.host, found.ip || found.mac || query.trim())
+    else if (k === 'npm' && it.url) window.open(it.url, '_blank', 'noopener')
+  }
 
   // Snelle acties in de zoekbalk: commando's van het dashboard zelf en knoppen van de integraties.
   const COMMANDS = [
@@ -373,6 +404,7 @@
     if (e.key !== 'Enter') return
     if (results[0]?.url) window.open(results[0].url, '_blank', 'noopener')
     else if (actionResults[0]) runQuick(actionResults[0])
+    else if (foundGroups[0]) openFound(foundGroups[0].kind, foundGroups[0].items[0])
   }
 
   // Snelkoppelingen van de app (manifest) en de Android-app: /?open=history, updates, network, ...
@@ -495,6 +527,18 @@
 
   {#if error}<p class="err banner">{error}</p>{/if}
 
+  {#snippet foundGroup(g)}
+    <div class="fgrp">
+      <span class="lbl">{g.label}{g.more ? ` · nog ${g.more}` : ''}</span>
+      {#each g.items as it, i (i)}
+        <button class="frow" onclick={() => openFound(g.kind, it)}>
+          <span class="ft" class:e={it.severity <= 3 || it.status === 'fout'} class:w={it.severity === 4 || it.status === 'gemist'}>{it.title}</span>
+          {#if it.sub}<small>{it.sub}</small>{/if}
+        </button>
+      {/each}
+    </div>
+  {/snippet}
+
   {#if query.trim()}
     <Card title={`grep -i "${query.trim()}"`} class="results">
       {#if actionResults.length || quickMsg}
@@ -508,14 +552,16 @@
           {#if quickMsg}<span class="qmsg" class:bad={quickMsg.startsWith('✕')}>{quickMsg}</span>{/if}
         </div>
       {/if}
+      {#each foundGroups.filter((g) => g.kind === 'lookup') as g (g.kind)}{@render foundGroup(g)}{/each}
       <div class="tiles pad">
         {#each results as s (s.id)}
           <ServiceTile service={s} status={status[s.id]} widget={widgets[s.id]} updates={updates.by_service[s.id]} {editing} onedit={(svc) => (modal = { kind: 'service', service: svc })}
                        ondetail={(svc) => (modal = { kind: 'detail', service: svc })} />
         {:else}
-          {#if !actionResults.length}<p class="hint">Niets gevonden.</p>{/if}
+          {#if !actionResults.length && !foundGroups.length}<p class="hint">Niets gevonden.</p>{/if}
         {/each}
       </div>
+      {#each foundGroups.filter((g) => g.kind !== 'lookup') as g (g.kind)}{@render foundGroup(g)}{/each}
     </Card>
   {:else if loaded && layout.pages.length === 0}
     <Card title="welkom" class="empty">
@@ -632,13 +678,13 @@
 {:else if modal?.kind === 'history'}
   <Lazy load={() => import('./History.svelte')} tab={modal.tab} onclose={() => (modal = null)} />
 {:else if modal?.kind === 'network'}
-  <Lazy load={() => import('./Network.svelte')} initialTab={modal.tab} onclose={() => (modal = null)} onchanged={(d) => (net = d)} />
+  <Lazy load={() => import('./Network.svelte')} initialTab={modal.tab} initialQuery={modal.q} onclose={() => (modal = null)} onchanged={(d) => (net = d)} />
 {:else if modal?.kind === 'webhooks'}
   <Lazy load={() => import('./Webhooks.svelte')} services={allServices} onclose={() => (modal = null)} />
 {:else if modal?.kind === 'planned'}
   <Lazy load={() => import('./Planned.svelte')} services={allServices} groups={groupOptions} onclose={() => (modal = null)} />
 {:else if modal?.kind === 'configs'}
-  <Lazy load={() => import('./Configs.svelte')} onclose={() => (modal = null)} />
+  <Lazy load={() => import('./Configs.svelte')} initialItem={modal.item} onclose={() => (modal = null)} />
 {:else if modal?.kind === 'updates'}
   <Lazy load={() => import('./Updates.svelte')} onclose={() => (modal = null)} onchanged={loadUpdates} />
 {:else if modal?.kind === 'security'}
@@ -672,7 +718,7 @@
 {/if}
 {#if logsUsed}
   {#await import('./Logs.svelte') then { default: Logs }}
-    <Logs open={logsOpen} initialHost={logsHost} onclose={() => (logsOpen = false)} />
+    <Logs open={logsOpen} initial={logsInitial} onclose={() => (logsOpen = false)} />
   {:catch}
     <Lazy load={() => Promise.reject()} />
   {/await}
@@ -737,6 +783,19 @@
   .act b { font-weight: 500; color: var(--text-h) }
   .qmsg { font-size: 12px; color: var(--ok); margin-left: 4px }
   .qmsg.bad { color: var(--err) }
+  .fgrp { padding: 10px 12px 0; display: flex; flex-direction: column }
+  .frow { all: unset; cursor: pointer; display: flex; gap: 10px; align-items: baseline; padding: 5px 8px; border-radius: 8px;
+          border-top: 1px solid var(--line); min-width: 0 }
+  .frow:hover, .frow:focus-visible { background: var(--fill-h) }
+  .ft { color: var(--text-h); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 55% }
+  .ft.e { color: var(--err) }
+  .ft.w { color: var(--mid) }
+  .frow small { color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0 }
+  @media (max-width: 640px) {
+    .frow { flex-direction: column; gap: 1px }
+    .ft { max-width: 100% }
+    .frow small { max-width: 100% }
+  }
   @media (max-width: 760px) {
     .burger { display: inline-block; padding: 3px 9px }
     .menu { display: none }

@@ -5,13 +5,13 @@
   import LogSetup from './LogSetup.svelte'
 
   // Logviewer: alle syslog-regels van je machines, met zoeken, filters en live meekijken.
-  let { open = false, initialHost = null, onclose } = $props()
+  let { open = false, initial = null, onclose } = $props()
 
   const SEV = ['emerg', 'alert', 'crit', 'err', 'warning', 'notice', 'info', 'debug']
   const RANGES = ['1h', '24h', '7d', '30d']
 
   let hosts = $state([])
-  let host = $state(untrack(() => initialHost))
+  let host = $state(untrack(() => initial?.host || null))
   let q = $state('')
   let qLive = $state('')
   let sev = $state('')
@@ -87,8 +87,12 @@
     if (open) untrack(load)
   })
 
+  // Geopend vanuit een tegel of de zoekbalk: meteen op die machine en/of die zoekterm.
   $effect(() => {
-    if (initialHost) untrack(() => (host = initialHost))
+    if (initial?.host || initial?.q) untrack(() => {
+      if (initial.host) host = initial.host
+      if (initial.q) q = qLive = initial.q
+    })
   })
 
   onMount(() => {
@@ -125,7 +129,7 @@
         </button>
         {#each hosts as h (h.host)}
           <button class="hb" class:on={host === h.host} onclick={() => (host = host === h.host ? null : h.host)}>
-            <b>{h.host}</b>
+            <b>{#if h.docker}<span class="dk" title="Docker-container (Portainer)">▣</span> {/if}{h.host}</b>
             <small>{h.count.toLocaleString('nl-BE')}{#if h.errors}&nbsp;·&nbsp;<span class="e">{h.errors} fouten</span>{/if}</small>
           </button>
         {:else}
@@ -185,6 +189,7 @@
 {/if}
 
 <style>
+  .dk { color: var(--mid); font-size: 11px; margin-right: 4px }
   .ov { position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, .65); padding: 2vh 1vw; display: flex }
   .ov.hidden { display: none }
   .win { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden }

@@ -4,7 +4,7 @@
   import Modal from './Modal.svelte'
 
   // Configuratiewijzigingen: elke nacht een kopie van OPNsense, NPM, Proxmox en gekozen bestanden, met een diff.
-  let { onclose } = $props()
+  let { onclose, initialItem = null } = $props()
 
   let data = $state(null)
   let error = $state('')
@@ -26,7 +26,12 @@
       if (!cfg) cfg = JSON.parse(JSON.stringify(data.settings))
     } catch (e) { error = e.message }
   }
-  onMount(load)
+  onMount(async () => {
+    await load()
+    // Geopend vanuit de zoekbalk: meteen die configuratie tonen.
+    const it = initialItem && data?.items.find((x) => x.item === initialItem)
+    if (it) pick(it)
+  })
 
   async function pick(it) {
     sel = it
