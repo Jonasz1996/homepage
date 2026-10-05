@@ -21,8 +21,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
+from ..db import ensure_state
 from ..deps import event, notify
 from ..models import AppState
+from ..monitoring.checks import kill
 
 log = logging.getLogger("homepage.health")
 
@@ -46,9 +48,14 @@ Terugzetten op een nieuwe container (na install.sh):
   cd /opt/homepage/backend
   ../.venv/bin/python -m app.health.selfcheck decrypt /pad/naar/secret.key.enc > /etc/homepage/secret.key
   chown root:homepage /etc/homepage/secret.key && chmod 640 /etc/homepage/secret.key
-  systemctl stop homepage-api homepage-worker
-  sudo -u postgres pg_restore --clean --if-exists -d homepage /pad/naar/homepage-JJJJ-MM-DD.dump
-  systemctl start homepage-api homepage-worker
+  systemctl stop homepage-api homepage-worker homepage-syslog
+  sudo -u postgres dropdb homepage && sudo -u postgres createdb -O homepage homepage
+  # Met TimescaleDB (staat standaard aan; dezelfde versie als bij de back-up):
+  sudo -u postgres psql -d homepage -c "CREATE EXTENSION timescaledb" -c "SELECT timescaledb_pre_restore()"
+  sudo -u postgres pg_restore -d homepage /pad/naar/homepage-JJJJ-MM-DD.dump
+  sudo -u postgres psql -d homepage -c "SELECT timescaledb_post_restore()"
+  # Zonder TimescaleDB: alleen de pg_restore-regel.
+  systemctl start homepage-api homepage-worker homepage-syslog
 """
 
 
@@ -85,18 +92,17 @@ async def check_worker(db: AsyncSession) -> dict:
                f"{status['why']}. Checks, meldingen en back-up-kopieën staan stil.\n"
                "Op de container: systemctl status homepage-worker; journalctl -u homepage-worker -n 50",
                level="err", source="homepage")
-        _set_flag(db, flag, True)
+        await _set_flag(db, flag, True)
     elif status["ok"] and alerted:
         event(db, "gezondheid", "De worker van de homepage draait weer", level="ok")
-        _set_flag(db, flag, False)
+        await _set_flag(db, flag, False)
     return status
 
 
-def _set_flag(db: AsyncSession, flag: AppState | None, down: bool) -> None:
-    if flag:
-        flag.value = {"down": down}
-    else:
-        db.add(AppState(key="worker_alert", value={"down": down}))
+async def _set_flag(db: AsyncSession, flag: AppState | None, down: bool) -> None:
+    # Twee verzoeken tegelijk mogen niet allebei een nieuwe rij proberen toe te voegen.
+    flag = flag or await ensure_state(db, "worker_alert")
+    flag.value = {"down": down}
 
 
 # --- back-ups -------------------------------------------------------------------------------------------------
@@ -122,8 +128,14 @@ async def verify_dump(path: Path) -> tuple[bool | None, str | None]:
     try:
         proc = await asyncio.create_subprocess_exec(str(exe), "--list", str(path), stdout=asyncio.subprocess.PIPE,
                                                     stderr=asyncio.subprocess.PIPE)
+    except OSError as e:
+        return None, type(e).__name__
+    try:
         out, err = await asyncio.wait_for(proc.communicate(), 120)
-    except (OSError, asyncio.TimeoutError) as e:
+    except (asyncio.TimeoutError, asyncio.CancelledError) as e:
+        await kill(proc)  # anders blijft pg_restore draaien
+        if isinstance(e, asyncio.CancelledError):
+            raise
         return None, type(e).__name__
     if proc.returncode != 0:
         return False, (err.decode(errors="replace").strip().splitlines() or ["onleesbaar"])[-1][:200]

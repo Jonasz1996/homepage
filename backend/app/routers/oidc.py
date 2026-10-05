@@ -152,15 +152,19 @@ async def _fail(db: AsyncSession, request: Request, reason: str, user: User | No
 async def callback(request: Request, code: str | None = None, state: str | None = None, error: str | None = None,
                    db: AsyncSession = Depends(get_db)):
     cfg = await _settings(db)
-    if error:
-        return await _fail(db, request, f"Authentik weigerde: {error[:80]}")
     try:
         saved = json.loads(decrypt(request.cookies.get(STATE_COOKIE) or ""))
     except Exception:
         saved = None
-    if not saved or not state or not secrets.compare_digest(saved.get("s", ""), state) \
-            or time.time() - saved.get("t", 0) > STATE_TTL:
-        return await _fail(db, request, "Login verlopen of ongeldig, probeer opnieuw")
+    valid = bool(saved and state and secrets.compare_digest(saved.get("s", ""), state)
+                 and time.time() - saved.get("t", 0) <= STATE_TTL)
+    # Zonder geldig state-cookie kwam het verzoek niet van een login die hier begon: niet in de auditlog,
+    # anders kan iedereen die vol schrijven.
+    if error:
+        reason = f"Authentik weigerde: {error[:80]}"
+        return await _fail(db, request, reason) if valid else _done("/?" + urlencode({"login_error": reason}))
+    if not valid:
+        return _done("/?" + urlencode({"login_error": "Login verlopen of ongeldig, probeer opnieuw"}))
     if not (cfg.get("enabled") and cfg.get("issuer") and cfg.get("client_id")) or not code:
         return await _fail(db, request, "Inloggen via Authentik staat uit")
     http = client(bool(cfg.get("insecure")))

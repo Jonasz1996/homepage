@@ -1,12 +1,41 @@
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI, Request
 
 from .config import get_settings
+from .db import get_maker
 from .deps import COOKIE, csrf_guard, secure_cookie
 from .routers import (auth, capacity, configs, cron, heal, health, importexport, integrations, layout, logs, monitoring, network, notifications,
                       oidc, ssh, timeline, upgrade)
 
+log = logging.getLogger("homepage.api")
+
+
+async def _startup() -> None:
+    """Manuele update-runs die liepen toen de API herstartte, als mislukt markeren (anders blijft dat doel geblokkeerd)."""
+    from .monitoring.upgrade import mark_interrupted
+
+    try:
+        async with get_maker()() as db:
+            n = await mark_interrupted(db, ("manueel",))
+            await db.commit()
+        if n:
+            log.warning("%s update-run(s) onderbroken door herstart", n)
+    except Exception:
+        # Opstarten mag hier niet op vastlopen (bv. database nog niet bereikbaar of nog niet gemigreerd).
+        log.exception("onderbroken update-runs opruimen mislukt")
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    await _startup()
+    yield
+
+
 app = FastAPI(
     title="homepage",
+    lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
     openapi_url=None,

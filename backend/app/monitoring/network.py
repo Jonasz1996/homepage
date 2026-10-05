@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
+from ..db import ensure_state
 from ..deps import notify
 from ..integrations import IntegrationError, build
 from ..integrations.homeassistant import month_start
@@ -29,11 +30,8 @@ HISTORY = 20
 
 
 async def _state(db: AsyncSession, key: str) -> AppState:
-    st = await db.get(AppState, key)
-    if st is None:
-        st = AppState(key=key, value={})
-        db.add(st)
-    return st
+    # Worker en API (knop "vernieuwen") kunnen tegelijk dezelfde nieuwe sleutel aanmaken.
+    return await ensure_state(db, key)
 
 
 def _now() -> str:
@@ -145,8 +143,9 @@ async def sample_power(db: AsyncSession, clients: HttpClients, now: datetime | N
     now = now or datetime.now(timezone.utc)
     n = 0
     for svc in (await db.execute(select(Service).where(Service.type == "homeassistant"))).scalars().all():
-        integ = build(svc, clients)
         try:
+            # build() hoort in de try: één Home Assistant met een kapotte configuratie mag de rest niet tegenhouden.
+            integ = build(svc, clients)
             for label, power, _ in integ.mapping():
                 w, unit = await integ.state(power)
                 if w is None:
@@ -156,6 +155,8 @@ async def sample_power(db: AsyncSession, clients: HttpClients, now: datetime | N
                 n += 1
         except IntegrationError as e:
             log.info("Home Assistant %s niet bereikbaar: %s", svc.name, e)
+        except Exception:
+            log.exception("verbruik van %s ophalen mislukt", svc.name)
     return n
 
 

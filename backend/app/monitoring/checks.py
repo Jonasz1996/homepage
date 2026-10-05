@@ -16,6 +16,9 @@ import httpx
 from cryptography import x509
 
 TIMEOUT = 10.0
+# Bovengrens voor één check in zijn geheel (DNS, verbinden, trage body): een hangende check blokkeert anders
+# een plaats in de worker.
+CHECK_TIMEOUT = 25.0
 # Zoveel van de pagina lezen voor een woord- of JSON-controle.
 MAX_BODY = 1_000_000
 _PING_TIME = re.compile(r"time[=<]([\d.]+)\s*ms")
@@ -175,6 +178,19 @@ async def check_tcp(target: str) -> Outcome:
         return Outcome(False, error=_short(e))
 
 
+async def kill(proc: asyncio.subprocess.Process) -> None:
+    """Kindproces stoppen en opruimen, zodat er na een time-out geen ping (of pg_restore) blijft hangen."""
+    if proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        await asyncio.wait_for(proc.wait(), 2)
+    except asyncio.TimeoutError:
+        pass
+
+
 async def check_ping(target: str) -> Outcome:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.:_-]*", target):
         return Outcome(False, error="Ongeldig doel")
@@ -183,9 +199,15 @@ async def check_ping(target: str) -> Outcome:
             "ping", "-c", "1", "-W", "2", "-n", target,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
+    except FileNotFoundError:
+        return Outcome(False, error="ping niet geïnstalleerd")
+    try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=5)
-    except (asyncio.TimeoutError, FileNotFoundError) as e:
-        return Outcome(False, error="Time-out" if isinstance(e, asyncio.TimeoutError) else "ping niet geïnstalleerd")
+    except (asyncio.TimeoutError, asyncio.CancelledError) as e:
+        await kill(proc)
+        if isinstance(e, asyncio.CancelledError):
+            raise
+        return Outcome(False, error="Time-out")
     m = _PING_TIME.search(out.decode(errors="replace"))
     if proc.returncode == 0 and m:
         return Outcome(True, float(m.group(1)))
@@ -215,6 +237,14 @@ class HttpClients:
 
 
 async def run_check(check: dict, url: str | None, clients: HttpClients | None = None) -> Outcome:
+    try:
+        async with asyncio.timeout(CHECK_TIMEOUT):
+            return await _run_check(check, url, clients)
+    except TimeoutError:
+        return Outcome(False, error="Time-out")
+
+
+async def _run_check(check: dict, url: str | None, clients: HttpClients | None = None) -> Outcome:
     target = target_for(check, url)
     if not target:
         return Outcome(False, error="Geen doel ingesteld")

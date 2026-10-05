@@ -188,7 +188,7 @@
     {:else if tab === 'graph'}
       <CronGraph {open} onjob={(id) => (detail = id)} />
     {:else}
-      <CronLive targets={hosts.filter((t) => t.key.startsWith('ssh:'))} jobs={data?.jobs || []} />
+      {#if open}<CronLive targets={hosts.filter((t) => t.key.startsWith('ssh:'))} jobs={data?.jobs || []} />{/if}
     {/if}
   </div>
 </div>

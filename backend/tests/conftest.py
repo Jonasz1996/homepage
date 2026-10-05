@@ -31,6 +31,23 @@ PASSWORD = "een-lang-wachtwoord"
 H = {"X-Requested-With": "homepage"}
 
 
+@pytest.fixture(autouse=True)
+def totp_clock(monkeypatch):
+    """Elke nieuwe TOTP-code in een test hoort bij de volgende stap van 30 s (en de server telt mee):
+    de server weigert een code die al gebruikt is, ook binnen hetzelfde venster."""
+    import time
+
+    from app.routers import auth
+    clock = [time.time()]
+
+    def now(self):
+        clock[0] += 30
+        return self.at(clock[0])
+    monkeypatch.setattr(pyotp.TOTP, "now", now)
+    monkeypatch.setattr(auth, "_clock", lambda: clock[0])
+    return clock
+
+
 @pytest.fixture
 async def client():
     engine = create_async_engine(TEST_DB)

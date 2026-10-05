@@ -7,6 +7,8 @@ set -euo pipefail
 
 APP_DIR=/opt/homepage
 CONF_DIR=/etc/homepage
+# NPM_IP: het IP van Nginx Proxy Manager. Wordt bij de eerste keer bewaard in homepage.env en daarna daar gelezen.
+NPM_IP="${NPM_IP:-$(sed -n 's/^HOMEPAGE_NPM_IP=//p' "$CONF_DIR/homepage.env" 2>/dev/null | tail -1)}"
 NPM_IP="${NPM_IP:-192.168.0.245}"
 
 say() { printf '\n\033[1;37m==> %s\033[0m\n' "$*"; }
@@ -78,6 +80,16 @@ sed -i -E 's/^HOMEPAGE_COOKIE_SECURE=(true|false)$/HOMEPAGE_COOKIE_SECURE=auto/'
 echo 'net.ipv4.ping_group_range = 0 2147483647' > /etc/sysctl.d/60-homepage-ping.conf
 sysctl -q -w net.ipv4.ping_group_range="0 2147483647" 2>/dev/null || warn "ping_group_range niet gezet; ping-checks kunnen falen"
 
+# NPM-IP bewaren zodat een volgende update het niet terugzet naar de standaard.
+if grep -q '^HOMEPAGE_NPM_IP=' "$CONF_DIR/homepage.env"; then
+  sed -i "s/^HOMEPAGE_NPM_IP=.*/HOMEPAGE_NPM_IP=$NPM_IP/" "$CONF_DIR/homepage.env"
+else
+  echo "HOMEPAGE_NPM_IP=$NPM_IP" >> "$CONF_DIR/homepage.env"
+fi
+
+# Map voor de dagelijkse back-up: postgres schrijft, de worker (groep homepage) leest om ze te controleren.
+install -d -m 750 -o postgres -g homepage /var/backups/homepage
+
 # IP van deze container voor de rsyslog-configuratie op andere machines (fase 6).
 if ! grep -q '^HOMEPAGE_SYSLOG_TARGET=' "$CONF_DIR/homepage.env"; then
   echo "HOMEPAGE_SYSLOG_TARGET=$(hostname -I | awk '{print $1}')" >> "$CONF_DIR/homepage.env"
@@ -88,15 +100,28 @@ say "Backend (Python)"
 "$APP_DIR/.venv/bin/pip" install -q --upgrade pip
 "$APP_DIR/.venv/bin/pip" install -q "$APP_DIR/backend"
 chown -R root:root "$APP_DIR"
+
+# Eerst bouwen, dan pas de database bijwerken: mislukt de build, dan blijft alles zoals het was.
+say "Frontend bouwen"
+(cd "$APP_DIR/frontend" && npm ci --no-audit --no-fund --loglevel=error && npm run build --silent)
+
 set -a
 # shellcheck source=/dev/null
 . "$CONF_DIR/homepage.env"
 set +a
+say "Database bijwerken"
+if runuser -u postgres -- psql -d homepage -tAc "SELECT 1 FROM alembic_version" 2>/dev/null | grep -q 1; then
+  # Bestaande installatie: eerst een kopie, zodat een mislukte migratie terug te draaien is. De laatste 3 blijven staan.
+  DUMP="/var/backups/homepage/voor-update-$(date +%Y%m%d-%H%M%S).dump"
+  if runuser -u postgres -- sh -c "pg_dump -Fc homepage > '$DUMP.tmp' && mv '$DUMP.tmp' '$DUMP'"; then
+    echo "Kopie van de database: $DUMP"
+  else
+    warn "Kopie van de database mislukt; toch verder."
+  fi
+  find /var/backups/homepage -name 'voor-update-*.dump' -printf '%T@ %p\n' | sort -rn | tail -n +4 | cut -d' ' -f2- | xargs -r rm -f
+fi
 (cd "$APP_DIR/backend" && runuser -u homepage -- env HOMEPAGE_DATABASE_URL="$HOMEPAGE_DATABASE_URL" \
   "$APP_DIR/.venv/bin/alembic" upgrade head)
-
-say "Frontend bouwen"
-(cd "$APP_DIR/frontend" && npm ci --no-audit --no-fund --loglevel=error && npm run build --silent)
 
 say "nginx"
 NPM_IP_RE="${NPM_IP//./\\\\.}"

@@ -7,7 +7,7 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..deps import notify
@@ -59,10 +59,12 @@ async def refresh(db: AsyncSession, http: HttpClients, now: datetime | None = No
                     seen.setdefault(n["mac"], n)
         except IntegrationError as e:
             errors.append({"source": svc.name, "error": str(e)})
-    first_run = not (await db.execute(select(func.count()).select_from(Device))).scalar()
+    # Alle bekende apparaten in één query, niet één per gezien MAC-adres.
+    known = {d.mac: d for d in (await db.execute(select(Device))).scalars()}
+    first_run = not known
     new = []
     for mac, n in seen.items():
-        d = await db.get(Device, mac)
+        d = known.get(mac)
         if d is None:
             d = Device(mac=mac, first_seen=now, last_seen=now, known=first_run, scan=False)
             db.add(d)

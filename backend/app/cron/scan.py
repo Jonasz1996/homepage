@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..db import job_lock
 from ..deps import event, notify
 from ..models import AppState, CronJob, CronRun, SshHost
 from ..ssh_exec import SshFail, connect, run
@@ -108,9 +109,18 @@ async def collect(db: AsyncSession) -> tuple[list[dict], list[dict]]:
     ready = [h for h in hosts if h.host_key]
     direct_cts = {int(m.group(1)) for h in ready if h.source and (m := _LXC_SOURCE.search(h.source))}
     sem = asyncio.Semaphore(PARALLEL)
+    # Logins eerst na elkaar ophalen: één AsyncSession mag niet door parallelle taken gedeeld worden.
+    logins: dict[int, Login | BaseException] = {}
+    for h in ready:
+        try:
+            logins[h.id] = await login_for(db, h, d)
+        except Exception as e:
+            logins[h.id] = e
 
     async def one(h: SshHost):
-        login = await login_for(db, h, d)
+        login = logins[h.id]
+        if isinstance(login, BaseException):
+            raise login
         async with sem:
             return await scan_host(h, login, direct_cts)
 
@@ -153,11 +163,17 @@ class Store:
         self.db = db
         self.now = now
         self.alerts: list[tuple[CronJob, str | None, str | None]] = []
+        self._runs: dict[int, dict[datetime, CronRun]] | None = None
 
     async def run_rows(self, job: CronJob) -> dict[datetime, CronRun]:
-        rows = (await self.db.execute(select(CronRun).where(
-            CronRun.job_id == job.id, CronRun.started_at >= self.now - timedelta(days=3)))).scalars().all()
-        return {_aware(r.started_at).replace(microsecond=0): r for r in rows}
+        if self._runs is None:
+            # Alle recente runs in één query, in plaats van één query per job.
+            self._runs = {}
+            rows = (await self.db.execute(select(CronRun).where(
+                CronRun.started_at >= self.now - timedelta(days=3)))).scalars().all()
+            for r in rows:
+                self._runs.setdefault(r.job_id, {})[_aware(r.started_at).replace(microsecond=0)] = r
+        return self._runs.setdefault(job.id, {})
 
     async def add_run(self, job: CronJob, existing: dict, started: datetime, **kw) -> None:
         started = started.replace(microsecond=0)
@@ -262,7 +278,9 @@ async def store(db: AsyncSession, machines: list[dict], pending: list[dict]) -> 
     for job, old, new in st.alerts:
         _alert(db, job, old, new)
 
-    await db.execute(delete(CronRun).where(CronRun.started_at < now - KEEP_RUNS))
+    # Geen synchronisatie met de sessie nodig: de geladen runs zijn van de laatste dagen, niet van 60 dagen terug.
+    await db.execute(delete(CronRun).where(CronRun.started_at < now - KEEP_RUNS)
+                     .execution_options(synchronize_session=False))
     await db.execute(delete(CronJob).where(CronJob.removed_at.is_not(None), CronJob.removed_at < now - KEEP_REMOVED))
 
     value = {
@@ -420,5 +438,9 @@ def _alert(db: AsyncSession, job: CronJob, old: str | None, new: str | None) -> 
 
 
 async def run_scan(db: AsyncSession) -> dict:
+    if not await job_lock(db, STATE_KEY):
+        # De worker of de knop is al bezig: niet twee keer tegelijk alle machines aflopen.
+        state = await db.get(AppState, STATE_KEY)
+        return state.value if state else {}
     machines, pending = await collect(db)
     return await store(db, machines, pending)

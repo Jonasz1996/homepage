@@ -121,7 +121,8 @@ class Integration:
 
     async def _send(self, method: str, path: str, **kw) -> httpx.Response:
         try:
-            r = await self.client.request(method, self.base + path, timeout=TIMEOUT, **kw)
+            # Nooit volgen: anders gaan headers als X-API-Key mee naar een ander adres.
+            r = await self.client.request(method, self.base + path, timeout=TIMEOUT, follow_redirects=False, **kw)
         except httpx.TimeoutException as e:
             raise IntegrationError("Time-out") from e
         except httpx.HTTPError as e:

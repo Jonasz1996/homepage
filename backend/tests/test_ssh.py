@@ -198,6 +198,9 @@ async def test_ws_requires_origin_login_and_recent_2fa(authed, sshd):
         ws = WS(f"/api/ssh/ws/{hid}", cookie, origin=origin)
         await ws.open()
         assert await ws.json() == {"t": "error", "m": why}
+        # Eerst de handler laten afronden: zijn databasesessie deelt de SQLite-verbinding in het geheugen, en zijn
+        # rollback bij het sluiten mag de update hieronder niet ongedaan maken (op Python 3.13 gebeurde dat).
+        await asyncio.wait_for(ws.task, 5)
 
     db = await _db()
     await db.execute(update(Session).values(auth_at=datetime.now(timezone.utc) - timedelta(hours=1)))

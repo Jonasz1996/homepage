@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..db import job_lock
 from ..deps import event, notify
 from ..models import AppState, Reading, SshHost
 from ..ssh_exec import SshFail, connect, run
@@ -66,9 +67,18 @@ async def collect(db: AsyncSession) -> list[dict]:
         todo.append(h)
     d = await defaults(db)
     sem = asyncio.Semaphore(6)
+    # Logins eerst na elkaar ophalen: één AsyncSession mag niet door parallelle taken gedeeld worden.
+    logins = {}
+    for h in todo:
+        try:
+            logins[h.id] = await login_for(db, h, d)
+        except Exception as e:
+            logins[h.id] = e
 
     async def one(h):
-        login = await login_for(db, h, d)
+        login = logins[h.id]
+        if isinstance(login, BaseException):
+            raise login
         async with sem:
             return await probe_host(h, login)
 
@@ -151,6 +161,10 @@ def readings(m: dict, now: datetime) -> list[Reading]:
 
 async def run_health(db: AsyncSession) -> dict:
     now = datetime.now(timezone.utc).replace(microsecond=0)
+    if not await job_lock(db, STATE_KEY):
+        # Loopt al (worker of knop): de vorige stand teruggeven.
+        state = await db.get(AppState, STATE_KEY)
+        return state.value if state else {}
     cfg = await settings(db)
     state = await db.get(AppState, STATE_KEY)
     old = {h["key"]: h for h in (state.value.get("hosts", []) if state else [])}

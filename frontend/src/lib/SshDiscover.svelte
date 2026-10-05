@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte'
-  import { api } from './api.js'
+  import { api, withReauth } from './api.js'
   import Modal from './Modal.svelte'
 
   // Nodes, containers en VM's uit alle Proxmox-tegels: aanvinken en in één keer toevoegen.
@@ -37,7 +37,7 @@
       const items = data.items.filter((i) => picked[i.source] || i.known)
         .filter((i) => i.host)
         .map(({ source, name, host, folder, kind }) => ({ source, name, host, folder, kind }))
-      const r = await api('/ssh/import', { method: 'POST', body: items })
+      const r = await withReauth(() => api('/ssh/import', { method: 'POST', body: items }))
       result = `✓ ${r.added} toegevoegd${r.updated ? `, ${r.updated} IP's bijgewerkt` : ''}`
       onimported?.()
       setTimeout(onclose, 900)

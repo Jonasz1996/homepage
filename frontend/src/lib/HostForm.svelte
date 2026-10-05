@@ -26,8 +26,8 @@
       password: clearPassword ? '' : password || (host ? null : undefined),
     }
     try {
-      if (host) await api(`/ssh/hosts/${host.id}`, { method: 'PATCH', body })
-      else await api('/ssh/hosts', { method: 'POST', body })
+      if (host) await withReauth(() => api(`/ssh/hosts/${host.id}`, { method: 'PATCH', body }))
+      else await withReauth(() => api('/ssh/hosts', { method: 'POST', body }))
       onsaved()
       onclose()
     } catch (err) {
@@ -37,7 +37,7 @@
 
   async function del() {
     if (!confirm(`Host '${host.name}' verwijderen?`)) return
-    await api(`/ssh/hosts/${host.id}`, { method: 'DELETE' })
+    await withReauth(() => api(`/ssh/hosts/${host.id}`, { method: 'DELETE' }))
     onsaved()
     onclose()
   }

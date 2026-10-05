@@ -86,8 +86,8 @@
     const m = q.match(/^(?:([A-Za-z0-9._-]+)@)?([A-Za-z0-9.:_-]+?)(?::(\d+))?$/)
     if (!m) { error = 'Gebruik gebruiker@host:poort'; return }
     try {
-      const h = await api('/ssh/hosts', { method: 'POST', body: {
-        name: m[2], host: m[2], port: Number(m[3] || 22), username: m[1] || '', folder: 'snel verbinden' } })
+      const h = await withReauth(() => api('/ssh/hosts', { method: 'POST', body: {
+        name: m[2], host: m[2], port: Number(m[3] || 22), username: m[1] || '', folder: 'snel verbinden' } }))
       quick = ''
       await load()
       start(h)
