@@ -77,11 +77,19 @@ def identity(check: dict | None, url: str | None) -> tuple | None:
 def silencing(old: dict | None, new: dict | None) -> str | None:
     """Zet deze wijziging een lopende check stil? Dan wat er gebeurt, anders None."""
     old, new = old or {}, new or {}
-    if active(old) and new.get("type") and new.get("paused"):
-        return "check gepauzeerd"
+    if active(old) and not active(new):
+        return "check gepauzeerd" if new.get("type") else "check verwijderd"
     if old.get("type") and new.get("type") and new.get("notify") == "uit" and old.get("notify") != "uit":
         return "meldingen uitgezet"
     return None
+
+
+def restarts(old: dict | None, new: dict | None) -> bool:
+    """Begint de check opnieuw (ander type, ander interval, pauze of hervat)? Een push-check rekent dan vanaf nu:
+    oude signalen en het oude interval tellen niet meer."""
+    def key(c: dict) -> tuple:
+        return c.get("type"), c.get("interval"), bool(c.get("paused"))
+    return key(old or {}) != key(new or {})
 
 
 async def reset_state(db: AsyncSession, service_id: int) -> None:
@@ -138,8 +146,9 @@ async def dependents_count(db: AsyncSession, service_id: int) -> int:
 
 async def _parent_failing(db: AsyncSession, service: Service) -> Service | None:
     for a in await ancestors(db, service):
-        # Een ouder zonder (lopende) check zegt niets, ook al staat er nog een oude status.
-        if not active(a.check):
+        # Een ouder zonder (lopende) check zegt niets, ook al staat er nog een oude status. Een ouder met meldingen
+        # uit ook niet: zijn storing komt nergens als melding, dus dan moet het kind zelf melden.
+        if not active(a.check) or (a.check or {}).get("notify") == "uit":
             continue
         st = await db.get(ServiceState, a.id)
         if st and (st.status == "down" or st.fail_count > 0):
@@ -148,13 +157,16 @@ async def _parent_failing(db: AsyncSession, service: Service) -> Service | None:
 
 
 async def failing_share(db: AsyncSession) -> tuple[int, int]:
-    """(aantal checks dat nu faalt, aantal lopende checks)."""
+    """(aantal checks dat nu faalt, aantal lopende checks). Wat al apart als down gemeld is (een pc die meestal uit
+    staat), telt niet mee: anders begint een massastoring te snel, en eindigt ze nooit."""
     ids = [sid for sid, check in (await db.execute(select(Service.id, Service.check))).all() if active(check)]
     if not ids:
         return 0, 0
-    failing = (await db.execute(select(func.count()).select_from(ServiceState).where(
-        ServiceState.service_id.in_(ids), ServiceState.fail_count > 0))).scalar_one()
-    return failing, len(ids)
+    states = (await db.execute(select(ServiceState.status, ServiceState.quiet, ServiceState.fail_count).where(
+        ServiceState.service_id.in_(ids)))).all()
+    reported = sum(1 for status, quiet, _ in states if status == "down" and not quiet)
+    failing = sum(1 for status, quiet, fails in states if fails > 0 and not (status == "down" and not quiet))
+    return failing, len(ids) - reported
 
 
 async def in_mass_outage(db: AsyncSession) -> bool:
@@ -169,7 +181,12 @@ async def _mass_start(db: AsyncSession, now: datetime) -> bool:
     failing, total = await failing_share(db)
     if total < MASS_MIN or failing < MASS_SHARE * total:
         return False
-    st = await ensure_state(db, MASS_KEY, {})
+    await ensure_state(db, MASS_KEY, {})
+    # Vergrendeld opnieuw lezen: checks die in dezelfde ronde falen, komen hier tegelijk. Maar één stuurt de melding.
+    st = (await db.execute(select(AppState).where(AppState.key == MASS_KEY).with_for_update()
+                           .execution_options(populate_existing=True))).scalar_one()
+    if (st.value or {}).get("since"):
+        return True
     st.value = {"since": now.isoformat(), "failing": failing, "total": total}
     notify(db, "Het dashboard bereikt bijna niets",
            f"{failing} van de {total} checks mislukken tegelijk. Meestal ligt het aan het netwerk of de DNS van de "
@@ -231,8 +248,9 @@ async def _still_down(db: AsyncSession, service: Service, state: ServiceState, o
 async def record(db: AsyncSession, service: Service, outcome: Outcome, now: datetime | None = None) -> ServiceState:
     now = now or datetime.now(timezone.utc)
     maint = await in_maintenance(db, service, now)
+    error = outcome.error[:300] if outcome.error else outcome.error
     db.add(CheckResult(service_id=service.id, ts=now, ok=outcome.ok, latency_ms=outcome.latency_ms,
-                       status_code=outcome.status_code, error=outcome.error, maintenance=maint))
+                       status_code=outcome.status_code, error=error, maintenance=maint))
     state = await db.get(ServiceState, service.id)
     if state is None:
         state = ServiceState(service_id=service.id, status="unknown", since=now, fail_count=0, quiet=False,
@@ -242,12 +260,12 @@ async def record(db: AsyncSession, service: Service, outcome: Outcome, now: date
     state.latency_ms = outcome.latency_ms
     state.stale = False
     if outcome.status_code is not None:
-        state.redirected_to = outcome.redirected_to
+        state.redirected_to = (outcome.redirected_to or "")[:255] or None
     if outcome.cert_expires:
         _cert_notes(db, service, state, outcome.cert_expires, now)
     if maint:
         # Onderhoud: niets beslissen en niets melden. Na het onderhoud telt het gewoon weer.
-        state.last_error = outcome.error
+        state.last_error = error
         return state
     since = _aware(state.since)
 
@@ -261,7 +279,7 @@ async def record(db: AsyncSession, service: Service, outcome: Outcome, now: date
             state.status, state.since, state.quiet, state.reminded_at = "up", now, False, None
     else:
         state.fail_count += 1
-        state.last_error = outcome.error
+        state.last_error = error
         if state.status == "down":
             await _still_down(db, service, state, outcome, now)
         elif state.fail_count >= down_after(service.check):

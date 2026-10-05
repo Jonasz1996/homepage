@@ -297,7 +297,7 @@ async def pause_check(service_id: int, data: PauseIn, request: Request, sess: Se
                source="auth", service_id=s.id)
     else:
         check.pop("paused", None)
-    s.check = check
+    s.check, s.check_changed_at = check, datetime.now(timezone.utc)
     # Bij pauzeren en hervatten begint de status opnieuw: geen oude "down" die zijn kinderen stil houdt.
     await reset_state(db, s.id)
     await audit(db, request, user, "check_paused" if data.paused else "check_resumed", service=s.name)

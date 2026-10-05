@@ -352,8 +352,9 @@
     else selectPage({ id: (await api('/pages', { method: 'POST', body: data })).id })
     await load()
   }
+  // Met lopende checks erin vraagt verwijderen een recente 2FA (zoals pauzeren).
   const deletePage = (p) => async () => {
-    await api(`/pages/${p.id}`, { method: 'DELETE' })
+    await withReauth(() => api(`/pages/${p.id}`, { method: 'DELETE' }))
     boom(undefined, 1.6)
     await load()
   }
@@ -364,7 +365,7 @@
     await load()
   }
   const deleteGroup = (g) => async () => {
-    await api(`/groups/${g.id}`, { method: 'DELETE' })
+    await withReauth(() => api(`/groups/${g.id}`, { method: 'DELETE' }))
     boom(undefined, 1.4)
     await load()
   }

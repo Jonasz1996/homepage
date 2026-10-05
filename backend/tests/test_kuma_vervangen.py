@@ -1,6 +1,7 @@
 """Het dashboard vervangt Uptime Kuma: strengere checks, meldingen per check, herinneringen, pauzeren en de bewaking
 van het dashboard zelf."""
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -72,7 +73,10 @@ def test_check_wordt_gecontroleerd():
                      ({"type": "dns", "dns_server": "adguard.lan"}, "IP-adres"),
                      ({"type": "container", "portainer_id": 1}, "container"),
                      ({"type": "api", "path": "http://x/y"}, "Pad"),
-                     ({"type": "http", "onbekend": 1}, "onbekend")):
+                     ({"type": "http", "onbekend": 1}, "onbekend"),
+                     ({"type": "http", "method": "HEAD", "keyword": "Jellyfin"}, "HEAD"),
+                     ({"type": "http", "method": "HEAD", "json_path": "ok"}, "HEAD"),
+                     ({"type": "push", "interval": 30}, "60 s")):
         with pytest.raises(ValueError) as e:
             clean_check(bad)
         assert msg in str(e.value), (bad, str(e.value))
@@ -184,12 +188,15 @@ async def test_massastoring_een_melding(authed):
     ids = [await _svc(authed, g, f"s{i}", {"type": "http"}) for i in range(6)]
     agen, db = await _db()
     start = NOW - timedelta(minutes=30)
-    for sid in ids[:4]:
-        await _record(db, sid, [FAIL] * 3, start)
+    # Zoals bij een echte storing van het netwerk: vier checks falen in dezelfde rondes.
+    for rnd in range(3):
+        for sid in ids[:4]:
+            await _record(db, sid, [FAIL], start + timedelta(minutes=rnd))
     titles = await _titles(db)
-    # De eerste drie zakten nog apart (minder dan 60% faalde), de vierde niet meer.
     assert titles.count("Het dashboard bereikt bijna niets") == 1
-    assert "s3 is down" not in titles
+    assert not [t for t in titles if t.endswith("is down")]
+    items = {i["key"]: i for i in (await authed.get("/api/attention")).json()["items"]}
+    assert items["massastoring"]["level"] == "err"
     for sid in ids[:3]:
         await _record(db, sid, [OK], start + timedelta(minutes=10))
     await mass_check(db)
@@ -197,6 +204,83 @@ async def test_massastoring_een_melding(authed):
     assert not (await db.get(AppState, engine.MASS_KEY)).value
     await _record(db, ids[3], [FAIL], start + timedelta(minutes=11))
     assert "s3 is nog down" in await _titles(db)
+    await agen.aclose()
+
+
+async def test_massastoring_telt_gemelde_storingen_niet(authed):
+    """Een pc die meestal uit staat, is al apart gemeld: die mag geen massastoring starten of laten duren."""
+    g = await _group(authed)
+    ids = [await _svc(authed, g, f"s{i}", {"type": "http"}) for i in range(8)]
+    agen, db = await _db()
+    start = NOW - timedelta(hours=2)
+    for sid in ids[:2]:
+        await _record(db, sid, [FAIL] * 3, start)
+    # Eén echte storing erbij: 3 van de 8 falen, maar dat is gewoon "s2 is down".
+    await _record(db, ids[2], [FAIL] * 3, start + timedelta(minutes=10))
+    titles = await _titles(db)
+    assert "s2 is down" in titles and "Het dashboard bereikt bijna niets" not in titles
+    await _record(db, ids[2], [OK], start + timedelta(minutes=20))
+    # Nu wel alles tegelijk (de zes die nog liepen): massastoring.
+    for rnd in range(3):
+        for sid in ids[2:]:
+            await _record(db, sid, [FAIL], start + timedelta(minutes=30 + rnd))
+    assert (await _titles(db)).count("Het dashboard bereikt bijna niets") == 1
+    # Ze herstellen; de twee oude blijven down. Toch voorbij, en een nieuwe storing wordt weer gemeld.
+    for sid in ids[2:]:
+        await _record(db, sid, [OK], start + timedelta(minutes=40))
+    await mass_check(db)
+    await db.commit()
+    assert not (await db.get(AppState, engine.MASS_KEY)).value
+    await _record(db, ids[7], [FAIL] * 3, start + timedelta(minutes=50))
+    assert "s7 is down" in await _titles(db)
+    await agen.aclose()
+
+
+async def test_massastoring_tegelijk_een_melding(authed):
+    """Checks uit dezelfde ronde falen tegelijk, elk in een eigen sessie: toch maar één melding."""
+    g = await _group(authed)
+    ids = [await _svc(authed, g, f"s{i}", {"type": "http"}) for i in range(8)]
+    agen, db = await _db()
+    if db.bind.dialect.name == "sqlite":
+        await agen.aclose()
+        pytest.skip("SQLite heeft één verbinding: tegelijk schrijven kan daar niet")
+    start = NOW - timedelta(minutes=10)
+    for sid in ids:
+        await _record(db, sid, [FAIL, FAIL], start)
+
+    async def fail(sid):
+        a, s = await _db()
+        try:
+            await record(s, await s.get(Service, sid), FAIL, start + timedelta(minutes=3))
+            await s.commit()
+        finally:
+            await a.aclose()
+    await asyncio.gather(*(fail(sid) for sid in ids))
+    assert (await _titles(db)).count("Het dashboard bereikt bijna niets") == 1
+    await agen.aclose()
+
+
+async def test_ouder_met_meldingen_uit_houdt_het_kind_niet_stil(authed):
+    g = await _group(authed)
+    node = await _svc(authed, g, "node", {"type": "ping", "notify": "uit"})
+    plex = await _svc(authed, g, "plex", {"type": "http"}, parent_id=node)
+    agen, db = await _db()
+    start = NOW - timedelta(minutes=10)
+    await _record(db, node, [FAIL] * 3, start)
+    await _record(db, plex, [FAIL] * 3, start)
+    titles = await _titles(db)
+    assert "plex is down" in titles and "node is down" not in titles
+    await agen.aclose()
+
+
+async def test_lange_doorverwijzing_past_in_de_database(authed):
+    g = await _group(authed)
+    sid = await _svc(authed, g, "wiki", {"type": "http"})
+    agen, db = await _db()
+    host = ".".join(["a" * 60] * 5)
+    st = await _record(db, sid, [Outcome(False, 5.0, 302, f"Doorverwezen naar {host} (loginpagina?)", None, host)],
+                       NOW)
+    assert len(st.redirected_to) == 255 and len(st.last_error) == 300
     await agen.aclose()
 
 
@@ -272,7 +356,7 @@ async def test_vastgelopen_checks(authed):
     assert await watchdog.stale_checks(db, NOW) == ["a"]
     await db.commit()
     st = (await authed.get("/api/status")).json()[str(a)]
-    assert st["stale"] is True and st["status"] == "unknown"
+    assert st["stale"] is True and st["status"] == "up"
     assert "De check van a loopt niet meer" in await _titles(db)
     # Nog eens: geen tweede melding. Een nieuw resultaat maakt hem weer gewoon.
     assert await watchdog.stale_checks(db, NOW) == []
@@ -353,4 +437,108 @@ async def test_checklist_dekking(authed):
     assert "backup: push-check zonder adres" in todo and "Cronjob rsync op pve2" in todo
     assert rows["wachter"]["state"] == "none" and rows["webpush"]["state"] == "none"
     assert rows["webpush"]["fix"] == {"window": "webpush"}
+    await agen.aclose()
+
+
+# --- na het nalezen ------------------------------------------------------------------------------------------------
+
+async def test_vastgelopen_check_houdt_zijn_status(authed):
+    """Een check die even niets meldt (herstart van de worker), verliest zijn down niet: daarna volgt nog altijd
+    "weer bereikbaar", en geen tweede "is down"."""
+    g = await _group(authed)
+    a = await _svc(authed, g, "nas", {"type": "http"})
+    b = await _svc(authed, g, "wiki", {"type": "http"})
+    agen, db = await _db()
+    start = NOW - timedelta(minutes=40)
+    await _record(db, a, [FAIL] * 3, start)
+    await _record(db, b, [FAIL] * 3, start)
+    assert sorted(await watchdog.stale_checks(db, NOW)) == ["nas", "wiki"]
+    await db.commit()
+    assert (await db.get(ServiceState, a)).status == "down"
+    await _record(db, a, [OK], NOW)
+    await _record(db, b, [FAIL], NOW)
+    titles = await _titles(db)
+    assert "nas is weer bereikbaar" in titles and titles.count("wiki is down") == 1
+    # Wat de worker nu uitvoert, is niet vastgelopen (na een herstart duurt de eerste ronde even).
+    assert await watchdog.stale_checks(db, NOW + timedelta(hours=1), running={a, b}) == []
+    await agen.aclose()
+
+
+async def test_healthz_met_trage_checks(authed):
+    agen, db = await _db()
+    now = datetime.now(timezone.utc)
+    db.add(AppState(key="worker", value={"at": now.isoformat()}))
+    g = await _group(authed)
+    sid = await _svc(authed, g, "x", {"type": "http", "interval": 900})
+    db.add(CheckResult(service_id=sid, ts=now - timedelta(minutes=10), ok=True))
+    await db.commit()
+    # Elk kwartier een check: 10 minuten zonder resultaat is normaal, 50 niet.
+    assert await watchdog.healthy(db, now)
+    assert not await watchdog.healthy(db, now + timedelta(minutes=40))
+    await agen.aclose()
+
+
+async def test_check_weghalen_vraagt_2fa(authed):
+    """Zonder check of zonder tegel bewaakt het dashboard niets meer: dat is net zo stil als pauzeren."""
+    g = await _group(authed)
+    wiki = await _svc(authed, g, "wiki", {"type": "http"})
+    link = await _svc(authed, g, "link")
+    agen, db = await _db()
+
+    async def stale():
+        await db.execute(update(Session).values(auth_at=NOW - timedelta(hours=1)))
+        await db.commit()
+    await stale()
+    base = {"group_id": g, "name": "wiki", "url": "https://wiki.lan"}
+    r = await authed.patch(f"/api/services/{wiki}", json={**base, "check": {}})
+    assert r.status_code == 403 and r.json()["detail"] == "reauth_required"
+    r = await authed.delete(f"/api/services/{wiki}")
+    assert r.status_code == 403
+    assert (await authed.delete(f"/api/groups/{g}")).status_code == 403
+    # Een tegel zonder check mag gewoon weg.
+    assert (await authed.delete(f"/api/services/{link}")).status_code == 200
+    await _reauth(authed)
+    assert (await authed.patch(f"/api/services/{wiki}", json={**base, "check": {}})).status_code == 200
+    assert "Check verwijderd: wiki" in await _titles(db)
+    # Een oude versie terugzetten die de tegel weghaalt: ook stil.
+    await authed.patch(f"/api/services/{wiki}", json={**base, "check": {"type": "http"}})
+    before = next(r["id"] for r in (await authed.get("/api/revisions")).json() if r["summary"] == "Groep 'G' toegevoegd")
+    await stale()
+    r = await authed.post(f"/api/revisions/{before}/restore")
+    assert r.status_code == 403
+    await _reauth(authed)
+    assert (await authed.delete(f"/api/services/{wiki}")).status_code == 200
+    actions = [a.action for a in (await db.execute(select(AuditLog))).scalars()]
+    assert actions.count("check_silenced") == 2
+    await agen.aclose()
+
+
+async def test_resultaat_van_een_oude_check_telt_niet(authed, monkeypatch):
+    """De check liep nog toen het doel veranderde: dat resultaat hoort niet bij de nieuwe check."""
+    from contextlib import asynccontextmanager
+
+    from app.monitoring import worker as worker_mod
+
+    g = await _group(authed)
+    sid = await _svc(authed, g, "nas", {"type": "http", "down_after": 1})
+
+    @asynccontextmanager
+    async def maker():
+        a, s = await _db()
+        try:
+            yield s
+        finally:
+            await a.aclose()
+
+    async def moved(*_args):
+        r = await authed.patch(f"/api/services/{sid}", json={"group_id": g, "name": "nas", "url": "https://nas2.lan",
+                                                              "check": {"type": "http", "down_after": 1}})
+        assert r.status_code == 200
+        return FAIL
+    monkeypatch.setattr(worker_mod, "check_service", moved)
+    w = worker_mod.Worker(maker)
+    await w.run_one(sid, {"type": "http", "down_after": 1}, "https://nas.lan")
+    agen, db = await _db()
+    assert await db.get(ServiceState, sid) is None
+    assert "nas is down" not in await _titles(db)
     await agen.aclose()

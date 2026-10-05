@@ -44,6 +44,8 @@
   let reqBody = $state(c0.body || '')
   let bodyType = $state(c0.body_type || 'json')
   let headersText = $state(Object.entries(c0.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\n'))
+  // Open als er al iets in staat; daarna beslist de gebruiker (anders klapt het dicht terwijl je typt).
+  let reqOpen = $state(untrack(() => method !== 'GET' || !!headersText.trim()))
   // Container (via een Portainer-tegel) en de API van de tegel zelf.
   let portainerId = $state(c0.portainer_id ?? null)
   let containerName = $state(c0.container || '')
@@ -115,7 +117,7 @@
     const secs = Number(checkTimeout)
     const c = {
       type: t,
-      interval: Math.max(15, Number(checkInterval) || 60),
+      interval: Math.max(checkType === 'push' ? 60 : 15, Number(checkInterval) || 60),
       ...(withTarget && checkTarget.trim() ? { target: checkTarget.trim() } : {}),
       ...(Number(downAfter) !== baseDown(t) ? { down_after: Number(downAfter) } : {}),
       ...(Number(retryInterval) ? { retry_interval: Number(retryInterval) } : {}),
@@ -199,7 +201,14 @@
 
   async function del() {
     if (!confirm(`'${service.name}' verwijderen?`)) return
-    await api(`/services/${service.id}`, { method: 'DELETE' })
+    error = ''
+    try {
+      // Een tegel met een lopende check verwijderen vraagt een recente 2FA (zoals pauzeren).
+      await withReauth(() => api(`/services/${service.id}`, { method: 'DELETE' }))
+    } catch (err) {
+      error = err.message
+      return
+    }
     boom()
     onsaved()
     onclose()
@@ -262,7 +271,7 @@
           </select>
         </div>
         <div>
-          <label class="lbl" for="sf-ci">{checkType === 'push' ? 'Verwacht een signaal elke (seconden)' : 'Interval (seconden)'}</label>
+          <label class="lbl" for="sf-ci">{checkType === 'push' ? 'Verwacht een signaal elke (seconden, min. 60)' : 'Interval (seconden)'}</label>
           <input id="sf-ci" type="text" inputmode="numeric" bind:value={checkInterval} disabled={!checkType} />
         </div>
         {#if !['push', 'container', 'api'].includes(checkType)}
@@ -300,7 +309,7 @@
         <label class="chk"><input type="checkbox" bind:checked={followRedirects} /> doorverwijzingen volgen</label>
         <label class="chk"><input type="checkbox" bind:checked={sameHost} /> down als hij naar een andere host doorverwijst (bv. de loginpagina van Authentik)</label>
         <label class="chk"><input type="checkbox" bind:checked={certNotify} /> melding als het certificaat bijna verloopt</label>
-        <details class="req" open={method !== 'GET' || !!headersText.trim()}>
+        <details class="req" bind:open={reqOpen}>
           <summary>verzoek: methode, body, headers</summary>
           <div class="grid">
             <div>

@@ -142,6 +142,10 @@ class CheckIn(BaseModel):
             raise ValueError("Doel is een hostnaam of IP-adres")
         if self.type == "http" and self.target and not self.target.lower().startswith(("http://", "https://")):
             raise ValueError("Doel voor HTTP begint met http:// of https://")
+        if self.method == "HEAD" and (self.keyword or self.json_path):
+            raise ValueError("Met HEAD komt er geen inhoud: kies GET om op een woord of JSON-veld te controleren")
+        if self.type == "push" and self.interval < 60:
+            raise ValueError("Een push-check verwacht hoogstens elke 60 s een signaal")
         if self.retry_interval and self.retry_interval > self.interval:
             self.retry_interval = None
         return self

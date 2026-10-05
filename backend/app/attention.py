@@ -15,7 +15,7 @@ from .integrations import REGISTRY
 from .integrations.zabbix import RED_FROM
 from .models import AppState, CronJob, Device, MaintenanceWindow, Service, ServiceState, UpdateRun
 from .monitoring import cluster, coverage, planned, restoretest, updates as upd, zabbix as zbx
-from .monitoring.engine import active
+from .monitoring.engine import MASS_KEY, active
 
 ACK_KEY = "attention_ack"
 RANK = {"err": 0, "warn": 1, "info": 2}
@@ -305,6 +305,14 @@ async def homepage(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
         out.append(item("worker", "err", "homepage", "De worker van het dashboard draait niet",
                         f"Zonder worker geen checks, meldingen of back-ups: {worker['why']}. "
                         "In de container: systemctl status homepage-worker.", fix))
+    mass = await _state(db, MASS_KEY)
+    if mass.get("since"):
+        since = _aware(datetime.fromisoformat(mass["since"]))
+        out.append(item("massastoring", "err", "homepage", "Het dashboard bereikt bijna niets",
+                        f"Begon met {mass.get('failing')} van de {mass.get('total')} checks tegelijk mislukt, "
+                        f"{ago(now - since)} geleden. Zolang dit duurt, komt er geen melding per service. Het stopt "
+                        "vanzelf als minder dan 30% van de checks nog faalt.", {"window": "health", "tab": "homepage"},
+                        sig=mass["since"], since=since))
     s = await _state(db, sc.STATE_KEY)
     if s.get("stale"):
         out.append(item("selfbackup", "err", "homepage", "Geen recente back-up van het dashboard",

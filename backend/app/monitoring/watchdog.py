@@ -53,11 +53,14 @@ def _interval(check: dict) -> int:
         return 60
 
 
-async def stale_checks(db: AsyncSession, now: datetime | None = None) -> list[str]:
+async def stale_checks(db: AsyncSession, now: datetime | None = None, running: set[int] | frozenset = frozenset()
+                       ) -> list[str]:
     """Lopende checks zonder recent resultaat: de tegel zou anders op zijn laatste kleur blijven staan (vals groen).
-    Eén melding per check, of één samen als het er veel tegelijk zijn."""
+    Eén melding per check, of één samen als het er veel tegelijk zijn. De status zelf blijft staan (die is van
+    engine.record): zo volgt na een down nog altijd "weer bereikbaar", en geen tweede "is down".
+    running: checks die de worker nu uitvoert (na een herstart kan de eerste ronde even duren)."""
     now = now or datetime.now(timezone.utc)
-    svcs = {s.id: s for s in (await db.execute(select(Service))).scalars() if active(s.check)}
+    svcs = {s.id: s for s in (await db.execute(select(Service))).scalars() if active(s.check) and s.id not in running}
     if not svcs:
         return []
     states = (await db.execute(select(ServiceState).where(ServiceState.service_id.in_(list(svcs))))).scalars()
@@ -69,7 +72,6 @@ async def stale_checks(db: AsyncSession, now: datetime | None = None) -> list[st
         limit = max(timedelta(seconds=3 * _interval(svcs[st.service_id].check)), STALE_MIN)
         if now - last > limit:
             st.stale = True
-            st.status = "unknown"
             names.append(svcs[st.service_id].name)
     if len(names) == 1:
         notify(db, f"De check van {names[0]} loopt niet meer",
@@ -150,18 +152,19 @@ def is_outside(conn: HTTPConnection) -> bool:
 
 
 async def healthy(db: AsyncSession, now: datetime | None = None) -> bool:
-    """Database bereikbaar, worker leeft, en als er checks zijn: er kwam de laatste 5 minuten een resultaat binnen."""
+    """Database bereikbaar, worker leeft, en als er checks zijn: er kwam recent een resultaat binnen (de laatste 5
+    minuten, of drie keer het kortste interval als alle checks trager lopen)."""
     now = now or datetime.now(timezone.utc)
     await db.execute(text("SELECT 1"))
     hb = await db.get(AppState, HEARTBEAT_KEY)
     if not worker_status(hb.value if hb else None, now)["ok"]:
         return False
-    polled = [s for s, c in (await db.execute(select(Service.id, Service.check))).all()
-              if active(c) and c.get("type") != "push"]
+    polled = [c for c, in (await db.execute(select(Service.check))).all() if active(c) and c.get("type") != "push"]
     if not polled:
         return True
+    limit = max(STALE_MIN, timedelta(seconds=3 * min(_interval(c) for c in polled)))
     newest = (await db.execute(select(func.max(CheckResult.ts)))).scalar()
-    return newest is not None and now - _aware(newest) < STALE_MIN
+    return newest is not None and now - _aware(newest) < limit
 
 
 async def healthz(conn: HTTPConnection, db: AsyncSession) -> bool | None:

@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -7,11 +9,23 @@ from ..db import get_db
 from ..deps import audit, current_session, current_user, notify, recent_auth
 from ..layout import load_pages, pages_out, record_revision, restore_snapshot, service_out
 from ..models import ApiConnection, Group, Page, Revision, Service, Session, User
-from ..monitoring.engine import identity, reset_state, silencing
+from ..monitoring.engine import active, identity, reset_state, restarts, silencing
 from ..schemas import GroupIn, OrderIn, PageIn, ServiceIn
 from ..security import decrypt_json, encrypt_json
 
 router = APIRouter(prefix="/api", tags=["layout"])
+
+
+async def _guard_removal(db: AsyncSession, request: Request, sess: Session, user: User, services: list[Service]) -> None:
+    """Een tegel met een lopende check verwijderen legt de bewaking stil, net als pauzeren: dat vraagt een recente 2FA
+    en geeft een melding (ook op je gsm). Anders zou een gestolen sessie de check gewoon weggooien."""
+    names = sorted(s.name for s in services if active(s.check))
+    if not names:
+        return
+    await recent_auth(sess, user)
+    await audit(db, request, user, "check_silenced", what="check verwijderd", services=names[:20])
+    notify(db, f"Check verwijderd: {', '.join(names[:5])}" + (" …" if len(names) > 5 else ""),
+           "Was jij dit niet, kijk dan in ⚿ naar de sessies.", level="warn", source="auth")
 
 
 async def _get(db: AsyncSession, model, obj_id: int):
@@ -56,9 +70,11 @@ async def update_page(page_id: int, data: PageIn, user: User = Depends(current_u
 
 
 @router.delete("/pages/{page_id}")
-async def delete_page(page_id: int, request: Request, user: User = Depends(current_user),
-                      db: AsyncSession = Depends(get_db)):
+async def delete_page(page_id: int, request: Request, sess: Session = Depends(current_session),
+                      user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     page = await _get(db, Page, page_id)
+    await _guard_removal(db, request, sess, user, list((await db.execute(select(Service).join(Group).where(
+        Group.page_id == page_id))).scalars()))
     await db.delete(page)
     await audit(db, request, user, "page_deleted", name=page.name)
     await record_revision(db, user, f"Pagina '{page.name}' verwijderd")
@@ -92,9 +108,11 @@ async def update_group(group_id: int, data: GroupIn, user: User = Depends(curren
 
 
 @router.delete("/groups/{group_id}")
-async def delete_group(group_id: int, request: Request, user: User = Depends(current_user),
-                       db: AsyncSession = Depends(get_db)):
+async def delete_group(group_id: int, request: Request, sess: Session = Depends(current_session),
+                       user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     group = await _get(db, Group, group_id)
+    await _guard_removal(db, request, sess, user, list((await db.execute(select(Service).where(
+        Service.group_id == group_id))).scalars()))
     await db.delete(group)
     await audit(db, request, user, "group_deleted", name=group.name)
     await record_revision(db, user, f"Groep '{group.name}' verwijderd")
@@ -186,6 +204,7 @@ async def update_service(service_id: int, data: ServiceIn, request: Request, ses
                level="warn", source="auth", service_id=service.id)
     if identity(service.check, service.url) != identity(data.check, data.url):
         await reset_state(db, service.id)
+    restarted = restarts(service.check, data.check)
     if data.group_id != service.group_id:
         await _get(db, Group, data.group_id)
         service.position = await _next_position(db, Service.position, Service.group_id, data.group_id)
@@ -193,6 +212,8 @@ async def update_service(service_id: int, data: ServiceIn, request: Request, ses
     skip = {"secrets"} if "notes" in data.model_fields_set else {"secrets", "notes"}
     for k, v in data.model_dump(exclude=skip).items():
         setattr(service, k, v)
+    if restarted:
+        service.check_changed_at = datetime.now(timezone.utc)
     if data.secrets is not None:
         _apply_secrets(service, data.secrets)
         await audit(db, request, user, "service_secrets_changed", service=service.name, keys=sorted(data.secrets))
@@ -216,9 +237,10 @@ async def set_notes(service_id: int, data: NotesIn, user: User = Depends(current
 
 
 @router.delete("/services/{service_id}")
-async def delete_service(service_id: int, request: Request, user: User = Depends(current_user),
-                         db: AsyncSession = Depends(get_db)):
+async def delete_service(service_id: int, request: Request, sess: Session = Depends(current_session),
+                         user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     service = await _get(db, Service, service_id)
+    await _guard_removal(db, request, sess, user, [service])
     await db.delete(service)
     await audit(db, request, user, "service_deleted", name=service.name)
     await record_revision(db, user, f"Service '{service.name}' verwijderd")

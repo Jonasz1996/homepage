@@ -109,6 +109,8 @@ class Service(Base):
     notes: Mapped[str | None] = mapped_column(Text)
     # API uit API-beheer: adres, sleutels en eigen calls komen dan daarvandaan (zie integrations.build).
     api_id: Mapped[int | None] = mapped_column(ForeignKey("api_connections.id", ondelete="SET NULL"), index=True)
+    # Wanneer de check opnieuw begon (ander type of interval, pauze, hervat): een push-check rekent vanaf dan.
+    check_changed_at: Mapped[datetime | None] = mapped_column(default=utcnow)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 

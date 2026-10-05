@@ -113,7 +113,8 @@
       {#if service.check?.type}
         <button class="mini" onclick={() => setPaused(!paused)} title={paused ? 'De check weer laten lopen' : 'Check tijdelijk stilzetten'}>{paused ? '▶ hervatten' : '⏸ pauzeren'}</button>
       {/if}
-      <button class="mini" onclick={() => onedit(service)}>✎ bewerken</button>
+      <!-- Met de pauze zoals ze nu is: anders zet bewaren een net gepauzeerde check stil weer aan (of omgekeerd). -->
+      <button class="mini" onclick={() => onedit(service.check?.type ? { ...service, check: { ...service.check, paused: paused || undefined } } : service)}>✎ bewerken</button>
     </div>
   </div>
   {#if wolMsg}<p class="wol" class:e={wolMsg.startsWith('✕')}>{wolMsg}</p>{/if}

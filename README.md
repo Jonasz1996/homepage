@@ -445,7 +445,8 @@ met GET of POST. Blijft het signaal langer uit dan het interval plus wat speling
 script `status=down`, dan gaat de tegel down en krijg je een melding. Standaard werkt het adres alleen thuis
 (LAN/VPN). Voor een VPS vink je *ook van buitenaf* aan; zet dan in Cloudflare Access of Authentik een uitzondering
 voor `/api/push/*`. Het adres zelf is het geheim: met *nieuw adres* maak je een ander, en het oude werkt meteen niet
-meer. Tokens komen niet in de logs van nginx en uvicorn.
+meer. Tokens komen niet in de logs van nginx en uvicorn in de container. NPM en Cloudflare schrijven het volledige
+adres wel in hun eigen logs: zet in NPM bij de proxy host voor `/api/push/` de access log uit als je dat niet wil.
 
 **Docker-containers**: kies *Docker-container (via Portainer)*, je Portainer-tegel en de container (de lijst komt uit
 Portainer). Down als de container stopt of *unhealthy* is. De tegel hangt dan automatisch af van Portainer: valt

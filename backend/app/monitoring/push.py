@@ -49,15 +49,15 @@ async def evaluate(db: AsyncSession, now: datetime | None = None) -> list[int]:
     Geeft de services terug waarvoor iets weggeschreven werd (voor de zelfherstelregels). Commit niet: dat doet de
     aanroeper, zoals bij de andere stappen van de worker."""
     now = now or datetime.now(timezone.utc)
-    rows = [(sid, check, _aware(updated)) for sid, check, updated in
-            (await db.execute(select(Service.id, Service.check, Service.updated_at))).all()
+    rows = [(sid, check, _aware(changed)) for sid, check, changed in
+            (await db.execute(select(Service.id, Service.check, Service.check_changed_at))).all()
             if isinstance(check, dict) and check.get("type") == "push"]
     if not rows:
         return []
     monitors = {m.service_id: m for m in (await db.execute(
         select(PushMonitor).where(PushMonitor.service_id.in_([r[0] for r in rows])))).scalars()}
     done: list[int] = []
-    for sid, check, updated in rows:
+    for sid, check, changed in rows:
         mon = monitors.get(sid)
         if check.get("paused"):
             # Slagen tijdens de pauze tellen niet, ook niet achteraf als de pauze voorbij is.
@@ -65,17 +65,20 @@ async def evaluate(db: AsyncSession, now: datetime | None = None) -> list[int]:
                 mon.seen_at = mon.last_at
             continue
         interval = interval_of(check)
-        # Na een wijziging van de tegel (nieuw, van type veranderd, pauze voorbij) begint het interval opnieuw.
+        # Begon de check opnieuw (nieuw, van type of interval veranderd, pauze voorbij), dan telt alles vanaf dan:
+        # het interval, en alleen de signalen van daarna (niet wat binnenkwam toen de tegel nog een http-check was).
         if mon is None:
             state = await db.get(ServiceState, sid)
-            ref = _later(_aware(state.last_check) if state else None, updated)
+            ref = _later(_aware(state.last_check) if state else None, changed)
             if ref is None or now - ref >= interval:
                 await record(db, await db.get(Service, sid), Outcome(False, error=NO_ADDRESS), now)
                 done.append(sid)
             continue
 
-        seen = _aware(mon.seen_at)
         last_at, down_at = _aware(mon.last_at), _aware(mon.last_down_at)
+        if last_at and changed and last_at <= changed and (mon.seen_at is None or last_at > _aware(mon.seen_at)):
+            mon.seen_at = mon.last_at
+        seen = _later(_aware(mon.seen_at), changed)
         if last_at and (seen is None or last_at > seen):
             service = await db.get(Service, sid)
             # Eerst een mislukte slag die er sinds de vorige ronde tussen zat, dan de nieuwste (als die goed is).
@@ -92,11 +95,11 @@ async def evaluate(db: AsyncSession, now: datetime | None = None) -> list[int]:
             done.append(sid)
             continue
 
-        since = seen or _aware(mon.created_at)
+        last = _aware(mon.seen_at) or _aware(mon.created_at)
         missed = _aware(mon.missed_at)
-        if (now - _later(since, updated) > interval + grace_of(interval)
+        if (now - _later(last, changed) > interval + grace_of(interval)
                 and (missed is None or now - missed >= interval)):
-            await record(db, await db.get(Service, sid), Outcome(False, error=f"Geen signaal sinds {_local(since)}"),
+            await record(db, await db.get(Service, sid), Outcome(False, error=f"Geen signaal sinds {_local(last)}"),
                          now)
             mon.missed_at = now
             done.append(sid)

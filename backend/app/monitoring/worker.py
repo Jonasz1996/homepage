@@ -19,7 +19,7 @@ from ..models import AppState, Service
 from ..ssh_discovery import SYNC_EVERY, auto_sync
 from . import watchdog
 from .checks import HttpClients, Outcome, check_service
-from .engine import active, cleanup, housekeeping, mass_check, record
+from .engine import active, cleanup, housekeeping, identity, mass_check, record
 from .capacity import SAMPLE_EVERY, check_forecasts, sample
 from .network import NETWORK_EVERY, PUBLIC_IP_EVERY, sample_power, watch_gateways, watch_public_ip, watch_tunnels
 from .report import weekly_notification
@@ -94,6 +94,7 @@ class Worker:
 
     async def run_one(self, sid: int, check: dict, url: str | None) -> None:
         self.running.add(sid)
+        checked = identity(check, url)
         try:
             async with self.sem:
                 try:
@@ -103,7 +104,8 @@ class Worker:
                     outcome = Outcome(False, error=f"Interne fout in de check: {type(e).__name__}")
             async with self.maker() as db:
                 service = await db.get(Service, sid)
-                if service is None or not active(service.check):
+                # Intussen weg, gepauzeerd of naar iets anders gezet: dit resultaat hoort niet meer bij de tegel.
+                if service is None or identity(service.check, service.url) != checked:
                     return
                 state = await record(db, service, outcome)
                 await db.commit()
@@ -128,8 +130,9 @@ class Worker:
         except Exception:
             log.exception("push-checks mislukt")
             return
+        # Op de achtergrond: een herstelactie (SSH-herstart) duurt minuten, en houdt de andere push-checks anders op.
         for sid in ids:
-            await healing.check(self.maker, sid, self.http)
+            self.spawn(healing.check(self.maker, sid, self.http))
 
     async def web_push(self) -> None:
         """Elke tick: nieuwe meldingen naar de gsm('s) die het willen."""
@@ -143,7 +146,7 @@ class Worker:
     async def minute(self) -> None:
         """Elke minuut: massastoring voorbij, checks die niet meer lopen, antwoordt de API nog."""
         await self.step("massastoring", mass_check)
-        await self.step("vastgelopen checks", watchdog.stale_checks)
+        await self.step("vastgelopen checks", lambda db: watchdog.stale_checks(db, running=set(self.running)))
         await self.step("API bereikbaar", lambda db: watchdog.check_api(db, self.http.get(False)))
 
     async def step(self, name: str, fn) -> None:

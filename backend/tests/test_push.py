@@ -329,7 +329,7 @@ async def test_gepauzeerd(authed):
 async def test_geen_push_adres(authed):
     sid = await _service(authed)
     agen, db = await _db()
-    changed = _aware((await db.get(Service, sid)).updated_at)
+    changed = _aware((await db.get(Service, sid)).check_changed_at)
     await agen.aclose()
     # Net aangemaakt: eerst een interval de tijd om het adres te maken.
     assert await _evaluate(changed + timedelta(seconds=30)) == []
@@ -349,3 +349,40 @@ async def test_andere_checks_niet(authed):
     await db.commit()
     await agen.aclose()
     assert await _evaluate(datetime.now(timezone.utc) + timedelta(days=1)) == []
+
+
+async def test_onderhoud_of_een_andere_wijziging_stelt_niets_uit(authed):
+    """Alleen een nieuwe check (type, interval, pauze) begint opnieuw: onderhoud of een notitie schrijft ook naar de
+    tegel, maar een script dat niet meer roept, moet toch opvallen."""
+    sid = await _service(authed)
+    path = await _monitor(authed, sid)
+    await authed.get(path)
+    beat = _aware((await _row(sid)).last_at)
+    await _evaluate(beat + timedelta(seconds=1))
+    agen, db = await _db()
+    s = await db.get(Service, sid)
+    s.maintenance_until, s.updated_at = None, beat + timedelta(seconds=80)
+    await db.commit()
+    await agen.aclose()
+    assert await _evaluate(beat + timedelta(seconds=91)) == [sid]
+
+
+async def test_slagen_van_toen_het_geen_push_was_tellen_niet(authed):
+    sid = await _service(authed)
+    path = await _monitor(authed, sid)
+    await authed.get(path)
+    await _evaluate(_aware((await _row(sid)).last_at) + timedelta(seconds=1))
+    base = {"group_id": (await authed.get(f"/api/services/{sid}")).json()["group_id"], "name": "Back-up VPS"}
+    assert (await authed.patch(f"/api/services/{sid}", json={**base, "check": {"type": "http"}})).status_code == 200
+    await authed.get(f"{path}?status=down&msg=schijf vol")
+    await authed.get(path)
+    assert (await authed.patch(f"/api/services/{sid}", json={**base, "check": {"type": "push", "interval": 60}})
+            ).status_code == 200
+    agen, db = await _db()
+    changed = _aware((await db.get(Service, sid)).check_changed_at)
+    await agen.aclose()
+    assert await _evaluate(changed + timedelta(seconds=1)) == []
+    assert await _results(sid) == [(True, None)]
+    # Daarna gewoon: een nieuwe slag telt, en wie zwijgt gaat down na het interval vanaf de wijziging.
+    assert await _evaluate(changed + timedelta(seconds=91)) == [sid]
+    assert (await _results(sid))[-1][0] is False
