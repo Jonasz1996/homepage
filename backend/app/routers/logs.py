@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import outside
 from ..config import get_settings
 from ..db import get_db
 from ..deps import audit, current_user, recent_auth
@@ -190,7 +191,7 @@ class RolloutIn(BaseModel):
     containers: bool = False
 
 
-@router.post("/rollout")
+@router.post("/rollout", dependencies=[outside.guard("terminal")])
 async def run_rollout(data: RolloutIn, request: Request, user: User = Depends(recent_auth),
                       db: AsyncSession = Depends(get_db)):
     s = get_settings()

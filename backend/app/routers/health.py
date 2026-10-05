@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import outside
 from ..config import get_settings
 from ..db import get_db
 from ..deps import audit, current_user, recent_auth
@@ -226,7 +227,7 @@ class SnapshotRef(BaseModel):
     name: str = Field(max_length=40)
 
 
-@router.post("/snapshots/delete")
+@router.post("/snapshots/delete", dependencies=[outside.guard("acties")])
 async def delete_snapshot(body: SnapshotRef, request: Request, user: User = Depends(recent_auth),
                           db: AsyncSession = Depends(get_db)):
     svc = await db.get(Service, body.service_id)

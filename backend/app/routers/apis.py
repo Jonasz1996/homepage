@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import outside
 from ..db import get_db
 from ..deps import audit, current_session, current_user, recent_auth
 from ..integrations import API_ONLY, REGISTRY, IntegrationError, from_api
@@ -405,12 +406,14 @@ async def order_calls(api_id: int, data: OrderIn, user: User = Depends(current_u
 
 
 @router.post("/{api_id}/try")
-async def try_call(api_id: int, data: TryIn, sess: Session = Depends(current_session), user: User = Depends(current_user),
-                   db: AsyncSession = Depends(get_db)):
+async def try_call(api_id: int, data: TryIn, request: Request, sess: Session = Depends(current_session),
+                   user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """Een (nog niet bewaarde) call uitproberen: het antwoord, en wat de velden en de tabel ervan maken."""
     a = await _conn(db, api_id)
     call = data.call
     if call.method != "GET":
+        if why := await outside.blocked(request, db, "acties"):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, why)
         await recent_auth(sess, user)
     tile = {}
     if data.service_id:

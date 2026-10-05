@@ -22,6 +22,10 @@ export async function api(path, { method = 'GET', body } = {}) {
     const d = data?.detail
     const msg = typeof d === 'string' ? d : Array.isArray(d) ? d.map((x) => x.msg).join(', ') : r.statusText
     if (r.status === 401 && !path.startsWith('/auth/')) window.dispatchEvent(new Event('hp:unauth'))
+    if (r.status === 403 && msg.startsWith('buiten:')) {
+      signalOutside(msg)
+      throw new ApiError(outsideMessage(msg), 403)
+    }
     throw new ApiError(msg, r.status)
   }
   return data
@@ -52,4 +56,12 @@ export async function withReauth(fn) {
     await requestReauth()
     return await fn()
   }
+}
+
+// Buitenmodus: van buitenaf (via Cloudflare of een publiek IP) staan sommige functies uit. De server antwoordt dan
+// "buiten:<functie>"; het dashboard toont een venster om ze voor één uur aan te zetten.
+export const OUTSIDE = { terminal: 'de terminal', updates: 'updates installeren', acties: 'acties', downloads: 'configuraties downloaden' }
+export const outsideMessage = (detail) => `Van buitenaf staat ${OUTSIDE[detail.slice(7)] || detail.slice(7)} uit.`
+export function signalOutside(detail) {
+  window.dispatchEvent(new CustomEvent('hp:outside', { detail: { feature: detail.slice(7) } }))
 }

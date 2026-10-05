@@ -157,6 +157,7 @@
     if (!request || request === handled) return
     handled = request
     load().then(() => {
+      if (request.keys) { modal = { kind: 'keys' }; return }
       const h = hosts.find((x) => x.id === request.hostId)
       if (h) start(h)
     })
@@ -291,7 +292,7 @@
   <HostForm host={modal.host} {keys} {services} {folders} {defaults} onclose={closeModal} onsaved={load}
             onkeys={() => (modal = { kind: 'keys' })} />
 {:else if modal?.kind === 'keys'}
-  <SshKeys {keys} onclose={closeModal} onchanged={load} />
+  <SshKeys {keys} {hosts} onclose={closeModal} onchanged={load} />
 {:else if modal?.kind === 'defaults'}
   <SshDefaults {defaults} {keys} onclose={closeModal} onsaved={(d) => (defaults = d)} />
 {:else if modal?.kind === 'discover'}
