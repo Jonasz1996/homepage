@@ -246,6 +246,7 @@
       up: active.filter((s) => s.status === 'up').length,
       down: active.filter((s) => s.status === 'down').length,
       maint: all.length - active.length,
+      paused: active.filter((s) => s.paused).length,
     }
   })
   let greeting = $derived.by(() => {
@@ -576,7 +577,7 @@
         <p class="hint">
           {date}
           {#if summary.up + summary.down > 0}
-            {' · '}<span class="ok">{summary.up} up</span>{#if summary.down}{' · '}<span class="down">{summary.down} down</span>{/if}{#if summary.maint}{' · '}<span class="maint">{summary.maint} in onderhoud</span>{/if}
+            {' · '}<span class="ok">{summary.up} up</span>{#if summary.down}{' · '}<span class="down">{summary.down} down</span>{/if}{#if summary.maint}{' · '}<span class="maint">{summary.maint} in onderhoud</span>{/if}{#if summary.paused}{' · '}<span class="maint">{summary.paused} gepauzeerd</span>{/if}
           {/if}<span class="cur"></span>
         </p>
       </div>
