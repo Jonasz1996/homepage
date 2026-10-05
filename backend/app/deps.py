@@ -125,8 +125,11 @@ def event(db: AsyncSession, kind: str, title: str, body: str | None = None, leve
 
 
 def notify(db: AsyncSession, title: str, body: str | None = None, level: str = "info",
-           source: str = "system", service_id: int | None = None, data: dict | None = None) -> None:
-    """Melding in het meldingencentrum, en ook op de tijdlijn (behalve het weekrapport zelf)."""
-    db.add(Notification(title=title, body=body, level=level, source=source, service_id=service_id))
+           source: str = "system", service_id: int | None = None, data: dict | None = None,
+           push: bool = True) -> None:
+    """Melding in het meldingencentrum, en ook op de tijdlijn (behalve het weekrapport zelf).
+    push=False: niet naar de gsm (web push), alleen hier."""
+    db.add(Notification(title=title, body=body, level=level, source=source, service_id=service_id,
+                        pushed_at=None if push else datetime.now(timezone.utc)))
     if source != "rapport":
         event(db, EVENT_KIND.get(source, "melding"), title, body, level, service_id, data)

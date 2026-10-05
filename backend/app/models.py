@@ -144,6 +144,9 @@ class Notification(Base):
         # Het aantal ongelezen meldingen (badge) wordt bij elke poll geteld: een kleine index op alleen die rijen.
         Index("ix_notifications_unread", "id", postgresql_where=text("read_at IS NULL"),
               sqlite_where=text("read_at IS NULL")),
+        # Nog niet naar de gsm gestuurd (web push): de worker zoekt alleen die rijen.
+        Index("ix_notifications_unpushed", "id", postgresql_where=text("pushed_at IS NULL"),
+              sqlite_where=text("pushed_at IS NULL")),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -155,6 +158,8 @@ class Notification(Base):
     source: Mapped[str] = mapped_column(String(40), default="system")
     service_id: Mapped[int | None] = mapped_column(ForeignKey("services.id", ondelete="SET NULL"), index=True)
     read_at: Mapped[datetime | None]
+    # Wanneer de worker hem naar de gsm('s) stuurde (web push); meteen gezet als hij daar niet heen moet.
+    pushed_at: Mapped[datetime | None]
 
 
 class CheckResult(Base):
@@ -190,6 +195,12 @@ class ServiceState(Base):
     cert_expires_at: Mapped[datetime | None]
     # Laatst gemelde drempel voor het certificaat (14 of 3 dagen), 0 = nog niets gemeld.
     cert_notified: Mapped[int] = mapped_column(SmallInteger, default=0, server_default="0")
+    # Laatste herinnering "nog altijd down".
+    reminded_at: Mapped[datetime | None]
+    # Een http-check die op een andere host eindigde (bv. de loginpagina van Authentik): die host.
+    redirected_to: Mapped[str | None] = mapped_column(String(255))
+    # De check loopt niet meer (al lang geen resultaat): één keer gemeld.
+    stale: Mapped[bool] = mapped_column(Boolean, default=False, server_default=sa_false())
 
 
 class SshKey(Base):
