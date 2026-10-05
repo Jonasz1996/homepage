@@ -3,6 +3,22 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 27,
+    datum: '2026-10-05',
+    titel: 'Back-ups dubbel en een sterkere cluster',
+    items: [
+      'hw → back-ups: per VM/CT in welke back-upjob hij zit, op hoeveel PBS\'en een kopie staat, hoe oud de nieuwste is en wanneer hij hersteld getest is. Rood als hij in geen enkele job zit of nergens een kopie heeft, oranje als hij maar op één PBS staat.',
+      'PBS-sync: het dashboard stelt voor welke PBS elke nacht een kopie ophaalt van de andere, op welk uur, en of het past. Commando\'s om te plakken, of één knop die het via SSH zelf instelt.',
+      'hw → cluster toont de Proxmox-versie per node en waarschuwt als ze verschillen.',
+      'Een even aantal stemmen zonder QDevice: het tabblad cluster legt uit waarom dat riskant is en hoe je in drie commando\'s een QDevice op de PBS-Pi zet.',
+    ],
+    instellen: [
+      'Open hw → back-ups en los op wat rood staat.',
+      'Neem de voorgestelde PBS-sync over (commando\'s of de knop; voor de knop moeten beide PBS\'en als SSH-host in de terminal staan).',
+      'Optioneel: een QDevice op de PBS-Pi (hw → cluster).',
+    ],
+  },
+  {
     nr: 26,
     datum: '2026-10-05',
     titel: 'Aandacht en instellingen op één plek',

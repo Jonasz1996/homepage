@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, model_validator
@@ -132,8 +133,12 @@ _run: asyncio.Task | None = None
 async def cluster_status(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     st = await db.get(AppState, cluster.STATE_KEY)
     value = dict(st.value) if st else {}
+    # Kandidaten voor de QDevice: een PBS staat los van de cluster en draait toch altijd.
+    pbs = [{"name": s.name, "host": urlsplit(s.url or "").hostname}
+           for s in (await db.execute(select(Service).where(Service.type == "proxmoxbackupserver")
+                                      .order_by(Service.name))).scalars()]
     return {"at": value.get("at"), "items": value.get("items", []), "summary": cluster.summary(value),
-            "running": bool(_run and not _run.done())}
+            "running": bool(_run and not _run.done()), "qnetd": [p for p in pbs if p["host"]]}
 
 
 async def _bg(factory) -> None:

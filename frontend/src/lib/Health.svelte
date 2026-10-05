@@ -1,4 +1,5 @@
 <script>
+  import Backups from './Backups.svelte'
   import Cluster from './Cluster.svelte'
   import SecurityCheck from './SecurityCheck.svelte'
   import { onMount, untrack } from 'svelte'
@@ -131,10 +132,11 @@
     </div>
 
     <div class="tabs">
-      {#each [['schijven', 'schijven'], ['temperatuur', 'temperatuur'], ['snapshots', 'snapshots'], ['domeinen', 'domeinen'], ['cluster', 'cluster'], ['homepage', 'homepage zelf'], ['beveiliging', 'beveiliging']] as [k, label]}
+      {#each [['schijven', 'schijven'], ['temperatuur', 'temperatuur'], ['snapshots', 'snapshots'], ['domeinen', 'domeinen'], ['cluster', 'cluster'], ['backups', 'back-ups'], ['homepage', 'homepage zelf'], ['beveiliging', 'beveiliging']] as [k, label]}
         <button class="mini" class:on={tab === k} onclick={() => (tab = k)}>{label}
           {#if k === 'snapshots' && s?.old_snapshots}<b class="n w">{s.old_snapshots}</b>{/if}
           {#if k === 'domeinen' && s?.domains_soon}<b class="n w">{s.domains_soon}</b>{/if}
+          {#if k === 'backups' && s?.backups?.err + s?.backups?.warn}<b class="n" class:e={s.backups.err} class:w={!s.backups.err}>{s.backups.err || s.backups.warn}</b>{/if}
           {#if k === 'cluster' && s?.cluster?.err + s?.cluster?.warn}<b class="n" class:e={s.cluster.err} class:w={!s.cluster.err}>{s.cluster.err + s.cluster.warn}</b>{/if}
           {#if k === 'homepage' && s?.problems?.length}<b class="n e">{s.problems.length}</b>{/if}
         </button>
@@ -296,6 +298,8 @@
 
     {:else if tab === 'cluster'}
       <Cluster />
+    {:else if tab === 'backups'}
+      <Backups {onfix} />
     {:else if tab === 'beveiliging'}
       <SecurityCheck onfix={(fix) => (fix.window === 'health' ? (tab = fix.tab) : onfix?.(fix))} />
     {:else}
