@@ -367,7 +367,7 @@ async def test_vastgelopen_checks(authed):
 
 async def test_healthz(authed, monkeypatch):
     monkeypatch.setattr(watchdog, "_healthz", None)
-    monkeypatch.setattr(watchdog, "_seen_saved", 0.0)
+    monkeypatch.setattr(watchdog, "_seen_saved", None)
     r = await authed.get("/api/healthz")
     assert r.status_code == 503 and r.json() == {"ok": False}
     agen, db = await _db()
@@ -388,6 +388,18 @@ async def test_healthz(authed, monkeypatch):
     assert seen and seen.value["at"]
     rows = {r["key"]: r for grp in (await authed.get("/api/attention/setup")).json()["groups"] for r in grp["rows"]}
     assert rows["wachter"]["state"] == "ok"
+    await agen.aclose()
+
+
+async def test_healthz_kort_na_het_opstarten(authed, monkeypatch):
+    """De klok van time.monotonic begint bij het opstarten van de machine: ook als die nog geen 5 minuten aan staat,
+    onthoudt het dashboard dat Zabbix kijkt."""
+    monkeypatch.setattr(watchdog, "_healthz", None)
+    monkeypatch.setattr(watchdog, "_seen_saved", None)
+    monkeypatch.setattr(watchdog.time, "monotonic", lambda: 100.0)
+    await authed.get("/api/healthz")
+    agen, db = await _db()
+    assert await db.get(AppState, watchdog.SEEN_KEY)
     await agen.aclose()
 
 

@@ -35,7 +35,7 @@ WATCH_EVERY = 60
 HEALTHZ_TTL = 5
 _api_fails = 0
 _healthz: tuple[float, bool, object] | None = None
-_seen_saved = 0.0
+_seen_saved: float | None = None
 
 
 def _local(dt: datetime) -> str:
@@ -179,8 +179,9 @@ async def healthz(conn: HTTPConnection, db: AsyncSession) -> bool | None:
         return hit[1]
     try:
         ok = await healthy(db)
-        # Onthouden dat iets (Zabbix) dit opvraagt: de instellingen-checklist toont dat. Hoogstens elke 5 min.
-        if time.monotonic() - _seen_saved > 300:
+        # Onthouden dat iets (Zabbix) dit opvraagt: de instellingen-checklist toont dat. Hoogstens elke 5 min (de
+        # eerste keer altijd: de klok begint bij het opstarten van de machine, en die kan nog geen 5 min aan staan).
+        if _seen_saved is None or time.monotonic() - _seen_saved > 300:
             _seen_saved = time.monotonic()
             st = await ensure_state(db, SEEN_KEY, {})
             st.value = {"at": datetime.now(timezone.utc).isoformat(), "ip": conn.client.host if conn.client else None}
