@@ -1,8 +1,9 @@
 <script>
   import { onMount } from 'svelte'
   import { api } from './api.js'
+  import CopyCmd from './CopyCmd.svelte'
 
-  // Clusterstatus van Proxmox: quorum, nodes, HA-resources en replicatie.
+  // Clusterstatus van Proxmox: quorum, nodes, Proxmox-versie per node, stemmen en QDevice, HA-resources en replicatie.
   let data = $state(null)
   let error = $state('')
   let busy = $state(false)
@@ -30,13 +31,34 @@
     return m < 60 ? `${Math.max(m, 0)} min geleden` : `${Math.floor(m / 60)} u geleden`
   }
   const sync = (t) => (t ? new Date(t * 1000).toLocaleString('nl-BE', { dateStyle: 'short', timeStyle: 'short' }) : '—')
+  const release = (v) => (v || '').split('.').slice(0, 2).join('.')
+  // Welke releases (8.2, 8.3) afwijken van wat de meeste nodes draaien.
+  function odd(c) {
+    const n = {}
+    for (const x of c.nodes) if (x.version) n[release(x.version)] = (n[release(x.version)] || 0) + 1
+    const keys = Object.keys(n)
+    if (keys.length < 2) return new Set()
+    const most = keys.sort((a, b) => n[b] - n[a])[0]
+    return new Set(keys.filter((k) => k !== most))
+  }
+  function votes(c) {
+    const nodes = c.nodes.reduce((t, n) => t + (n.votes || 1), 0)
+    const total = nodes + (c.qdevice?.state ? 1 : 0)
+    return { nodes, total, quorum: Math.floor(total / 2) + 1 }
+  }
+  // Waar corosync-qnetd komt: bij voorkeur de PBS op de Pi (draait altijd, staat los van de cluster).
+  let qhost = $state('')
+  $effect(() => {
+    if (!qhost && data?.qnetd?.length) qhost = (data.qnetd.find((q) => /pi/i.test(q.name)) || data.qnetd[0]).host
+  })
   const HA = { started: 'g', stopped: '', ignored: '', disabled: '', request_stop: 'w', migrate: 'w', relocate: 'w',
                error: 'e', fence: 'e', freeze: 'w', recovery: 'e' }
 </script>
 
 <div class="head">
-  <span class="hint">Quorum, welke nodes corosync ziet, HA-resources en replicatie, elke 2 minuten via de Proxmox-API.
-    Een melding als de cluster zijn quorum verliest, een node wegvalt, een HA-resource in error staat of een replicatie mislukt.</span>
+  <span class="hint">Quorum, welke nodes corosync ziet, de Proxmox-versie per node, de stemmen, HA-resources en replicatie,
+    elke 2 minuten via de Proxmox-API. Een melding als de cluster zijn quorum verliest, een node wegvalt, nodes een andere
+    Proxmox-versie draaien, de QDevice wegvalt, een HA-resource in error staat of een replicatie mislukt.</span>
   <span class="when">{busy ? 'bezig…' : data?.at ? `bekeken ${ago(data.at)}` : ''}</span>
   <button class="mini" disabled={busy} onclick={refresh}>⟳ nu</button>
 </div>
@@ -62,9 +84,54 @@
       {#if c.nodes.length}
         <div class="nodes">
           {#each c.nodes as n (n.name)}
-            <span class="node" class:off={!n.online} title={n.ip || ''}><i class="dot" class:on={n.online}></i>{n.name}</span>
+            <span class="node" class:off={!n.online} class:odd={odd(c).has(release(n.version))}
+                  title={[n.ip, n.version && `Proxmox ${n.version}`].filter(Boolean).join(' · ')}>
+              <i class="dot" class:on={n.online}></i>{n.name}{#if n.version}<small>{n.version}</small>{/if}
+            </span>
           {/each}
         </div>
+        {#if odd(c).size}<p class="w small">Niet alle nodes draaien dezelfde Proxmox-versie. Breng ze via apt op gelijke
+          hoogte; een cluster met gemengde versies kan bij migratie of HA rare fouten geven.</p>{/if}
+      {/if}
+      {#if c.cluster && c.qdevice !== undefined && c.qdevice !== null}
+        {@const v = votes(c)}
+        <div class="votes">
+          <span class="lbl">Stemmen</span>
+          <span>{v.total} stemmen, quorum bij {v.quorum}</span>
+          {#if c.qdevice.state}
+            <span class="pill" class:lv-ok={c.qdevice.state.toLowerCase() === 'connected'}
+                  class:lv-err={c.qdevice.state.toLowerCase() !== 'connected'}>QDevice {c.qdevice.host || ''}: {c.qdevice.state}</span>
+          {:else if v.nodes % 2 === 0}
+            <span class="pill w">geen QDevice</span>
+          {:else}
+            <span class="pill">oneven, geen QDevice nodig</span>
+          {/if}
+        </div>
+        {#if !c.qdevice.state && v.nodes % 2 === 0}
+          <details class="qd">
+            <summary>Waarom een QDevice, en hoe</summary>
+            <p>Met {v.nodes} stemmen heeft de cluster er {v.quorum} nodig. Vallen er {v.nodes / 2} nodes uit (bijvoorbeeld een
+              HP die 's nachts uit staat en een tweede die herstart voor een update), dan stopt de hele cluster: geen VM
+              starten, geen back-up, geen instelling wijzigen. Een QDevice is een kleine dienst op een machine buiten de
+              cluster die één extra stem geeft, zodat het totaal oneven wordt.</p>
+            <p>De PBS op de Pi is daar ideaal voor: die draait altijd en is geen lid van de cluster. Neem niet de PBS-VM,
+              want die draait op de cluster zelf.</p>
+            {#if data.qnetd?.length > 1}
+              <label class="pick">Machine voor de QDevice
+                <select bind:value={qhost}>{#each data.qnetd as q (q.host)}<option value={q.host}>{q.name} ({q.host})</option>{/each}</select>
+              </label>
+            {/if}
+            <ol>
+              <li>Op {data.qnetd?.find((q) => q.host === qhost)?.name || 'de Pi'}: <CopyCmd cmd="apt install -y corosync-qnetd" /></li>
+              <li>Op elke node van de cluster ({c.nodes.map((n) => n.name).join(', ')}): <CopyCmd cmd="apt install -y corosync-qdevice" /></li>
+              <li>Op één node. Het vraagt eenmalig het root-wachtwoord van de Pi, dus root moet daar via SSH met een wachtwoord
+                mogen inloggen (PermitRootLogin yes, achteraf mag dat weer uit):
+                <CopyCmd cmd={`pvecm qdevice setup ${qhost || '<IP van de Pi>'}`} /></li>
+              <li>Controle: <CopyCmd cmd="pvecm status" /> toont dan een regel Qdevice. Hier staat binnen 2 minuten
+                "QDevice: Connected".</li>
+            </ol>
+          </details>
+        {/if}
       {/if}
       {#if c.ha.length}
         <span class="lbl">HA</span>
@@ -113,6 +180,18 @@
   .nodes { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 6px }
   .node { font-size: 12px; padding: 2px 8px; border-radius: 8px; border: 1px solid var(--line-2); display: flex; gap: 6px; align-items: center }
   .node.off { color: var(--err); border-color: rgba(255, 110, 110, .4) }
+  .node small { color: var(--muted); font-size: 10.5px }
+  .node.odd small { color: var(--mid) }
+  .node.odd { border-color: var(--mid) }
+  .votes { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; margin: 4px 0 }
+  .votes .lbl { margin: 0 }
+  .pill.w { color: var(--mid) }
+  .qd { font-size: 12px; margin: 4px 0 8px; border: 1px dashed var(--line-2); border-radius: 8px; padding: 6px 10px }
+  .qd summary { cursor: pointer; color: var(--mid) }
+  .qd p { margin: 6px 0; line-height: 1.5 }
+  .qd ol { margin: 6px 0; padding-left: 18px }
+  .qd li { margin: 6px 0 }
+  .pick { display: flex; gap: 8px; align-items: center; margin: 6px 0 }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--err) }
   .dot.on { background: var(--ok) }
   .tbl { width: 100%; border-collapse: collapse; font-size: 12px }

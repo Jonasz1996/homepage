@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .health import scan as hw, security
 from .integrations import IntegrationError, build
 from .models import AppState, CronJob, LogEntry, Service, SshHost, WebhookSource
-from .monitoring import cluster, configs, devices, restoretest, upgrade, zabbix as zbx
+from .monitoring import cluster, configs, coverage, devices, pbssync, restoretest, upgrade, zabbix as zbx
 from .ssh_login import defaults as ssh_defaults
 from .ssh_pin import STATE_KEY as PIN_KEY
 
@@ -130,6 +130,51 @@ async def restore(db: AsyncSession) -> dict:
                    [f"Bij {last.get('step')}: {last.get('error')}"], fix, optional=True)
     return row("restoretest", "proxmox", title, "ok", f"Aan, {when}; " + ("laatste test geslaagd." if last else
                "nog niet gelopen. Probeer ▶ nu testen."), fix=fix, optional=True)
+
+
+async def homelab_rows(db: AsyncSession, has_pbs: bool) -> list[dict]:
+    """Twee PBS'en die elkaar aanvullen, en een QDevice bij een even aantal stemmen."""
+    out = []
+    fix = {"window": "health", "tab": "backups"}
+    cov = await _state(db, coverage.STATE_KEY)
+    title = "PBS-sync: elke back-up op twee machines"
+    if has_pbs and not cov.get("at"):
+        out.append(row("pbssync", "proxmox", title, "half", "Nog niet bekeken: de worker doet dat elk half uur.",
+                       ["Of open hw → back-ups en druk op ⟳ nu."], fix))
+    elif has_pbs:
+        prop = pbssync.propose(cov)
+        if prop["state"] == "bestaat" or (prop["state"] == "te-weinig" and prop["links"]):
+            out.append(row("pbssync", "proxmox", title, "ok", "; ".join(f"{x['from']} → {x['to']} ({x['schedule'] or 'geen uur'})"
+                                                                         for x in prop["links"]) + ".", fix=fix))
+        elif prop["state"] == "voorstel":
+            p = prop["plan"]
+            names = {x["service_id"]: x["name"] for x in prop["pbs"]}
+            out.append(row("pbssync", "proxmox", title, "half", "Twee PBS'en, maar geen sync: elke back-up staat maar op "
+                           "één machine.", [f"hw → back-ups: {names.get(p['target_id'])} laat elke nacht om {p['schedule']} een "
+                           f"kopie ophalen van {names.get(p['source_id'])}. Commando's om te plakken, of één knop via SSH."],
+                           fix))
+        else:
+            out.append(row("pbssync", "proxmox", title, "none", "Er werkt maar één PBS-tegel, dus geen tweede kopie.",
+                           ["Voeg je tweede PBS toe als tegel (type proxmoxbackupserver), daarna stelt hw → back-ups de "
+                            "sync voor."], fix))
+    for c in (await _state(db, cluster.STATE_KEY)).get("items") or []:
+        q = c.get("qdevice")
+        if not c.get("cluster") or q is None:
+            continue
+        votes = sum(n.get("votes", 1) for n in c.get("nodes") or [])
+        title, cfix = f"QDevice voor cluster {c['cluster']}", {"window": "health", "tab": "cluster"}
+        if q and (q.get("state") or "").lower() == "connected":
+            out.append(row(f"qdevice:{c['cluster']}", "proxmox", title, "ok", f"Verbonden met {q.get('host')}: "
+                           f"{votes + 1} stemmen.", fix=cfix))
+        elif q:
+            out.append(row(f"qdevice:{c['cluster']}", "proxmox", title, "half", f"Ingesteld maar {q.get('state')}.",
+                           [f"Kijk op {q.get('host') or 'de QDevice-machine'} of corosync-qnetd draait "
+                            "(systemctl status corosync-qnetd)."], cfix))
+        elif votes % 2 == 0:
+            out.append(row(f"qdevice:{c['cluster']}", "proxmox", title, "half", f"{votes} stemmen: vallen er {votes // 2} "
+                           "nodes uit, dan stopt de hele cluster.", ["hw → cluster legt uit hoe je een QDevice op de "
+                           "PBS-Pi zet (drie commando's)."], cfix))
+    return out
 
 
 async def opnsense(db: AsyncSession, svcs: list[Service], results: dict[int, dict]) -> dict:
@@ -373,6 +418,7 @@ async def run(db: AsyncSession, clients, results: dict[int, dict]) -> dict:
                      ["Token in PBS (Configuration → Access Control → API Token) met de rol DatastoreAudit, in "
                       "API-beheer (README)."], "Back-ups, verify en sync worden gevolgd."),
         await restore(db),
+        *await homelab_rows(db, bool(of("proxmoxbackupserver"))),
         await opnsense(db, of("opnsense"), results),
         _integration("npm", "netwerk", "Nginx Proxy Manager", of("npm"), results,
                      "Nog geen NPM-tegel: je proxy hosts kan je niet als tegels importeren en er is geen kopie van.",

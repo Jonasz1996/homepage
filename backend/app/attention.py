@@ -14,7 +14,7 @@ from .health import domains as dom, scan as hw, security, selfcheck as sc, snaps
 from .integrations import REGISTRY
 from .integrations.zabbix import RED_FROM
 from .models import AppState, CronJob, Device, MaintenanceWindow, Service, ServiceState, UpdateRun
-from .monitoring import cluster, planned, restoretest, updates as upd, zabbix as zbx
+from .monitoring import cluster, coverage, planned, restoretest, updates as upd, zabbix as zbx
 
 ACK_KEY = "attention_ack"
 RANK = {"err": 0, "warn": 1, "info": 2}
@@ -174,6 +174,30 @@ async def backups(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
         out.append(item("restoretest:opruimen", "warn", "back-ups", f"Test-CT {last.get('vmid')} niet opgeruimd",
                         f"{last['cleanup_error']}. Verwijder hem zelf in Proxmox.", {"window": "restoretest"},
                         sig=rt.get("last_at")))
+    return out + await backup_coverage(db)
+
+
+async def backup_coverage(db: AsyncSession) -> list[dict]:
+    """Per VM/CT zonder back-up of buiten elke job een punt; wie maar op één PBS staat, samen in één punt."""
+    out, single = [], []
+    fix = {"window": "health", "tab": "backups"}
+    for c in (await _state(db, coverage.STATE_KEY)).get("clusters") or []:
+        for r in c["rows"]:
+            if r["level"] == "ok":
+                continue
+            if r["level"] == "warn" and r["pbs_count"] == 1 and r["jobs"]:
+                single.append(r)
+                continue
+            what = f"{r['name']} ({r['type'].upper()} {r['vmid']})"
+            out.append(item(f"cov:{r['vmid']}", r["level"], "back-ups", f"{what} {r['why']}",
+                            "Staat uit, daarom niet rood." if r["stopped"] and r["level"] == "warn" else "", fix,
+                            sig=r["why"]))
+    if single:
+        where = sorted({r["copies"][0]["pbs"] for r in single})
+        what = "VM/CT's" if len(single) != 1 else "VM/CT"
+        out.append(item("cov:single", "warn", "back-ups", f"{len(single)} {what} maar op één PBS",
+                        f"Alleen op {', '.join(where)}. Een sync tussen je twee PBS'en zet ze in één keer dubbel.", fix,
+                        sig=str(len(single))))
     return out
 
 

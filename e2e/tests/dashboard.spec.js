@@ -119,6 +119,15 @@ test('aandacht: wat nu mis is en de instellingen-checklist', async () => {
   await expect(win).toHaveCount(0)
 })
 
+test('hw: back-ups en cluster zonder Proxmox-tegel', async () => {
+  await page.locator('button.mini[title^="Gezondheid"]').click()
+  await page.locator('.tabs button', { hasText: 'back-ups' }).click()
+  await expect(page.getByText('Nog geen gegevens.')).toBeVisible()
+  await page.locator('.tabs button', { hasText: 'cluster' }).click()
+  await expect(page.getByText('Nog geen gegevens.')).toBeVisible()
+  await page.getByRole('button', { name: 'Gezondheid sluiten' }).click()
+})
+
 test('gsm: knoppen achter het menu', async () => {
   await page.setViewportSize({ width: 390, height: 844 })
   const menu = page.getByRole('button', { name: 'Menu' })
