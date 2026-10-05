@@ -584,3 +584,30 @@ class ApiCall(Base):
     position: Mapped[int] = mapped_column(Integer, default=0)
 
     connection: Mapped[ApiConnection] = relationship(back_populates="calls")
+
+
+class PushMonitor(Base):
+    """Push-monitor (zoals in Uptime Kuma): een script roept een geheim adres aan. Blijft dat uit, dan is de service
+    down. De API schrijft alleen de laatste slag hier weg; de worker beslist (en is zo de enige die ServiceState
+    bijwerkt)."""
+
+    __tablename__ = "push_monitors"
+
+    service_id: Mapped[int] = mapped_column(ForeignKey("services.id", ondelete="CASCADE"), primary_key=True)
+    # Zoekindex: sha256 van het token; het token zelf staat versleuteld zodat het adres opnieuw te tonen is.
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    token: Mapped[str] = mapped_column(Text)
+    # Ook aanvaarden via Cloudflare (van buitenaf), bv. voor een VPS.
+    outside: Mapped[bool] = mapped_column(Boolean, default=False, server_default=sa_false())
+    last_at: Mapped[datetime | None]
+    last_ok: Mapped[bool | None] = mapped_column(Boolean)
+    last_msg: Mapped[str | None] = mapped_column(String(300))
+    last_ping: Mapped[float | None] = mapped_column(Float)
+    # Laatste slag met status=down: die mag niet verloren gaan als er vlak daarna een goede volgt.
+    last_down_at: Mapped[datetime | None]
+    last_down_msg: Mapped[str | None] = mapped_column(String(300))
+    # Tot waar de worker de slagen verwerkt heeft, en wanneer hij voor het laatst "geen signaal" schreef.
+    seen_at: Mapped[datetime | None]
+    missed_at: Mapped[datetime | None]
+    count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)

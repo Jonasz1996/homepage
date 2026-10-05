@@ -46,7 +46,7 @@ async def csrf_guard(conn: HTTPConnection) -> None:
         return
     request = conn
     # Webhooks komen van andere tools (Proxmox, Uptime Kuma, ...): het geheime adres is daar de beveiliging.
-    if request.scope["path"].startswith("/api/hooks/"):
+    if request.scope["path"].startswith(("/api/hooks/", "/api/push/")):
         return
     if request.scope["method"] in UNSAFE and request.headers.get(CSRF_HEADER) != "homepage":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "CSRF-header ontbreekt")
