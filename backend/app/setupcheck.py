@@ -321,13 +321,19 @@ async def routes_row(db: AsyncSession, npm: list[Service]) -> dict:
         return row(key, "monitoring", title, "half", "De proxy hosts zijn nog niet opgehaald: de worker doet dat elke "
                    "5 minuten.", fix=fix)
     todo = [f"NPM: {e}" for e in o["errors"]]
-    if o["blocked"]:
-        tiles = [t for b in o["blocked"] for t in b["tiles"]]
+    walled = [b for b in o["blocked"] if not b["refused"]]
+    refused = [b for b in o["blocked"] if b["refused"]]
+    if walled:
+        tiles = [t for b in walled for t in b["tiles"]]
         todo.append(f"{len(tiles)} tegel{'s' if len(tiles) != 1 else ''} gaan nog door NPM omdat het dashboard de "
-                    f"server niet bereikt: {_list([b['endpoint'] for b in o['blocked']], 6)}. Laat in OPNsense het "
+                    f"server niet bereikt: {_list([b['endpoint'] for b in walled], 6)}. Laat in OPNsense het "
                     "dashboard naar die poorten toe (net → firewall), en klik dan op de NPM-tegel → rechtstreeks → "
                     "nu vernieuwen.")
         fix = {"window": "net", "tab": "firewall"}
+    if refused:
+        todo.append(f"{_list([b['endpoint'] for b in refused], 6)} weigert de verbinding (de server antwoordt, maar "
+                    "niets luistert op die poort): staat de service uit, of luistert ze op een andere poort dan in "
+                    "NPM? Tot dan gaan die checks door NPM.")
     if not any(active(s.check) for s in npm):
         todo.append("De NPM-tegel heeft zelf geen check: valt NPM uit, dan zie je dat niet meer op je andere tegels. "
                     "✎ bewerken → NPM-tegel → Monitoring: een http-check op het adres van NPM.")

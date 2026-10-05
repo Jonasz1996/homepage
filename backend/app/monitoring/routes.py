@@ -18,6 +18,7 @@ het eruit alsof het via NPM komt. De link van de tegel blijft de naam.
 import asyncio
 import ipaddress
 import logging
+import re
 import socket
 import time
 from dataclasses import dataclass
@@ -37,10 +38,13 @@ from .checks import target_for
 log = logging.getLogger("homepage.routes")
 
 KEY = "npm_routes"
+# De schakelaar op de NPM-tegel: {"enabled": bool}.
+KEY_ON = "npm_routes_aan"
 REFRESH_EVERY = 300
 # Een doel dat werkte, af en toe opnieuw proberen; een doel dat niet werkte, bij elke ronde.
 PROBE_OK_EVERY = 3600
 PROBE_TIMEOUT = 3.0
+REFUSED = "geweigerd"  # de server antwoordt, maar op die poort luistert niets
 PROBE_PARALLEL = 20
 # Zo lang houden de checks de tabel in het geheugen (de worker zet hem meteen na een ronde).
 CACHE_TTL = 30
@@ -103,6 +107,15 @@ def _why_not(scheme_host_port: tuple[str, str, int] | None) -> str | None:
     return None
 
 
+_COMMENT = re.compile(r"#[^\n]*")
+
+
+def _own_config(item: dict) -> bool:
+    """Eigen nginx-configuratie in NPM (een login zoals Authentik, include, allow/deny, return, proxy_pass ...): wat
+    die doet, raden we niet. Zo'n naam gaat via NPM."""
+    return bool(_COMMENT.sub("", str(item.get("advanced_config") or "")).strip())
+
+
 def _expiry(value) -> str | None:
     if not value:
         return None
@@ -113,10 +126,26 @@ def _expiry(value) -> str | None:
     return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).astimezone(timezone.utc).isoformat()
 
 
-def build_hosts(proxy_hosts: list[dict], certs: list[dict], npm_id: int, via: str | None = None) -> dict[str, dict]:
-    """Naam (kleine letters, ook *.domein) → wat NPM ermee doet. via: het IP van NPM zelf."""
-    expires = {c.get("id"): _expiry(c.get("expires_on")) for c in certs if isinstance(c, dict)}
+def _names(item: dict) -> list[str]:
+    return [n for n in (str(x).strip().lower().rstrip(".") for x in item.get("domain_names") or []) if n]
+
+
+def build_hosts(proxy_hosts: list[dict], certs: list[dict] | None, npm_id: int, via: str | None = None,
+                others: list[tuple[list[dict], str]] = ()) -> dict[str, dict]:
+    """Naam (kleine letters, ook *.domein) → wat NPM ermee doet. via: het IP van NPM zelf. certs None: niet op te
+    halen. others: redirection- en 404-hosts, met de reden: die naam beantwoordt NPM zelf."""
+    known = {c.get("id"): c for c in certs or [] if isinstance(c, dict)}
     out: dict[str, dict] = {}
+
+    def cert_of(h: dict) -> dict:
+        cid = h.get("certificate_id")
+        if not cid:
+            return {"cert": None, "cert_names": []}
+        c = known.get(cid)
+        # Niet op te halen: we gaan ervan uit dat het certificaat past (NPM hangt het zelf aan de host).
+        return {"cert": _expiry(c.get("expires_on")) if c else None,
+                "cert_names": (_names(c) or None) if c else None}
+
     for h in proxy_hosts:
         if not isinstance(h, dict):
             continue
@@ -124,35 +153,67 @@ def build_hosts(proxy_hosts: list[dict], certs: list[dict], npm_id: int, via: st
         why = _why_not(fwd)
         if not h.get("enabled", True):
             why = "staat uit in NPM"
-        elif "proxy_pass" in str(h.get("advanced_config") or ""):
-            why = "eigen nginx-configuratie in NPM (proxy_pass)"
+        elif (h.get("meta") or {}).get("nginx_online") is False:
+            why = "offline in NPM (fout in de configuratie)"
+        elif _own_config(h):
+            why = "eigen nginx-configuratie in NPM"
+        elif h.get("access_list_id"):
+            # Een login of IP-lijst van NPM ervoor: rechtstreeks zou de check die overslaan.
+            why = "toegangslijst in NPM"
         locations = []
         for loc in h.get("locations") or []:
-            if not isinstance(loc, dict) or not str(loc.get("path") or "").startswith("/"):
+            if not isinstance(loc, dict):
+                continue
+            if not str(loc.get("path") or "").startswith("/"):
+                # Een regex (~), = of ^~: welke locatie nginx kiest, raden we niet.
+                why = why or "aparte locatie met een regex of = in NPM"
                 continue
             lf = _forward(loc)
             lwhy = "het doel heeft een pad" if lf and "/" in lf[1] else _why_not(lf)
-            if "proxy_pass" in str(loc.get("advanced_config") or ""):
-                lwhy = "eigen nginx-configuratie in NPM (proxy_pass)"
+            if _own_config(loc):
+                lwhy = "eigen nginx-configuratie in NPM"
             locations.append({"path": str(loc["path"]), "scheme": lf[0] if lf else None, "host": lf[1] if lf else None,
                               "port": lf[2] if lf else None, "why": lwhy})
-        entry = {"npm": npm_id, "via": via, "id": h.get("id"), "scheme": fwd[0] if fwd else None, "host": fwd[1] if fwd else None,
-                 "port": fwd[2] if fwd else None, "cert": expires.get(h.get("certificate_id")) if h.get("certificate_id")
-                 else None, "why": why,
+        entry = {"npm": npm_id, "via": via, "id": h.get("id"), "scheme": fwd[0] if fwd else None,
+                 "host": fwd[1] if fwd else None, "port": fwd[2] if fwd else None, **cert_of(h), "why": why,
+                 "ssl_forced": bool(h.get("ssl_forced") and h.get("certificate_id")),
                  "locations": sorted(locations, key=lambda x: len(x["path"]), reverse=True)}
-        for name in h.get("domain_names") or []:
-            name = str(name).strip().lower().rstrip(".")
-            if name:
-                out.setdefault(name, entry)
+        for name in _names(h):
+            out.setdefault(name, entry)
+    for items, why in others:
+        for h in items:
+            if isinstance(h, dict) and h.get("enabled", True):
+                entry = {"npm": npm_id, "via": via, "id": h.get("id"), "scheme": None, "host": None, "port": None,
+                         **cert_of(h), "why": why, "locations": []}
+                for name in _names(h):
+                    out.setdefault(name, entry)
     return out
 
 
-class Table:
-    """De routes zoals de checks ze gebruiken."""
+def _covers(names: list[str] | None, name: str) -> bool:
+    """Past het certificaat (zijn namen) op deze naam? Een wildcard telt voor precies één label, zoals in TLS."""
+    if names is None:
+        return True
+    return name in names or ("." in name and f"*.{name.split('.', 1)[1]}" in names)
 
-    def __init__(self, value: dict | None) -> None:
+
+@dataclass(frozen=True)
+class Plan:
+    """Hoe een check op een naam loopt: route None = via de naam (DNS). firewall: de server die de check zou
+    gebruiken als het dashboard hem bereikt (voor de firewallregel)."""
+    route: Route | None
+    target: str | None = None
+    why: str | None = None
+    blocked: str | None = None
+    firewall: tuple[str, int] | None = None
+
+
+class Table:
+    """De routes zoals de checks ze gebruiken (load() leest ze uit de database)."""
+
+    def __init__(self, value: dict | None, enabled: bool = True) -> None:
         value = value or {}
-        self.enabled = value.get("enabled", True) is not False
+        self.enabled = enabled
         self.hosts: dict[str, dict] = value.get("hosts") or {}
         self.probes: dict[str, dict] = value.get("probes") or {}
 
@@ -162,7 +223,7 @@ class Table:
         name = name.lower().rstrip(".")
         if name in self.hosts:
             return self.hosts[name]
-        # Een wildcard in NPM (*.lab.jbogaert.be): de langste die past.
+        # Een wildcard in NPM (*.lab.jbogaert.be): de langste die past, zoals nginx.
         parts = name.split(".")
         for i in range(1, len(parts) - 1):
             hit = self.hosts.get("*." + ".".join(parts[i:]))
@@ -203,53 +264,110 @@ class Table:
                 return Route(sch, via, port, self._cert(e), npm=True)
         return None
 
-    def forward(self, name: str | None, path: str = "/") -> tuple[str, int] | None:
-        """Het IP en de poort waar een check op deze naam heen zou gaan, ook als dat nu niet lukt (voor de firewall)."""
-        if not self.enabled:
-            return None
-        _, target, _ = self._pick(name, path)
-        return (target["host"], int(target["port"])) if target else None
+    def npm_for(self, name: str | None, scheme: str | None = None) -> Route | None:
+        """NPM op zijn IP voor deze naam (ook als de server rechtstreeks kan): om op terug te vallen."""
+        e = self.entry(name) if self.enabled else None
+        return self._via_npm(e, scheme) if e else None
 
     def explain(self, name: str | None, path: str = "/", scheme: str | None = None, port: int | None = None
-                ) -> tuple[Route | None, str | None, str | None]:
-        """(route, waarom niet rechtstreeks, onbereikbaar ip:poort). De route is de server zelf (reden None), NPM op
-        zijn IP (npm=True), of None: via de naam, met DNS (ook als NPM de naam niet kent: dan alles None).
-        scheme en port: van het adres van een http-check (port None = de standaardpoort); tcp en ping geven niets."""
+                ) -> tuple[Route | None, str | None, str | None, tuple[str, int] | None]:
+        """(route, waarom niet rechtstreeks, onbereikbaar ip:poort, server voor de firewall). De route is de server
+        zelf (reden None), NPM op zijn IP (npm=True), of None: via de naam, met DNS (ook als NPM de naam niet kent:
+        dan alles None). scheme en port: van het adres (port None = de standaardpoort); "https" vraagt een
+        certificaat in NPM dat op de naam past."""
         if not self.enabled:
-            return None, None, None
+            return None, None, None, None
         e, target, why = self._pick(name, path)
         if e is None:
-            return None, None, None
+            return None, None, None, None
         if port is not None and port != NPM_PORTS.get(scheme or ""):
             # NPM luistert alleen op 80 en 443: een naam met een eigen poort gaat niet door NPM.
-            return None, f"het adres heeft een eigen poort (:{port})", None
-        blocked = None
+            return None, f"het adres heeft een eigen poort (:{port})", None, None
+        if target is not None and scheme == "https" and not _covers_entry(e, name):
+            # Zonder passend certificaat beantwoordt NPM https voor deze naam niet (of met een fout certificaat):
+            # via NPM ziet de check dat zoals vroeger.
+            target, why = None, "NPM heeft voor deze naam geen passend certificaat"
+        if target is not None and scheme == "http" and e.get("ssl_forced"):
+            # NPM stuurt http door naar https: via NPM krijgt de check die doorverwijzing, en gaat daarna (https)
+            # rechtstreeks, met het certificaat.
+            target, why = None, "NPM stuurt http door naar https"
+        blocked = fw = None
         if target is not None:
-            where = endpoint(target["host"], target["port"])
+            fw = (target["host"], int(target["port"]))
+            where = endpoint(*fw)
             probe = self.probes.get(where)
             if not probe:
                 why = "nog niet geprobeerd"
             elif not probe.get("ok"):
-                why = f"{where} niet bereikbaar vanaf het dashboard" + (
-                    f" ({probe['error']})" if probe.get("error") else "") + ", firewall?"
+                if probe.get("error") == REFUSED:
+                    # De server antwoordt, maar niets luistert: de service staat uit (of een firewall weigert actief).
+                    why = f"{where} weigert de verbinding: draait de service?"
+                else:
+                    why = f"{where} niet bereikbaar vanaf het dashboard" + (
+                        f" ({probe['error']})" if probe.get("error") else "") + ", firewall?"
                 blocked = where
             else:
-                return Route(target["scheme"], target["host"], int(target["port"]), self._cert(e)), None, None
-        return self._via_npm(e, scheme), why, blocked
+                return Route(target["scheme"], target["host"], int(target["port"]), self._cert(e)), None, None, fw
+        return self._via_npm(e, scheme), why, blocked, fw
 
     def find(self, name: str | None, path: str = "/", scheme: str | None = None, port: int | None = None
              ) -> Route | None:
         return self.explain(name, path, scheme, port)[0]
 
+    def plan(self, check: dict, url: str | None) -> Plan | None:
+        """Hoe deze check loopt. None: gewoon via de naam (NPM kent hem niet, een IP, per tegel of overal uit)."""
+        kind = check.get("type")
+        if not self.enabled or check.get("direct") is False or kind not in ("http", "tcp", "ping"):
+            return None
+        name, path, _ = name_and_path(check, url)
+        if not name or _is_ip(name) or self.entry(name) is None:
+            return None
+        target = target_for(check, url) or ""
+        if kind == "http":
+            u = httpx.URL(target)
+            route, why, blocked, fw = self.explain(name, path, u.scheme, u.port)
+            return Plan(route, None, why, blocked, fw)
+        if kind == "tcp":
+            port = target.rpartition(":")[2]
+            if not port.isdigit():
+                return None
+            port = int(port)
+            if port in NPM_PORTS.values():
+                # De poort van NPM: naar de poort van de server erachter (of NPM op zijn IP, zelfde poort).
+                route, why, blocked, fw = self.explain(name, "/")
+                if route is not None:
+                    return Plan(route, endpoint(route.host, port if route.npm else route.port), why, blocked, fw)
+                return Plan(None, None, why, blocked, fw)
+            route = self.npm_for(name)
+            return Plan(route, endpoint(route.host, port) if route else None,
+                        f"poort {port} gaat niet door NPM: naar het IP van NPM, zoals de naam")
+        # Een ping op een naam pingt NPM (zo was het altijd): of de server erachter ping toelaat, weten we niet.
+        route = self.npm_for(name)
+        return Plan(route, route.host if route else None, "een ping op een naam pingt NPM (vul het IP van de server "
+                    "in als doel om die zelf te pingen)")
+
+
+def _covers_entry(e: dict, name: str | None) -> bool:
+    """[] = geen certificaat aan de host; None = niet op te halen (dan gaan we ervan uit dat het past)."""
+    names = e.get("cert_names")
+    return names is None or bool(names) and _covers(names, (name or "").lower().rstrip("."))
+
 
 # --- de tabel in het geheugen (voor de checks) ---------------------------------------------------------------------
 
 _cache: tuple[float, Table] | None = None
+# Doelen waar een check net niet bij kon (de route kan verouderd zijn): de volgende ronde opnieuw proberen.
+_suspect: set[str] = set()
 
 
-def remember(value: dict | None) -> Table:
+async def load(db: AsyncSession) -> Table:
+    """De tabel uit de database, met de schakelaar op de NPM-tegel (apart bewaard: een ronde overschrijft hem niet)."""
+    st, on = await db.get(AppState, KEY), await db.get(AppState, KEY_ON)
+    return Table(st.value if st else None, (on.value or {}).get("enabled", True) is not False if on else True)
+
+
+def remember(table: Table) -> Table:
     global _cache
-    table = Table(value)
     _cache = (time.monotonic() + CACHE_TTL, table)
     return table
 
@@ -261,16 +379,19 @@ async def table(maker) -> Table:
         return hit[1]
     try:
         async with maker() as db:
-            st = await db.get(AppState, KEY)
-            return remember(st.value if st else None)
+            return remember(await load(db))
     except Exception:  # noqa: BLE001 - liever via de naam checken dan helemaal niet
         log.exception("routes niet te lezen")
-        return remember(None)
+        return remember(Table(None))
 
 
 def forget() -> None:
     global _cache
     _cache = None
+
+
+def suspect(where: str) -> None:
+    _suspect.add(where)
 
 
 # --- vernieuwen (worker, of de knop op de NPM-tegel) ---------------------------------------------------------------
@@ -282,7 +403,7 @@ async def _probe(where: tuple[str, int]) -> tuple[bool, str | None]:
     except (TimeoutError, asyncio.TimeoutError):
         return False, "time-out"
     except ConnectionRefusedError:
-        return False, "geweigerd"
+        return False, REFUSED
     except OSError as e:
         return False, (e.strerror or type(e).__name__).lower()
     writer.close()
@@ -306,6 +427,14 @@ def _endpoints(hosts: dict[str, dict]) -> set[tuple[str, int]]:
     return out
 
 
+async def _list(integ, path: str) -> list[dict] | None:
+    try:
+        items = await integ.get(path)
+    except IntegrationError:
+        return None
+    return items if isinstance(items, list) else None
+
+
 async def refresh(db: AsyncSession, clients, now: datetime | None = None, force_probe: bool = False) -> dict:
     """Proxy hosts en certificaten uit elke NPM-tegel, en de doelen proberen die nog niet (of lang niet) lukten.
     force_probe: alle doelen opnieuw (de knop "nu vernieuwen")."""
@@ -313,34 +442,42 @@ async def refresh(db: AsyncSession, clients, now: datetime | None = None, force_
     st = await ensure_state(db, KEY, {})
     prev = dict(st.value or {})
     old_hosts: dict[str, dict] = prev.get("hosts") or {}
-    hosts: dict[str, dict] = {}
+    per_npm: list[dict[str, dict]] = []
     errors: dict[str, str] = {}
     for svc in (await db.execute(select(Service).where(Service.type == "npm").order_by(Service.id))).scalars().all():
         try:
             integ = build(svc, clients)
             via = await _npm_ip(integ.base)
             proxy_hosts = await integ.proxy_hosts()
-            try:
-                certs = await integ.certificates()
-            except IntegrationError:
-                certs = []
         except IntegrationError as e:
             # NPM even niet bereikbaar: de routes van die tegel blijven zoals ze waren.
             errors[str(svc.id)] = str(e)[:200]
-            for name, entry in old_hosts.items():
-                if entry.get("npm") == svc.id:
-                    hosts.setdefault(name, entry)
+            per_npm.append({n: e_ for n, e_ in old_hosts.items() if e_.get("npm") == svc.id})
             continue
-        for name, entry in build_hosts(proxy_hosts if isinstance(proxy_hosts, list) else [], certs
-                                       if isinstance(certs, list) else [], svc.id, via).items():
+        certs = await _list(integ, "/nginx/certificates")
+        others = [(await _list(integ, "/nginx/redirection-hosts") or [], "NPM stuurt deze naam door (redirection host)"),
+                  (await _list(integ, "/nginx/dead-hosts") or [], "404-host in NPM")]
+        per_npm.append(build_hosts(proxy_hosts if isinstance(proxy_hosts, list) else [], certs, svc.id, via, others))
+    hosts: dict[str, dict] = {}
+    seen: dict[str, int] = {}
+    for found in per_npm:
+        for name, entry in found.items():
+            seen[name] = seen.get(name, 0) + 1
             hosts.setdefault(name, entry)
+    for name, n in seen.items():
+        if n > 1:
+            # Welke NPM de naam in DNS krijgt, weten we niet: via de naam, zoals vroeger.
+            hosts[name] = {**hosts[name], "why": "staat in meer dan één NPM", "via": None, "locations": []}
     old_probes: dict[str, dict] = prev.get("probes") or {}
     wanted = _endpoints(hosts)
+    recheck = set(_suspect)
+    _suspect.difference_update(recheck)
     todo = []
     for host, port in wanted:
         p = old_probes.get(endpoint(host, port))
         at = _at(p.get("at")) if p else None
-        if force_probe or not p or not p.get("ok") or at is None or (now - at).total_seconds() > PROBE_OK_EVERY:
+        if (force_probe or not p or not p.get("ok") or at is None or (now - at).total_seconds() > PROBE_OK_EVERY
+                or endpoint(host, port) in recheck):
             todo.append((host, port))
     sem = asyncio.Semaphore(PROBE_PARALLEL)
 
@@ -352,10 +489,10 @@ async def refresh(db: AsyncSession, clients, now: datetime | None = None, force_
     probes = {k: v for k, v in old_probes.items() if k in {endpoint(h, p) for h, p in wanted}}
     for (host, port), (ok, error) in results:
         probes[endpoint(host, port)] = {"ok": ok, "error": error, "at": now.isoformat()}
-    value = {"enabled": prev.get("enabled", True) is not False, "at": now.isoformat(), "hosts": hosts,
-             "probes": probes, "errors": errors}
+    value = {"at": now.isoformat(), "hosts": hosts, "probes": probes, "errors": errors}
     st.value = value
-    remember(value)
+    on = await db.get(AppState, KEY_ON)
+    remember(Table(value, (on.value or {}).get("enabled", True) is not False if on else True))
     return value
 
 
@@ -404,45 +541,26 @@ def name_and_path(check: dict, url: str | None) -> tuple[str | None, str, bool]:
     return None, "/", False
 
 
-def tcp_port(route: Route, port: int) -> int:
-    """De poort voor een tcp-check op een naam: 80 of 443 (de poorten van NPM) wordt de poort van de server erachter;
-    een andere poort blijft, op het IP van de server. Via NPM blijft de poort altijd: zoals de naam vroeger."""
-    return route.port if not route.npm and port in NPM_PORTS.values() else port
-
-
 def describe(check: dict | None, url: str | None, tab: Table) -> dict | None:
     """Voor het mini dashboard: rechtstreeks naar de server, via NPM op zijn IP, of via de naam, en waarom.
     None = NPM kent de naam niet (of de check gaat niet op een naam)."""
     check = check or {}
-    kind = check.get("type")
-    if kind not in ("http", "tcp", "ping"):
+    if check.get("type") not in ("http", "tcp", "ping"):
         return None
-    name, path, _ = name_and_path(check, url)
+    name = name_and_path(check, url)[0]
     if not name or _is_ip(name) or tab.entry(name) is None:
         return None
     if check.get("direct") is False:
         return {"direct": False, "why": "uitgezet voor deze tegel"}
     if not tab.enabled:
         return {"direct": False, "why": "uitgezet op de NPM-tegel"}
-    target = target_for(check, url) or ""
-    scheme = port = None
-    if kind == "http":
-        u = httpx.URL(target)
-        scheme, port = u.scheme, u.port
-    route, why, blocked = tab.explain(name, path, scheme, port)
-    out = {"direct": route is not None and not route.npm}
-    if route is None:
-        return {**out, "why": why, "blocked": blocked}
-    if kind == "http":
-        to = f"{route.scheme}://{route.where}"
-    elif kind == "tcp":
-        own = target.rpartition(":")[2]
-        to = endpoint(route.host, tcp_port(route, int(own))) if own.isdigit() else route.where
-    else:
-        to = route.host
-    if route.npm:
-        return {**out, "npm": route.host, "to": to, "why": why, "blocked": blocked}
-    return {**out, "to": to}
+    p = tab.plan(check, url)
+    if p is None or p.route is None:
+        return {"direct": False, "why": p.why if p else None, "blocked": p.blocked if p else None}
+    to = f"{p.route.scheme}://{p.route.where}" if check.get("type") == "http" else p.target
+    if p.route.npm:
+        return {"direct": False, "npm": p.route.host, "to": to, "why": p.why, "blocked": p.blocked}
+    return {"direct": True, "to": to}
 
 
 async def overview(db: AsyncSession) -> dict:
@@ -451,7 +569,7 @@ async def overview(db: AsyncSession) -> dict:
 
     st = await db.get(AppState, KEY)
     value = st.value if st else {}
-    tab = Table(value)
+    tab = await load(db)
     rows, blocked = [], {}
     for s in (await db.execute(select(Service).order_by(Service.name))).scalars():
         if not active(s.check):
@@ -467,5 +585,6 @@ async def overview(db: AsyncSession) -> dict:
         "known": len(tab.hosts), "rows": rows,
         "counts": {"direct": sum(1 for r in rows if r["direct"]), "npm": sum(1 for r in rows if r.get("npm")),
                    "naam": sum(1 for r in rows if not r["direct"] and not r.get("npm"))},
-        "blocked": [{"endpoint": k, "tiles": v} for k, v in sorted(blocked.items())],
+        "blocked": [{"endpoint": k, "tiles": v, "refused": (tab.probes.get(k) or {}).get("error") == REFUSED}
+                    for k, v in sorted(blocked.items())],
     }

@@ -81,6 +81,13 @@
     {#if error}
       <p class="err">{error}</p>
       <p class="hint">Controleer de url en de geheimen onder <b>bewerken → Integratie en API</b>.</p>
+      {#if service.type === 'npm'}
+        <!-- Ook als NPM even niet antwoordt: de checks gebruiken de laatste routes, en hier zet je ze uit. -->
+        <div class="sec">
+          <div class="sh"><span class="st">rechtstreeks (checks zonder DNS)</span></div>
+          <NpmRoutes />
+        </div>
+      {/if}
     {:else if !data}
       <p class="hint">laden…</p>
     {:else}

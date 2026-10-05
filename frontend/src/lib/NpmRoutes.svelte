@@ -23,13 +23,16 @@
   })
 
   async function toggle(e) {
+    const box = e.currentTarget
     busy = true
     try {
-      data = await api('/npm/routes', { method: 'PUT', body: { enabled: e.currentTarget.checked } })
+      data = await api('/npm/routes', { method: 'PUT', body: { enabled: box.checked } })
       error = ''
     } catch (err) {
       error = err.message
       await load()
+      // Svelte schrijft dezelfde waarde niet opnieuw: zet het vakje zelf terug op wat de server heeft.
+      box.checked = !!data?.enabled
     } finally {
       busy = false
     }
@@ -48,6 +51,8 @@
   }
 
   const when = (iso) => (iso ? new Date(iso).toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' }) : '')
+  let walled = $derived((data?.blocked || []).filter((b) => !b.refused))
+  let refused = $derived((data?.blocked || []).filter((b) => b.refused))
   let rows = $derived((data?.rows || []).filter((r) => !filter || `${r.name} ${r.host} ${r.to || r.why || ''}`.toLowerCase().includes(filter.toLowerCase())))
 </script>
 
@@ -69,12 +74,21 @@
       <b class:warnc={data.counts.naam}>{data.counts.naam}</b> via de naam
       {#if !data.at}(de proxy hosts worden zo opgehaald){/if}
     </p>
-    {#if data.blocked.length}
+    {#if walled.length}
       <div class="fw">
         Het dashboard bereikt deze servers niet, dus die checks gaan nog door NPM. Laat in OPNsense het dashboard naar
         die poorten toe (net → firewall geeft de regel), en klik dan op nu vernieuwen:
         <ul>
-          {#each data.blocked as b (b.endpoint)}<li><code>{b.endpoint}</code> <span class="dim">{b.tiles.join(', ')}</span></li>{/each}
+          {#each walled as b (b.endpoint)}<li><code>{b.endpoint}</code> <span class="dim">{b.tiles.join(', ')}</span></li>{/each}
+        </ul>
+      </div>
+    {/if}
+    {#if refused.length}
+      <div class="fw">
+        Deze servers weigeren de verbinding: ze antwoorden, maar niets luistert op die poort. Staat de service uit, of
+        luistert ze op een andere poort dan in NPM? Tot dan gaan die checks door NPM:
+        <ul>
+          {#each refused as b (b.endpoint)}<li><code>{b.endpoint}</code> <span class="dim">{b.tiles.join(', ')}</span></li>{/each}
         </ul>
       </div>
     {/if}

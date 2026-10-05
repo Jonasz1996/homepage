@@ -30,8 +30,8 @@ class RoutesIn(BaseModel):
 @router.put("/npm/routes")
 async def set_routes(body: RoutesIn, request: Request, user: User = Depends(current_user),
                      db: AsyncSession = Depends(get_db)):
-    st = await ensure_state(db, routes.KEY, {})
-    st.value = {**(st.value or {}), "enabled": body.enabled}
+    st = await ensure_state(db, routes.KEY_ON, {})
+    st.value = {"enabled": body.enabled}
     await audit(db, request, user, "npm_routes", enabled=body.enabled)
     await db.commit()
     routes.forget()

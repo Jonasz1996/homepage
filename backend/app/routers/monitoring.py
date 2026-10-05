@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_db
 from ..deps import audit, current_session, current_user, notify, recent_auth
 from ..layout import record_revision
-from ..models import AppState, CheckResult, Group, Service, ServiceState, Session, User
+from ..models import CheckResult, Group, Service, ServiceState, Session, User
 from ..monitoring import routes
 from ..monitoring.engine import active, down_after, reset_state
 
@@ -213,12 +213,11 @@ async def history(service_id: int, range: str = Query("24h", pattern="^(1h|24h|7
     last = (await db.execute(
         select(CheckResult).where(CheckResult.service_id == service_id).order_by(CheckResult.ts.desc()).limit(10)
     )).scalars().all()
-    rt = await db.get(AppState, routes.KEY)
     return {
         "range": range,
         "bucket_seconds": size,
         # Gaat de check rechtstreeks naar de server achter NPM (zonder DNS), en zo niet, waarom niet.
-        "route": routes.describe(svc.check, svc.url, routes.Table(rt.value if rt else None)),
+        "route": routes.describe(svc.check, svc.url, await routes.load(db)),
         "uptime": total_ok / total if total else None,
         "uptime_all": await _uptime_all(db, service_id, now),
         "checks": total,

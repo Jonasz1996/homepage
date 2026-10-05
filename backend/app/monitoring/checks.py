@@ -7,6 +7,8 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from http.cookiejar import CookieJar, DefaultCookiePolicy
+from http.cookies import CookieError, SimpleCookie
 from urllib.parse import urlsplit
 
 import dns.asyncresolver
@@ -23,7 +25,9 @@ CHECK_TIMEOUT = 25.0
 MAX_BODY = 1_000_000
 _PING_TIME = re.compile(r"time[=<]([\d.]+)\s*ms")
 # Zelf doorverwijzingen volgen (rechtstreekse checks): hoogstens zoveel, zoals httpx.
-MAX_REDIRECTS = 10
+MAX_REDIRECTS = 20
+# Rechtstreeks naar een server op het LAN: lukt verbinden niet zo snel, dan via NPM (de route kan verouderd zijn).
+DIRECT_CONNECT = 3.0
 
 
 def endpoint_of(host: str, port: int) -> str:
@@ -221,6 +225,40 @@ def _logical_next(logical: httpx.URL, route, location: str) -> httpx.URL:
     return nxt
 
 
+class _ChainCookies:
+    """Cookies binnen één check, per naam (een app die een cookie zet en dan doorverwijst). De clients voor checks
+    zonder DNS bewaren er geen: daar is het IP de sleutel, en dan kregen alle apps achter NPM (of op dezelfde server)
+    elkaars cookies."""
+
+    def __init__(self) -> None:
+        self._c: dict[tuple[str, str], str] = {}  # (domein, naam) -> waarde
+
+    @staticmethod
+    def _under(host: str, domain: str) -> bool:
+        return host == domain or host.endswith("." + domain)
+
+    def take(self, host: str, r: httpx.Response) -> None:
+        host = host.lower()
+        for raw in r.headers.get_list("set-cookie"):
+            c = SimpleCookie()
+            try:
+                c.load(raw)
+            except CookieError:
+                continue
+            for name, m in c.items():
+                domain = (m["domain"] or "").lstrip(".").lower() or host
+                if not self._under(host, domain):
+                    continue  # zoals een browser: een cookie voor een ander domein telt niet
+                if str(m["max-age"]).strip().lstrip("-").isdigit() and int(m["max-age"]) <= 0:
+                    self._c.pop((domain, name), None)
+                else:
+                    self._c[(domain, name)] = m.coded_value
+
+    def header(self, host: str) -> str | None:
+        host = host.lower()
+        return "; ".join(f"{n}={v}" for (d, n), v in self._c.items() if self._under(host, d)) or None
+
+
 async def check_http_direct(logical: httpx.URL, check: dict, clients: "HttpClients | None", table, route) -> Outcome:
     """Zoals check_http, maar zonder DNS (monitoring/routes.py): rechtstreeks naar de server achter NPM, met de headers
     die NPM meestuurt, of (route.npm) naar het IP van NPM zelf, met de naam in Host en SNI. Doorverwijzingen volgen we
@@ -237,6 +275,14 @@ async def check_http_direct(logical: httpx.URL, check: dict, clients: "HttpClien
         own.append(c)
         return c
 
+    def bare_for(insecure: bool) -> httpx.AsyncClient:
+        if clients is not None:
+            return clients.bare(insecure)
+        c = httpx.AsyncClient(verify=not insecure, timeout=TIMEOUT, cookies=_no_cookies())
+        own.append(c)
+        return c
+
+    cookies = _ChainCookies()
     start = time.perf_counter()
     hops = 0
     try:
@@ -249,15 +295,20 @@ async def check_http_direct(logical: httpx.URL, check: dict, clients: "HttpClien
                 hdrs = {**headers, "Host": host, "Connection": "close"}
                 if logical.scheme == "https":
                     ext["sni_hostname"] = logical.host
-                client = client_for(bool(check.get("insecure")))
+                client = bare_for(bool(check.get("insecure")))
             else:
                 hdrs = {**headers, "Host": host, "X-Forwarded-Proto": logical.scheme,
                         "X-Forwarded-Scheme": logical.scheme, "X-Forwarded-Host": host}
                 # Net als NPM: een https-server erachter heeft meestal een eigen certificaat, dat niemand controleert.
-                client = client_for(route.scheme == "https" or bool(check.get("insecure")))
+                client = bare_for(route.scheme == "https" or bool(check.get("insecure")))
+            jar = cookies.header(logical.host or "")
+            if jar and not any(k.lower() == "cookie" for k in hdrs):
+                hdrs["Cookie"] = jar
+            hop_timeout = timeout if route.npm else httpx.Timeout(timeout, connect=min(timeout, DIRECT_CONNECT))
             try:
-                async with client.stream(method, route.url(logical), headers=hdrs, content=body, timeout=timeout,
+                async with client.stream(method, route.url(logical), headers=hdrs, content=body, timeout=hop_timeout,
                                          follow_redirects=False, extensions=ext) as r:
+                    cookies.take(logical.host or "", r)
                     if follow and r.is_redirect:
                         if hops >= MAX_REDIRECTS:
                             # Zoals httpx: een kringetje van doorverwijzingen is een fout, geen 302.
@@ -274,7 +325,23 @@ async def check_http_direct(logical: httpx.URL, check: dict, clients: "HttpClien
                             end_host = (_logical_next(logical, route, r.headers.get("location", "")).host or "").lower()
                         ok, error, moved = _verdict(check, r.status_code, start_host, end_host, data,
                                                     need_body and method != "HEAD")
+                        if (ok and cert and not route.npm and not check.get("insecure")
+                                and cert <= datetime.now(timezone.utc)):
+                            # Via de naam weigert de check (en de browser) een verlopen certificaat; rechtstreeks
+                            # zien we het alleen in NPM.
+                            ok, error = False, f"Certificaat verlopen op {cert:%d/%m/%Y} (volgens NPM)"
                         return Outcome(ok, round(ms, 1), r.status_code, error, cert, moved)
+            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                # De server niet te bereiken: misschien is hij verhuisd en is de route nog van voor de wijziging in
+                # NPM. Dan via NPM, zoals de link: is de server echt weg, dan geeft NPM een 502.
+                alt = None if route.npm else table.npm_for(logical.host, logical.scheme)
+                if alt is None:
+                    return Outcome(False, error=f"{'Time-out' if isinstance(e, httpx.TimeoutException) else _short(e)}"
+                                                f" ({route.label})"[:300])
+                from .routes import suspect
+                suspect(route.where)
+                route = alt
+                continue
             except httpx.TimeoutException:
                 return Outcome(False, error=f"Time-out ({route.label})")
             except httpx.HTTPError as e:
@@ -404,26 +471,42 @@ async def check_ping(target: str) -> Outcome:
     return Outcome(False, error=(err.decode(errors="replace").strip() or "Geen antwoord")[:300])
 
 
+def _no_cookies() -> CookieJar:
+    """Een cookiejar die niets bewaart."""
+    return CookieJar(policy=DefaultCookiePolicy(allowed_domains=[]))
+
+
 class HttpClients:
-    """Twee gedeelde clients (met en zonder certificaatcontrole), zodat verbindingen hergebruikt worden."""
+    """Twee gedeelde clients (met en zonder certificaatcontrole), zodat verbindingen hergebruikt worden. Voor checks
+    zonder DNS (op een IP) twee aparte, zonder cookies: één jar per IP zou cookies tussen apps delen."""
 
     def __init__(self, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self._clients: dict[bool, httpx.AsyncClient] = {}
+        self._bare: dict[bool, httpx.AsyncClient] = {}
         self.transport = transport  # alleen voor tests
+
+    def _new(self, insecure: bool, **kw) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            verify=not insecure, timeout=TIMEOUT, follow_redirects=True,
+            limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+            transport=self.transport, **kw,
+        )
 
     def get(self, insecure: bool) -> httpx.AsyncClient:
         if insecure not in self._clients:
-            self._clients[insecure] = httpx.AsyncClient(
-                verify=not insecure, timeout=TIMEOUT, follow_redirects=True,
-                limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
-                transport=self.transport,
-            )
+            self._clients[insecure] = self._new(insecure)
         return self._clients[insecure]
 
+    def bare(self, insecure: bool) -> httpx.AsyncClient:
+        if insecure not in self._bare:
+            self._bare[insecure] = self._new(insecure, cookies=_no_cookies())
+        return self._bare[insecure]
+
     async def aclose(self) -> None:
-        for c in self._clients.values():
+        for c in [*self._clients.values(), *self._bare.values()]:
             await c.aclose()
         self._clients.clear()
+        self._bare.clear()
 
 
 # Deze soorten draaien niet hier: push wacht op een signaal (monitoring/push.py), container en api hebben de
@@ -471,30 +554,26 @@ async def _run_check(check: dict, url: str | None, clients: HttpClients | None =
     target = target_for(check, url)
     if not target:
         return Outcome(False, error="Geen doel ingesteld")
-    direct = routes if routes is not None and check.get("direct") is not False else None
+    # Zonder DNS (monitoring/routes.py): rechtstreeks naar de server achter NPM, of naar NPM op zijn IP.
+    plan = routes.plan(check, url) if routes is not None else None
     if kind == "http":
-        if direct is not None:
-            try:
-                logical = httpx.URL(target)
-            except (httpx.InvalidURL, ValueError):
-                logical = None
-            route = (direct.find(logical.host, logical.path or "/", logical.scheme, logical.port)
-                     if logical is not None and logical.host else None)
-            if route is not None:
-                return await check_http_direct(logical, check, clients, direct, route)
+        if plan is not None and plan.route is not None:
+            return await check_http_direct(httpx.URL(target), check, clients, routes, plan.route)
         client = clients.get(bool(check.get("insecure"))) if clients else None
         return await check_http(target, check, client)
     if kind == "tcp":
-        if direct is not None:
-            host, _, port = target.rpartition(":")
-            route = direct.find(host.strip("[]"))
-            if route is not None and port.isdigit():
-                from .routes import tcp_port
-                target = endpoint_of(route.host, tcp_port(route, int(port)))
+        if plan is not None and plan.target:
+            target = plan.target
+            if not plan.route.npm:
+                outcome = await check_tcp(target, _seconds(check.get("timeout"), 5))
+                if not outcome.ok:
+                    from .routes import suspect
+                    suspect(plan.route.where)
+                return outcome
         return await check_tcp(target, _seconds(check.get("timeout"), 5))
     if kind == "ping":
-        if direct is not None and (route := direct.find(target)) is not None:
-            target = route.host
+        if plan is not None and plan.target:
+            target = plan.target
         return await check_ping(target)
     if kind == "dns":
         return await check_dns(target, check)
