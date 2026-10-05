@@ -7,3 +7,5 @@ frontend/dist/
 *.db
 .env
 *.egg-info/
+e2e/test-results/
+e2e/playwright-report/

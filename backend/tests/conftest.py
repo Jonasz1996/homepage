@@ -1,4 +1,6 @@
 import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -6,7 +8,7 @@ import pyotp
 import pytest
 from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 _tmp = Path(tempfile.mkdtemp())
@@ -25,6 +27,36 @@ from app.security import limiter  # noqa: E402
 
 # Standaard SQLite; zet HOMEPAGE_TEST_DATABASE_URL om tegen PostgreSQL te testen.
 TEST_DB = os.environ.get("HOMEPAGE_TEST_DATABASE_URL", "sqlite+aiosqlite://")
+# HOMEPAGE_TEST_SCHEMA=migraties: het schema komt uit de migraties, zoals in productie (met TimescaleDB als die
+# er is: hypertables, compressie). Eén keer per testrun; tussen de tests worden de tabellen leeggemaakt.
+MIGRATED = os.environ.get("HOMEPAGE_TEST_SCHEMA") == "migraties" and not TEST_DB.startswith("sqlite")
+BACKEND = Path(__file__).resolve().parent.parent
+
+
+def alembic(*args: str) -> None:
+    env = {**os.environ, "HOMEPAGE_DATABASE_URL": TEST_DB}
+    subprocess.run([sys.executable, "-m", "alembic", *args], cwd=BACKEND, env=env, check=True,
+                   stdout=subprocess.DEVNULL)
+
+
+async def _empty_schema() -> None:
+    engine = create_async_engine(TEST_DB)
+    async with engine.begin() as conn:
+        await conn.execute(text("DROP SCHEMA public CASCADE"))
+        await conn.execute(text("CREATE SCHEMA public"))
+    await engine.dispose()
+
+
+@pytest.fixture(scope="session")
+def migrated():
+    if MIGRATED:
+        # Van een lege database: alle migraties op, helemaal terug (test de downgrades) en weer op.
+        import asyncio
+        asyncio.run(_empty_schema())
+        alembic("upgrade", "head")
+        alembic("downgrade", "base")
+        alembic("upgrade", "head")
+    return MIGRATED
 
 SETUP_TOKEN = "test-setup-token"
 PASSWORD = "een-lang-wachtwoord"
@@ -49,15 +81,19 @@ def totp_clock(monkeypatch):
 
 
 @pytest.fixture
-async def client():
+async def client(migrated):
     engine = create_async_engine(TEST_DB)
     if engine.dialect.name == "sqlite":
         @event.listens_for(engine.sync_engine, "connect")
         def _fk(conn, _):
             conn.execute("PRAGMA foreign_keys=ON")
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
+        if migrated:
+            tables = ", ".join(f'"{t.name}"' for t in Base.metadata.sorted_tables)
+            await conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
+        else:
+            await conn.run_sync(Base.metadata.drop_all)
+            await conn.run_sync(Base.metadata.create_all)
     maker = async_sessionmaker(engine, expire_on_commit=False)
 
     async def _db():

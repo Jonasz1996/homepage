@@ -341,8 +341,13 @@ Eén commando als root in de lege container (installeert alles, haalt de code op
 apt update && apt install -y curl && bash <(curl -fsSL https://raw.githubusercontent.com/Jonasz1996/homepage/nieuwste/deploy/bootstrap.sh)
 ```
 
-Het script neemt de branch `nieuwste` (altijd de nieuwste versie, ook als die nog niet gemerged is); bestaat die niet meer, dan `main`.
-Hetzelfde commando opnieuw uitvoeren werkt alles bij.
+Het script vraagt de eerste keer welke versie je wil en onthoudt dat (in `/etc/homepage/kanaal`):
+
+- **stabiel**: de laatste release (`vX.Y.Z`). Aanbevolen.
+- **nieuwste**: wat net gebouwd is, om te testen (branch `nieuwste`, of `main` als die er niet meer is).
+
+Zolang er nog geen release is, neemt het `nieuwste` zonder te vragen. Wisselen kan met `KANAAL=stabiel` of
+`KANAAL=nieuwste` voor `bash <(curl ...)`. Hetzelfde commando opnieuw uitvoeren werkt alles bij.
 
 Het script toont op het einde de **setup-code** voor het eerste account.
 Maak daarna in Nginx Proxy Manager een proxy host (bv. `home.jbogaert.be` → `http://<IP van de container>:80`)
@@ -366,6 +371,17 @@ Hetzelfde bootstrap-commando opnieuw, of:
 bash /opt/homepage/deploy/bootstrap.sh
 ```
 
+Voor elke update maakt het script een kopie van de database (de laatste 3 blijven in `/var/backups/homepage`).
+Na de update toont het dashboard één keer wat er nieuw is en wat je zelf moet instellen (later: `Ctrl+K` →
+"wat is er nieuw").
+
+**Een update terugdraaien**: `homepage-terugzetten` in de container zet de vorige versie terug, met de database
+van vlak voor die update. Wat sinds die update in het dashboard veranderde, gaat verloren; de database van
+daarvoor wordt eerst nog bewaard als `voor-terugzetten-*.dump`. `homepage-terugzetten --lijst` toont welke kopieën er
+zijn. Het werkt vanaf de tweede update met deze versie van het script.
+
+Een release maken (voor `stabiel`): een tag `vX.Y.Z` op `main`, bv. `git tag v1.1.0 && git push origin v1.1.0`.
+
 ## Opbouw
 
 | Map | Inhoud |
@@ -384,4 +400,18 @@ cd backend && ../.venv/bin/pytest            # tests op SQLite
 HOMEPAGE_TEST_DATABASE_URL=postgresql+asyncpg://... ../.venv/bin/pytest   # tests op PostgreSQL
 
 cd frontend && npm ci && npm run dev         # proxy't /api naar 127.0.0.1:8000
+```
+
+Zoals in productie, met TimescaleDB (de CI doet dit ook): het schema komt dan uit de migraties en de tests zetten
+oude metingen in gecomprimeerde chunks.
+
+```bash
+HOMEPAGE_TEST_SCHEMA=migraties HOMEPAGE_TEST_DATABASE_URL=postgresql+asyncpg://... ../.venv/bin/pytest
+```
+
+Browsertests (Playwright) tegen een lege database, met de API op 127.0.0.1:8000 en de setup-code in
+`HOMEPAGE_SETUP_TOKEN`: inloggen met 2FA, bewerkmodus, elk venster in de titelbalk en de gsm-weergave.
+
+```bash
+cd e2e && npm ci && npx playwright install chromium && HOMEPAGE_SETUP_TOKEN=... npx playwright test
 ```

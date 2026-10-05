@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import { api, poll, withReauth } from './api.js'
   import { boom, fxEnabled, flash, RED, setFx, storm } from './fx.js'
+  import { CHANGELOG } from './changelog.js'
   import Card from './Card.svelte'
   import Lazy from './Lazy.svelte'
   import NameForm from './NameForm.svelte'
@@ -139,6 +140,7 @@
     { label: 'cluster: quorum, ha, replicatie', run: () => openHealth({ tab: 'cluster' }) },
     { label: 'bewerken aan/uit', run: () => (editing = !editing) },
     { label: 'effecten aan/uit (vuur, bliksem, ...)', run: () => { setFx(!fxEnabled()); if (fxEnabled()) storm() } },
+    { label: 'wat is er nieuw (wijzigingslog, versie)', run: () => (modal = { kind: 'news', version }) },
   ]
   let quick = $state([])
   let quickAt = 0
@@ -431,8 +433,29 @@
     else if (kinds[what]) modal = { kind: kinds[what], tab: what === 'report' ? 'report' : undefined }
   }
 
+  // Na een update één keer tonen wat er nieuw is (per gebruiker onthouden op de server).
+  let version = $state.raw(null)
+  const latestNews = Math.max(0, ...CHANGELOG.map((c) => c.nr))
+  async function checkNews() {
+    try {
+      version = await api('/version')
+      const seen = Number(version.gezien) || 0
+      if (seen >= latestNews) return
+      if (!seen && version.nieuw_account) return markNews()
+      const fresh = CHANGELOG.filter((c) => c.nr > seen)
+      if (fresh.length && !modal) modal = { kind: 'news', entries: fresh, version }
+    } catch { /* oudere backend zonder /version: niets tonen */ }
+  }
+  function markNews() {
+    if (version && Number(version.gezien) < latestNews) {
+      version = { ...version, gezien: String(latestNews) }
+      api('/version/seen', { method: 'POST', body: { id: String(latestNews) } }).catch(() => {})
+    }
+  }
+
   onMount(() => {
     openFromUrl()
+    checkNews()
     load()
     loadStatus()
     loadWidgets()
@@ -703,6 +726,9 @@
   <Lazy load={() => import('./Updates.svelte')} onclose={() => (modal = null)} onchanged={loadUpdates} />
 {:else if modal?.kind === 'security'}
   <Lazy load={() => import('./Security.svelte')} onclose={() => (modal = null)} />
+{:else if modal?.kind === 'news'}
+  <Lazy load={() => import('./Changelog.svelte')} entries={modal.entries} version={modal.version}
+        onclose={() => { modal = null; markNews() }} />
 {:else if modal?.kind === 'revisions'}
   <Lazy load={() => import('./Revisions.svelte')} onclose={() => (modal = null)} ondone={load} />
 {/if}
