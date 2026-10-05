@@ -137,6 +137,13 @@ Extra's, deel 3 (back-ups en capaciteit):
   VM's/CT's en opslag uit Proxmox (met TimescaleDB 180 dagen, gecomprimeerd na 7 dagen). Per opslag een trend over
   7 dagen en "vol over x dagen"; melding als iets binnen 14 dagen en nog eens binnen 3 dagen vol loopt. Na een grote
   opkuis telt alleen de trend van daarna
+- **één node 's nachts uit** (onderaan het venster `df`, knop "voorstel berekenen"): per node of hij leeg kan als zijn
+  VM's en CT's naar de andere nodes verhuizen, op basis van de piek-RAM van de laatste 7 dagen met 20% marge en 2 GB
+  voor Proxmox zelf. Een gast met passthrough (PCI, USB, een apparaat in een CT) houdt een node aan; de Pi (ARM) en de
+  HP's (x86) wisselen geen gasten uit. Je krijgt de `qm migrate`/`pct migrate`-commando's, de lokale schijven en bind
+  mounts om op te letten, wat het bespaart (verbruik uit Home Assistant, anders geschat op 25 W) en een cronregel met
+  `rtcwake` die de node 's avonds uitzet en de BIOS hem 's ochtends weer laat aanzetten. Alleen advies: het dashboard
+  verhuist zelf niets
 
 Later, deel 1 (tijdlijn, weekrapport en updates):
 
