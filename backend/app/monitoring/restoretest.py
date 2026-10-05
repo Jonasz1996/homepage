@@ -241,20 +241,22 @@ async def run(maker: async_sessionmaker, http: HttpClients, manual: bool = False
         history = [result, *history][:KEEP]
         await _save(maker, running=None, last_at=now.isoformat(), history=history)
         async with maker() as db:
-            _report(db, result, svc.id if svc else None)
+            _report(db, result, svc.id if svc else None, failed_before=len(history) > 1 and not history[1].get("ok"))
             await db.commit()
     return result
 
 
-def _report(db: AsyncSession, r: dict, service_id: int | None) -> None:
+def _report(db: AsyncSession, r: dict, service_id: int | None, failed_before: bool = False) -> None:
     what = f"{r.get('name') or 'CT'} ({r.get('source_vmid') or '?'})"
     if r["ok"]:
         body = f"Back-up van {r['backup_at'][:16].replace('T', ' ')} teruggezet als CT {r['vmid']} op {r['node']}, " \
                f"opgestart en weer verwijderd ({r['seconds']} s)."
-        notify(db, f"Hersteltest geslaagd: {what}", body, level="ok", source="backup", service_id=service_id)
+        # Alleen naar een gsm voor storingen als de vorige test mislukte: elke maand "geslaagd" is daar ruis.
+        notify(db, f"Hersteltest geslaagd: {what}", body, level="ok", source="backup", service_id=service_id,
+               key="hersteltest", recovers="err" if failed_before else None)
     else:
         notify(db, f"Hersteltest mislukt: {what}", f"Bij {r['step']}: {r.get('error')}", level="err", source="backup",
-               service_id=service_id)
+               service_id=service_id, key="hersteltest")
     if r.get("cleanup_error"):
         notify(db, f"Test-CT {r.get('vmid')} niet opgeruimd", f"{r['cleanup_error']}. Verwijder hem zelf in Proxmox.",
                level="warn", source="backup", service_id=service_id)

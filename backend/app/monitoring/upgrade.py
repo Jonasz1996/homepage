@@ -27,7 +27,7 @@ from ..integrations import IntegrationError, build
 from ..models import AppState, Service, SshHost, UpdateRun
 from ..ssh_exec import SshFail, command, connect, run
 from ..ssh_login import defaults, login_for
-from .checks import HttpClients, run_check
+from .checks import HttpClients, check_service
 
 log = logging.getLogger("homepage.upgrade")
 
@@ -255,7 +255,9 @@ async def related(db: AsyncSession, plan: Plan) -> list[Service]:
     n = plan.name.lower()
     out = []
     for s in (await db.execute(select(Service))).scalars():
-        if not (s.check or {}).get("type"):
+        # Alleen checks die je nu kunt nakijken: een push-check wacht op signalen, een gepauzeerde staat uit.
+        check = s.check or {}
+        if not check.get("type") or check.get("paused") or check.get("type") == "push":
             continue
         url_host = (urlsplit(s.url).hostname or "").lower() if s.url else ""
         tgt = str((s.check or {}).get("target") or "").lower()
@@ -276,7 +278,7 @@ async def _checks(rn: Runner, services: list[Service]) -> list[dict]:
     result = {}
     todo = list(services)
     for attempt in range(CHECK_RETRIES):
-        outcomes = await asyncio.gather(*(run_check(s.check, s.url, rn.http) for s in todo))
+        outcomes = await asyncio.gather(*(check_service(rn.maker, s.id, s.check, s.url, rn.http) for s in todo))
         for s, o in zip(todo, outcomes):
             result[s.id] = {"service_id": s.id, "name": s.name, "ok": o.ok, "error": o.error}
         todo = [s for s in todo if not result[s.id]["ok"]]

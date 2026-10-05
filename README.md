@@ -15,12 +15,14 @@ Fase 1 en 2 van het [stappenplan](https://claude.ai/code/artifact/fe2b226c-d5ef-
 
 Fase 3, monitoring:
 
-- checks per service: HTTP(S), ping of TCP-poort, met eigen interval (minstens 15 s)
+- checks per service: HTTP(S), ping, TCP-poort, DNS, push, Docker-container of de API van de tegel, met eigen
+  interval (minstens 15 s); zie [Uptime Kuma vervangen](#uptime-kuma-vervangen)
 - status, latency en een sparkline op elke tegel; samenvatting "x up · y down" bovenaan
 - mini dashboard per service (▤ op de tegel): latency-grafiek met min/max, uptime-strook,
   verstoringen en de laatste checks, over 1 u, 24 u, 7 d, 30 d of 1 jaar
-- melding in het meldingencentrum als een service down gaat (na 3 mislukte checks) en weer terugkomt
-- historiek: met TimescaleDB 1 jaar (gecomprimeerd na 7 dagen), zonder TimescaleDB 90 dagen
+- melding in het meldingencentrum (en op je gsm) als een service down gaat (standaard na 3 mislukte checks) en weer
+  terugkomt
+- historiek: 1 jaar (met TimescaleDB gecomprimeerd na 7 dagen)
 
 Fase 4, integraties (type van de service kiezen onder **bewerken → Integratie en API**):
 
@@ -382,7 +384,7 @@ Later, deel 3 (Authentik en gsm):
 - **instellingen** (! → instellingen, of `/?open=instellingen`): per functie of ze werkt, half ingesteld is (met wat
   er ontbreekt) of nog niet: Proxmox (ook welke rechten elk token mist), PBS, de hersteltest, OPNsense (ook de
   rechten voor apparaten en de config-kopie), NPM, Cloudflare, AdGuard, Wake-on-LAN (welke nodes nog geen
-  MAC-adres hebben), Zabbix, Home Assistant (welke nodes nog geen sensor hebben), schijven, domeinen, de webhooks
+  MAC-adres hebben), de checks op je tegels, meldingen op je gsm, wie het dashboard zelf bewaakt, Zabbix, Home Assistant (welke nodes nog geen sensor hebben), schijven, domeinen, de webhooks
   van Proxmox, PBS en Home Assistant, Portainer, de SSH-login, hosts zonder bevestigde host key, cron, logs,
   nachtelijke updates en de beveiliging. Optionele functies die nog niet ingesteld zijn, staan grijs
 - **effecten** zoals in aiverslag: een achtergrond van punten en 0/1 die voor de muis wijken, een ripple op elke knop,
@@ -407,6 +409,92 @@ Optimalisaties:
 - achter Cloudflare zien login-limiet, audit-log en meldingen het echte IP van de bezoeker
 - gzip, beveiligingsheaders op elke response, installeerbaar als app (manifest)
 - de worker hergebruikt HTTP-verbindingen en ruimt verlopen sessies, oude audit-regels (1 jaar) en gelezen meldingen (30 dagen) op
+
+## Uptime Kuma vervangen
+
+Het dashboard doet alles wat je in Uptime Kuma gebruikte, zodat Kuma weg kan. Per tegel onder **✎ bewerken →
+Monitoring**:
+
+- **soorten checks**: HTTP(S), ping, TCP-poort, DNS (A of AAAA, via een gekozen DNS-server zoals AdGuard, met een
+  verwacht IP), **push** (een script meldt zich, zie hieronder), **Docker-container** (draait hij en is hij niet
+  unhealthy, via je Portainer-tegel) en **API van de tegel** (de API van de integratie met zijn eigen versleutelde
+  sleutels, dus ook achter een login, met een pad en een JSON-veld naar keuze)
+- **HTTP-opties**: goede statuscodes (`200-299,401`), woord op de pagina (of juist niet), JSON-veld met een
+  verwachte waarde, time-out, methode GET/HEAD/POST met een body, eigen headers (geen wachtwoorden: daarvoor is de
+  check "API van de tegel"), doorverwijzingen wel of niet volgen, certificaatfouten negeren. Verwijst een pagina
+  door naar een andere host (meestal de loginpagina van Authentik), dan toont de tegel dat; met *down als hij naar
+  een andere host doorverwijst* telt het als fout
+- **wanneer down**: na 1 tot 10 mislukte checks op rij (standaard 3, bij push 1). Tussen de eerste fout en down
+  staat de tegel oranje op *twijfel (1/3)*; met *bij twijfel opnieuw na* kijkt hij dan sneller opnieuw
+- **melden**: hier en op je gsm, alleen hier (🔔), of niet (alleen de tijdlijn). Zolang hij down is: nooit, elk uur,
+  elke 4 uur of elke dag een herinnering. De melding over het certificaat kan per tegel uit
+- **pauzeren** (in het mini dashboard, of in bewerken): de check loopt niet en meldt niets. Pauzeren, de meldingen
+  uitzetten, de check weghalen of een tegel (groep, pagina) met een lopende check verwijderen vraagt je 2FA en geeft
+  een melding, zodat wie je sessie steelt niet stilletjes de bewaking uitzet. Een gepauzeerde check staat ter info
+  in **!**
+- **uptime** over 24 u, 7 d, 30 d en 1 jaar in het mini dashboard; op de tegel als hij onder 99,9 % zakt
+- **afhankelijkheden**: hangt een tegel af van een andere (CT op een node, container op Portainer), dan krijg je één
+  melding voor de ouder. Is de ouder terug en het kind niet, dan alsnog een melding voor het kind. Faalt het grootste
+  deel van alle checks tegelijk (netwerk of DNS van de container), dan één melding in plaats van honderd; zolang dat
+  duurt, staat het bovenaan in **!**. Wat al apart als down gemeld was (een pc die meestal uit staat), telt daarvoor
+  niet mee
+- verander je wat een check bekijkt (ander type of adres), dan begint de status opnieuw, zonder oude down-status. Een
+  push-check begint ook opnieuw na een ander interval of na hervatten: signalen van daarvoor tellen niet
+
+**Push-monitors** (vervangt de push-monitors van Uptime Kuma). Kies bij een tegel als check *push* en maak in het
+mini dashboard een push-adres. Een script, een automatisering in Home Assistant of de back-up van je VPS roept dat
+adres aan, bv. `curl -fsS -m 10 "https://<dashboard>/api/push/<token>?status=up&msg=OK"`. Dat is dezelfde vorm als
+in Kuma: in een bestaand script veranderen alleen de host en het token; `status=down`, `msg` en `ping` mogen erbij,
+met GET of POST. Blijft het signaal langer uit dan het interval (minstens 60 s) plus wat speling (10 %, minstens
+30 s), of meldt het script `status=down`, dan gaat de tegel down en krijg je een melding. Standaard werkt het adres
+alleen thuis (LAN/VPN). Voor een VPS vink je *ook van buitenaf* aan; zet dan in Cloudflare Access of Authentik een uitzondering
+voor `/api/push/*`. Het adres zelf is het geheim: met *nieuw adres* maak je een ander, en het oude werkt meteen niet
+meer. Tokens komen niet in de logs van nginx en uvicorn in de container. NPM en Cloudflare schrijven het volledige
+adres wel in hun eigen logs: zet in NPM bij de proxy host voor `/api/push/` de access log uit als je dat niet wil.
+
+**Docker-containers**: kies *Docker-container (via Portainer)*, je Portainer-tegel en de container (de lijst komt uit
+Portainer). Down als de container stopt of *unhealthy* is. De tegel hangt dan automatisch af van Portainer: valt
+Portainer uit, dan één melding.
+
+**Meldingen op je gsm (web push).** Het dashboard kan meldingen zelf naar je gsm of browser sturen, ook als het
+tabblad dicht is: geen Telegram, ntfy of mail, maar de pushdienst die al in je browser zit (Google voor
+Chrome/Android, Apple voor iPhone, Mozilla voor Firefox). Er verandert niets tot je het op een toestel aanzet: open
+het belletje → **gsm** (of Ctrl+K → "meldingen op je gsm") en kies **Dit toestel meldingen laten krijgen**; dat vraagt
+je 2FA-code. Per toestel kies je welke meldingen: alleen storingen en herstel, ook waarschuwingen, of alles. Herstel,
+aanmeldingen vanaf een nieuw IP en het weekrapport komen altijd, en meer dan 10 per minuut worden samengevat in één
+bericht. Per tegel kan je onder **bewerken → Monitoring → Melden** kiezen voor *alleen hier*: dan gaat die tegel nooit
+naar je gsm. Op een iPhone moet het dashboard eerst als app op je beginscherm staan (Delen → Zet op beginscherm, iOS
+16.4 of nieuwer); op Android werkt het in Chrome of als app via Toevoegen aan startscherm. Het werkt alleen via
+https. De berichten zijn end-to-end versleuteld (RFC 8291). De server moet uitgaand 443 kunnen naar
+`fcm.googleapis.com`, `*.push.apple.com` en `*.push.services.mozilla.com` (zie de firewall-weergave). Een tik op een bericht
+opent het dashboard op de juiste plek. Meldt de pushdienst een toestel af, of lukt het afleveren drie keer niet, dan
+zie je dat in het meldingencentrum en op je andere toestellen. Valt de worker uit, dan stuurt de API de meldingen.
+
+**Het dashboard zelf bewaken.** De worker en de API houden elkaar in het oog: valt de worker uit, dan meldt de API
+dat (en stuurt hij de meldingen naar je gsm); antwoordt de API niet meer, dan meldt de worker dat. Een check die
+geen resultaat meer geeft, wordt grijs in plaats van op zijn laatste kleur te blijven staan. Na een herstart zegt
+het dashboard hoe lang het stil was. Valt de hele container uit, dan kan het dashboard niets meer melden: dat moet
+iets anders zien. Gebruik daarvoor Zabbix, met een web-scenario op `/api/healthz` (zonder login, alleen thuis;
+antwoordt 200 als database, worker en checks lopen, anders 503):
+
+1. In Zabbix: *Data collection → Hosts*, kies de host van de container (of de Zabbix-server) → *Web* → *Create web
+   scenario*. Naam `homepage`, interval `1m`, en één stap met URL `http://<IP van de container>/api/healthz` en *Required
+   status codes* `200`
+2. Een trigger op die host: `last(/<host>/web.test.fail[homepage])<>0`, ernst *High*, met de meldingen die je in
+   Zabbix al gebruikt
+3. Laat de firewall Zabbix toe naar de container op poort 80. In **! → instellingen** staat de rij *Iemand die het
+   dashboard zelf bewaakt* op groen zodra Zabbix het adres opvraagt
+
+**Voor je Uptime Kuma uitzet**:
+
+1. **! → instellingen → Checks op je tegels**: elke service die je in Kuma had, heeft hier een tegel met een check
+   (de rij zegt welke tegels een adres hebben maar geen check, en welke checks een loginpagina zien)
+2. push-monitors: maak ze hier en pas in je scripts host en token aan; elk script één keer laten lopen
+3. meldingen op je gsm aanzetten (🔔 → gsm) en een test sturen
+4. het web-scenario in Zabbix hierboven
+5. wat Kuma nog elders deed: de Kuma-integratie in Home Assistant, statuspagina's of badges (het dashboard heeft
+   geen openbare statuspagina), en de Kuma-webhook onder meldingen → webhooks
+6. dan Kuma stoppen; bewaar zijn data een paar weken voor het geval je nog iets mist
 
 ## Installeren in een Proxmox-container
 

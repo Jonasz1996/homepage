@@ -239,3 +239,17 @@ async def npm_import(service_id: int, data: NpmImportIn, request: Request,
         await audit(db, request, user, "npm_import", added=added)
     await db.commit()
     return {"added": added}
+
+
+# --- Containers van een Portainer-tegel, voor de container-check ------------------
+
+@router.get("/services/{pid}/containers")
+async def portainer_containers(pid: int, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    from ..monitoring.integrationchecks import is_portainer, list_containers
+
+    if not is_portainer(await _service(db, pid)):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Dit is geen Portainer-tegel")
+    try:
+        return await list_containers(db, pid, clients)
+    except IntegrationError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e)) from e

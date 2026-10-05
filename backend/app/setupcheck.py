@@ -5,6 +5,8 @@ none, wat er ontbreekt (todo) en welk venster het oplost (fix). optional: "nog n
 """
 
 import asyncio
+import hashlib
+import re
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import distinct, func, select
@@ -12,11 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .health import scan as hw, security
 from .integrations import IntegrationError, build
-from .models import AppState, CronJob, LogEntry, Service, SshHost, WebhookSource
-from .monitoring import cluster, configs, coverage, devices, pbssync, restoretest, upgrade, zabbix as zbx
+from .models import AppState, CronJob, LogEntry, PushMonitor, Service, ServiceState, SshHost, WebhookSource
+from .monitoring import cluster, configs, coverage, devices, pbssync, restoretest, upgrade, watchdog, webpush, zabbix as zbx
+from .monitoring.engine import active
 from .ssh_login import defaults as ssh_defaults
 from .ssh_pin import STATE_KEY as PIN_KEY
 
+PUSH_URL = re.compile(r"/api/push/([A-Za-z0-9_-]{16,})")
 GROUPS = (("proxmox", "Proxmox en back-ups"), ("netwerk", "Netwerk"), ("monitoring", "Monitoring en meldingen"),
           ("ssh", "SSH, cron, updates en logs"), ("beveiliging", "Beveiliging"))
 PRIV_TIMEOUT = 8
@@ -252,6 +256,91 @@ async def zabbix_row(db: AsyncSession, svcs: list[Service], results: dict[int, d
                         f"{hosts} hosts, gekoppeld aan {tiles} tegel{'s' if tiles != 1 else ''}.", extra=extra)
 
 
+async def checks_row(db: AsyncSession, svcs: list[Service]) -> dict:
+    """Het dashboard vervangt Uptime Kuma: heeft elke tegel een check, en kijkt die naar het juiste?"""
+    title, key = "Checks op je tegels (in plaats van Uptime Kuma)", "monitoring:dekking"
+    running = [s for s in svcs if active(s.check)]
+    states = {st.service_id: st for st in (await db.execute(select(ServiceState))).scalars()}
+    todo = []
+    bare = [s for s in svcs if s.url and not (s.check or {}).get("type")]
+    if bare:
+        todo.append(f"{len(bare)} tegel{'s' if len(bare) != 1 else ''} met een adres maar zonder check: "
+                    f"{_list([s.name for s in bare], 6)}. ✎ bewerken → tegel → Monitoring.")
+    paused = [s.name for s in svcs if (s.check or {}).get("type") and (s.check or {}).get("paused")]
+    if paused:
+        todo.append(f"Gepauzeerd: {_list(paused, 6)}.")
+    for s in running:
+        st = states.get(s.id)
+        if st and st.stale:
+            todo.append(f"{s.name}: de check loopt niet meer (journalctl -u homepage-worker).")
+        elif st and st.redirected_to and not s.check.get("same_host"):
+            todo.append(f"{s.name}: verwijst door naar {st.redirected_to}, dus de check ziet de loginpagina en niet "
+                        "de app. Check een pad zonder login (bv. /api/health), of vink 'down als hij doorverwijst' aan.")
+    monitors = {m.service_id: m for m in (await db.execute(select(PushMonitor))).scalars()}
+    for s in running:
+        if s.check.get("type") != "push":
+            continue
+        if s.id not in monitors:
+            todo.append(f"{s.name}: push-check zonder adres. Klik de tegel open en kies push-adres maken.")
+        elif not monitors[s.id].last_at:
+            todo.append(f"{s.name}: nog geen signaal ontvangen. Pas het adres aan in je script en laat het één keer lopen.")
+    # Cronjobs die nog een push-adres aanroepen dat het dashboard niet kent: meestal nog dat van Uptime Kuma.
+    known = {m.token_hash for m in monitors.values()}
+    for j in (await db.execute(select(CronJob).where(CronJob.removed_at.is_(None), CronJob.enabled.is_(True),
+                                                     CronJob.command.contains("/api/push/")))).scalars():
+        tokens = PUSH_URL.findall(j.command or "")
+        if tokens and not any(hashlib.sha256(t.encode()).hexdigest() in known for t in tokens):
+            todo.append(f"Cronjob {j.alias or j.name} op {j.target_name} roept een push-adres aan dat het dashboard "
+                        "niet kent (nog van Uptime Kuma?). Maak een push-check en vervang het adres.")
+    kuma = [w for w in (await db.execute(select(WebhookSource).where(WebhookSource.kind == "uptimekuma"))).scalars()
+            if w.enabled and w.last_at and datetime.now(timezone.utc) - w.last_at.replace(tzinfo=w.last_at.tzinfo
+                                                                                      or timezone.utc) < timedelta(days=7)]
+    if kuma:
+        todo.append(f"Uptime Kuma stuurt nog meldingen (webhook {kuma[0].name}, laatst {_local(kuma[0].last_at)}): "
+                    "zet Kuma pas uit als alles hier staat (README → Uptime Kuma uitzetten).")
+    first = bare[0] if bare else next((s for s in running if states.get(s.id) and (
+        states[s.id].stale or states[s.id].redirected_to)), None)
+    fix = {"window": "edit", "service_id": first.id} if first else None
+    if not running:
+        return row(key, "monitoring", title, "none", "Nog geen enkele tegel met een check: niets merkt het als een "
+                   "service uitvalt.", todo or ["✎ bewerken → tegel → Monitoring: kies een check."], fix)
+    text = f"{len(running)} check{'s' if len(running) != 1 else ''} lopen."
+    return row(key, "monitoring", title, "half" if todo else "ok", text, todo[:8], fix)
+
+
+async def watcher_row(db: AsyncSession) -> dict:
+    """Ziet iemand het als de hele container uitvalt? Dat kan alleen iets buiten het dashboard: Zabbix."""
+    title, fix = "Iemand die het dashboard zelf bewaakt", {"window": "health", "tab": "homepage"}
+    seen = await _state(db, watchdog.SEEN_KEY)
+    at = datetime.fromisoformat(seen["at"]) if seen.get("at") else None
+    how = ["Zet in Zabbix een web-scenario op http://<IP van de container>/api/healthz met statuscode 200 (503 = "
+           "worker of checks staan stil), en een trigger als het mislukt (README → Uptime Kuma vervangen)."]
+    if not at:
+        return row("wachter", "monitoring", title, "none", "Niets vraagt /api/healthz op: valt de hele container uit, "
+                   "dan krijg je geen enkele melding.", how, fix)
+    if datetime.now(timezone.utc) - at > timedelta(minutes=15):
+        return row("wachter", "monitoring", title, "half", f"Laatst opgevraagd op {_local(at)}: staat de bewaking in "
+                   "Zabbix nog aan?", how, fix)
+    return row("wachter", "monitoring", title, "ok", f"{seen.get('ip') or 'Iets'} vraagt /api/healthz op, laatst om "
+               f"{_local(at)}.", fix=fix)
+
+
+async def webpush_row(db: AsyncSession) -> dict:
+    title, fix = "Meldingen op je gsm", {"window": "webpush"}
+    st = await webpush.status(db)
+    if not st["devices"]:
+        return row("webpush", "monitoring", title, "none", "Nog geen toestel: storingen zie je alleen als je het "
+                   "dashboard open hebt.", ["🔔 → gsm → Dit toestel meldingen laten krijgen, op je gsm (iPhone: eerst "
+                   "op het beginscherm zetten)."], fix)
+    n = st["devices"]
+    text = f"{n} toestel{'len' if n != 1 else ''}" + (f", laatst afgeleverd {_local(st['last_ok'])}." if st["last_ok"]
+                                                       else ".")
+    if st["failing"]:
+        return row("webpush", "monitoring", title, "half", text, [f"Afleveren mislukt op {_list(st['failing'])}: "
+                   "zet het daar opnieuw aan (🔔 → gsm)."], fix)
+    return row("webpush", "monitoring", title, "ok", text, fix=fix)
+
+
 async def hardware(db: AsyncSession) -> dict:
     hosts = (await _state(db, hw.STATE_KEY)).get("hosts") or []
     title, fix = "Schijven en temperatuur", {"window": "health", "tab": "schijven"}
@@ -432,6 +521,9 @@ async def run(db: AsyncSession, clients, results: dict[int, dict]) -> dict:
         _integration("adguard", "netwerk", "AdGuard Home", of("adguard"), results, "Nog geen AdGuard-tegel.",
                      ["Tegel of API van type adguard met je AdGuard-login."], "Werkt.", optional=True),
         await wake(db, svcs),
+        await checks_row(db, svcs),
+        await webpush_row(db),
+        await watcher_row(db),
         await zabbix_row(db, of("zabbix"), results),
         await home_assistant(db, clients, of("homeassistant"), results),
         await hardware(db),

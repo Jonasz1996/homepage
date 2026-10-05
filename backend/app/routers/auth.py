@@ -14,6 +14,7 @@ from ..db import get_db
 from ..deps import (COOKIE, audit, client_country, client_ip, current_session, current_user, notify, optional_session,
                     recent_auth, secure_cookie)
 from ..models import AuditLog, Session, User
+from ..monitoring import webpush
 from ..security import (
     USER_FAILURE_FACTOR,
     check_setup_token,
@@ -227,8 +228,9 @@ async def change_password(data: PasswordIn, request: Request, sess: Session = De
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Huidig wachtwoord klopt niet")
     limiter.reset(*keys)
     user.password_hash = hash_password(data.new)
-    # Alle andere sessies afmelden.
+    # Alle andere sessies afmelden, en de vernieuwgeheimen van de gsm's laten vervallen.
     await db.execute(delete(Session).where(Session.user_id == user.id, Session.id != sess.id))
+    await webpush.forget_renew(db, user.id)
     await audit(db, request, user, "password_changed")
     await db.commit()
     return {"ok": True}
@@ -283,6 +285,7 @@ async def revoke_session(short_id: str, request: Request, sess: Session = Depend
 async def revoke_others(request: Request, sess: Session = Depends(current_session),
                         user: User = Depends(recent_auth), db: AsyncSession = Depends(get_db)):
     result = await db.execute(delete(Session).where(Session.user_id == user.id, Session.id != sess.id))
+    await webpush.forget_renew(db, user.id)
     await audit(db, request, user, "sessions_revoked", count=result.rowcount)
     await db.commit()
     return {"ok": True, "count": result.rowcount}

@@ -11,6 +11,7 @@
   import HealRules from './HealRules.svelte'
   import Incidents from './Incidents.svelte'
   import Maintenance from './Maintenance.svelte'
+  import PushMonitor from './PushMonitor.svelte'
 
   // Mini dashboard van één service: gegevens van de integratie en de monitoring-historiek.
   let { service, groups = [], onclose, onedit, onchanged, onterminal } = $props()
@@ -80,6 +81,21 @@
     maintUntil = r.maintenance_until
     onchanged?.()
   }
+  // Pauzeren: de check loopt niet en meldt niets. Stilzetten vraagt je 2FA (wie je sessie steelt, zet zo niets stil).
+  let paused = $state(untrack(() => !!service.check?.paused))
+  let pauseMsg = $state('')
+  async function setPaused(on) {
+    if (on && !confirm(`De check van ${service.name} pauzeren? Zolang hij gepauzeerd is, merkt het dashboard niet als dit uitvalt.`)) return
+    try {
+      await withReauth(() => api(`/services/${service.id}/pause`, { method: 'POST', body: { paused: on } }))
+      paused = on
+      pauseMsg = ''
+      onchanged?.()
+      load()
+    } catch (e) { pauseMsg = '✕ ' + e.message }
+  }
+  let doubt = $derived(data?.state?.status === 'up' && data?.state?.fail_count > 0)
+  const PERIODS = [['24h', '24 u'], ['7d', '7 d'], ['30d', '30 d'], ['1y', '1 jaar']]
   let certDays = $derived(data?.state?.cert_expires_at ? Math.floor((new Date(data.state.cert_expires_at) - Date.now()) / 86400000) : null)
 </script>
 
@@ -94,10 +110,15 @@
         <button class="mini" onclick={() => onterminal?.(h.id)} title="{h.username}@{h.host}">&gt;_ {h.name}</button>
       {/each}
       {#if service.config?.mac}<button class="mini" onclick={wake} title="Wake-on-LAN naar {service.config.mac}">⏻ wekken</button>{/if}
-      <button class="mini" onclick={() => onedit(service)}>✎ bewerken</button>
+      {#if service.check?.type}
+        <button class="mini" onclick={() => setPaused(!paused)} title={paused ? 'De check weer laten lopen' : 'Check tijdelijk stilzetten'}>{paused ? '▶ hervatten' : '⏸ pauzeren'}</button>
+      {/if}
+      <!-- Met de pauze zoals ze nu is: anders zet bewaren een net gepauzeerde check stil weer aan (of omgekeerd). -->
+      <button class="mini" onclick={() => onedit(service.check?.type ? { ...service, check: { ...service.check, paused: paused || undefined } } : service)}>✎ bewerken</button>
     </div>
   </div>
   {#if wolMsg}<p class="wol" class:e={wolMsg.startsWith('✕')}>{wolMsg}</p>{/if}
+  {#if pauseMsg}<p class="wol e">{pauseMsg}</p>{/if}
 
   <div class="maint">
     {#if maintActive}
@@ -122,15 +143,22 @@
     <IntegrationPanel {service} {groups} {onchanged} />
   {/if}
 
+  {#if service.check?.type === 'push'}<PushMonitor {service} />{/if}
+
   {#if !service.check?.type}
     <p class="hint">Voor deze service staat nog geen monitoring aan. Kies onder <b>bewerken → Monitoring</b> een check.</p>
   {:else}
+    {#if paused}<p class="hint warn">De check staat gepauzeerd: het dashboard kijkt niet en meldt niets. <button class="mini" onclick={() => setPaused(false)}>▶ hervatten</button></p>{/if}
+    {#if data?.state?.stale}<p class="hint warn">Er komt geen resultaat meer binnen van deze check. Kijk in <b>hw → homepage</b> of de worker nog loopt.</p>{/if}
+    {#if data?.state?.redirected_to}
+      <p class="hint">Deze pagina verwijst door naar <b>{data.state.redirected_to}</b>{service.check.same_host ? '' : ', dus de check ziet waarschijnlijk de loginpagina en niet de app. Check een pad zonder login (bv. /api/health), gebruik de check "API van de tegel", of vink in bewerken "down als hij doorverwijst" aan'}.</p>
+    {/if}
     <p class="err">{error}</p>
     {#if data}
       <div class="kgrid">
-        <div class="kpi {data.state?.status || 'unknown'}">
+        <div class="kpi {doubt ? 'doubt' : data.state?.status || 'unknown'}">
           <small>status</small>
-          <b>{statusText[data.state?.status || 'unknown']}</b>
+          <b>{doubt ? `twijfel ${data.state.fail_count}/${data.state.down_after || 3}` : statusText[data.state?.status || 'unknown']}</b>
           {#if data.state}<small>sinds {ago(data.state.since)}</small>{/if}
         </div>
         <div class="kpi">
@@ -156,6 +184,15 @@
           <small>{data.state?.last_error || 'geen fout bij laatste check'}</small>
         </div>
       </div>
+
+      {#if data.uptime_all}
+        <div class="upall">
+          <span class="lbl">uptime</span>
+          {#each PERIODS as [k, l]}
+            <span class:bad={data.uptime_all[k] != null && data.uptime_all[k] < 0.99}><i>{l}</i> {pct(data.uptime_all[k])}</span>
+          {/each}
+        </div>
+      {/if}
 
       <div class="tabs" role="tablist">
         {#each RANGES as r}
@@ -226,6 +263,13 @@
   .kpi.up { border-color: rgba(143, 214, 164, .5) }
   .kpi.up b { color: var(--ok) }
   .kpi.down, .kpi.bad { border-color: var(--err) }
+  .kpi.doubt { border-color: var(--mid) }
+  .kpi.doubt b { color: var(--mid) }
+  .upall { display: flex; gap: 6px 16px; flex-wrap: wrap; align-items: baseline; margin-top: 10px; font-size: 13px; color: var(--text-h) }
+  .upall .lbl { margin: 0 }
+  .upall i { font-style: normal; color: var(--muted); font-size: 11.5px; margin-right: 2px }
+  .upall .bad { color: var(--err) }
+  .hint.warn { color: var(--mid) }
   .kpi.down b, .kpi.bad b { color: var(--err) }
   .tabs { display: flex; gap: 6px; margin: 16px 0 0 }
   .tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 6px }

@@ -109,6 +109,8 @@ class Service(Base):
     notes: Mapped[str | None] = mapped_column(Text)
     # API uit API-beheer: adres, sleutels en eigen calls komen dan daarvandaan (zie integrations.build).
     api_id: Mapped[int | None] = mapped_column(ForeignKey("api_connections.id", ondelete="SET NULL"), index=True)
+    # Wanneer de check opnieuw begon (ander type of interval, pauze, hervat): een push-check rekent vanaf dan.
+    check_changed_at: Mapped[datetime | None] = mapped_column(default=utcnow)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 
@@ -144,6 +146,9 @@ class Notification(Base):
         # Het aantal ongelezen meldingen (badge) wordt bij elke poll geteld: een kleine index op alleen die rijen.
         Index("ix_notifications_unread", "id", postgresql_where=text("read_at IS NULL"),
               sqlite_where=text("read_at IS NULL")),
+        # Nog niet naar de gsm gestuurd (web push): de worker zoekt alleen die rijen.
+        Index("ix_notifications_unpushed", "id", postgresql_where=text("pushed_at IS NULL"),
+              sqlite_where=text("pushed_at IS NULL")),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -155,6 +160,14 @@ class Notification(Base):
     source: Mapped[str] = mapped_column(String(40), default="system")
     service_id: Mapped[int | None] = mapped_column(ForeignKey("services.id", ondelete="SET NULL"), index=True)
     read_at: Mapped[datetime | None]
+    # Wanneer de worker hem naar de gsm('s) stuurde (web push); meteen gezet als hij daar niet heen moet.
+    pushed_at: Mapped[datetime | None]
+    # Over welke storing dit gaat (bv. "svc12" voor up/down van een tegel): nieuwer nieuws over dezelfde storing
+    # vervangt op de gsm het oudere. Leeg: een losse melding.
+    push_key: Mapped[str | None] = mapped_column(String(120), index=True)
+    # Bij herstel (ok): het niveau van wat hij herstelt, zodat hij komt op elk toestel dat de storing kreeg. Minstens:
+    # bij het versturen telt ook het zwaarste niveau van de storing sinds het vorige herstel (webpush._peak).
+    recovers: Mapped[str | None] = mapped_column(String(8))
 
 
 class CheckResult(Base):
@@ -190,6 +203,12 @@ class ServiceState(Base):
     cert_expires_at: Mapped[datetime | None]
     # Laatst gemelde drempel voor het certificaat (14 of 3 dagen), 0 = nog niets gemeld.
     cert_notified: Mapped[int] = mapped_column(SmallInteger, default=0, server_default="0")
+    # Laatste herinnering "nog altijd down".
+    reminded_at: Mapped[datetime | None]
+    # Een http-check die op een andere host eindigde (bv. de loginpagina van Authentik): die host.
+    redirected_to: Mapped[str | None] = mapped_column(String(255))
+    # De check loopt niet meer (al lang geen resultaat): één keer gemeld.
+    stale: Mapped[bool] = mapped_column(Boolean, default=False, server_default=sa_false())
 
 
 class SshKey(Base):
@@ -573,3 +592,72 @@ class ApiCall(Base):
     position: Mapped[int] = mapped_column(Integer, default=0)
 
     connection: Mapped[ApiConnection] = relationship(back_populates="calls")
+
+
+class PushMonitor(Base):
+    """Push-monitor (zoals in Uptime Kuma): een script roept een geheim adres aan. Blijft dat uit, dan is de service
+    down. De API schrijft alleen de laatste slag hier weg; de worker beslist (en is zo de enige die ServiceState
+    bijwerkt)."""
+
+    __tablename__ = "push_monitors"
+
+    service_id: Mapped[int] = mapped_column(ForeignKey("services.id", ondelete="CASCADE"), primary_key=True)
+    # Zoekindex: sha256 van het token; het token zelf staat versleuteld zodat het adres opnieuw te tonen is.
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    token: Mapped[str] = mapped_column(Text)
+    # Ook aanvaarden via Cloudflare (van buitenaf), bv. voor een VPS.
+    outside: Mapped[bool] = mapped_column(Boolean, default=False, server_default=sa_false())
+    last_at: Mapped[datetime | None]
+    last_ok: Mapped[bool | None] = mapped_column(Boolean)
+    last_msg: Mapped[str | None] = mapped_column(String(300))
+    last_ping: Mapped[float | None] = mapped_column(Float)
+    # Laatste slag met status=down: die mag niet verloren gaan als er vlak daarna een goede volgt.
+    last_down_at: Mapped[datetime | None]
+    last_down_msg: Mapped[str | None] = mapped_column(String(300))
+    # Tot waar de worker de slagen verwerkt heeft, en wanneer hij voor het laatst "geen signaal" schreef.
+    seen_at: Mapped[datetime | None]
+    missed_at: Mapped[datetime | None]
+    count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class PushSubscription(Base):
+    """Een toestel (browser of app op het beginscherm) dat meldingen krijgt via web push."""
+
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    # sha256 van het pushadres: zo is hetzelfde toestel terug te vinden zonder het adres leesbaar te bewaren.
+    endpoint_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    # Versleuteld: {endpoint, p256dh, auth}.
+    data: Mapped[str] = mapped_column(Text)
+    label: Mapped[str] = mapped_column(String(80))
+    # err | warn | info: vanaf welke ernst dit toestel meldingen krijgt.
+    min_level: Mapped[str] = mapped_column(String(8), default="err", server_default="err")
+    # sha256 van het geheim waarmee de service worker een vernieuwd pushadres doorgeeft (zonder sessie).
+    renew_hash: Mapped[str] = mapped_column(String(64))
+    # Het vorige vernieuwgeheim, alleen nog goed om exact hetzelfde verzoek te herhalen (antwoord onderweg verloren).
+    prev_renew_hash: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    last_ok_at: Mapped[datetime | None]
+    last_error: Mapped[str | None] = mapped_column(String(300))
+    fail_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Al gemeld dat het misloopt (één keer, tot het weer lukt).
+    warned: Mapped[bool] = mapped_column(Boolean, default=False, server_default=sa_false())
+    # De pushdienst kent het adres niet meer (404/410). Blijft nog 30 dagen staan: Firefox meldt zich soms later
+    # zelf opnieuw aan (pushsubscriptionchange), en dat lukt alleen als de rij met het vernieuwgeheim er nog is.
+    gone_at: Mapped[datetime | None]
+
+
+class PushQueue(Base):
+    """Nog te versturen pushberichten, per toestel (met nieuwe pogingen als de pushdienst even niet antwoordt)."""
+
+    __tablename__ = "push_queue"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    subscription_id: Mapped[int] = mapped_column(ForeignKey("push_subscriptions.id", ondelete="CASCADE"), index=True)
+    notification_id: Mapped[int | None] = mapped_column(ForeignKey("notifications.id", ondelete="CASCADE"))
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    next_at: Mapped[datetime] = mapped_column(default=utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)

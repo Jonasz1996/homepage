@@ -46,7 +46,7 @@ async def csrf_guard(conn: HTTPConnection) -> None:
         return
     request = conn
     # Webhooks komen van andere tools (Proxmox, Uptime Kuma, ...): het geheime adres is daar de beveiliging.
-    if request.scope["path"].startswith("/api/hooks/"):
+    if request.scope["path"].startswith(("/api/hooks/", "/api/push/")):
         return
     if request.scope["method"] in UNSAFE and request.headers.get(CSRF_HEADER) != "homepage":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "CSRF-header ontbreekt")
@@ -125,8 +125,13 @@ def event(db: AsyncSession, kind: str, title: str, body: str | None = None, leve
 
 
 def notify(db: AsyncSession, title: str, body: str | None = None, level: str = "info",
-           source: str = "system", service_id: int | None = None, data: dict | None = None) -> None:
-    """Melding in het meldingencentrum, en ook op de tijdlijn (behalve het weekrapport zelf)."""
-    db.add(Notification(title=title, body=body, level=level, source=source, service_id=service_id))
+           source: str = "system", service_id: int | None = None, data: dict | None = None,
+           push: bool = True, key: str | None = None, recovers: str | None = None) -> None:
+    """Melding in het meldingencentrum, en ook op de tijdlijn (behalve het weekrapport zelf).
+    push=False: niet naar de gsm (web push), alleen hier. key: over welke storing het gaat (nieuwer nieuws erover
+    vervangt het oudere op de gsm). recovers: bij herstel, het niveau van de storing die voorbij is."""
+    db.add(Notification(title=title[:200], body=body, level=level, source=source, service_id=service_id,
+                        pushed_at=None if push else datetime.now(timezone.utc), push_key=key and key[:120],
+                        recovers=recovers if level == "ok" else None))
     if source != "rapport":
         event(db, EVENT_KIND.get(source, "melding"), title, body, level, service_id, data)

@@ -8,8 +8,10 @@ from sqlalchemy import Integer, and_, case, cast, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..deps import audit, current_user
-from ..models import CheckResult, Group, Service, ServiceState, User
+from ..deps import audit, current_session, current_user, notify, recent_auth
+from ..layout import record_revision
+from ..models import CheckResult, Group, Service, ServiceState, Session, User
+from ..monitoring.engine import active, down_after, reset_state
 
 router = APIRouter(prefix="/api", tags=["monitoring"])
 
@@ -82,8 +84,10 @@ async def all_status(user: User = Depends(current_user), db: AsyncSession = Depe
     for sid, latency, ok in rows:
         spark[sid].append(latency if ok else None)
 
-    services = {sid: (name, parent, _aware(until)) for sid, name, parent, until in (await db.execute(
-        select(Service.id, Service.name, Service.parent_id, Service.maintenance_until))).all()}
+    rows = (await db.execute(
+        select(Service.id, Service.name, Service.parent_id, Service.maintenance_until, Service.check))).all()
+    services = {sid: (name, parent, _aware(until)) for sid, name, parent, until, _ in rows}
+    checks = {sid: check or {} for sid, *_, check in rows}
     by_id = {s.service_id: s for s in states}
 
     def chain(sid: int):
@@ -118,20 +122,56 @@ async def all_status(user: User = Depends(current_user), db: AsyncSession = Depe
             "maintenance_until": maintenance(s.service_id),
             "cause": cause(s.service_id) if s.status == "down" else None,
             "cert_expires_at": _aware(s.cert_expires_at),
+            # Twijfel: mislukt, maar nog niet down (zoveel keer op rij nodig).
+            "fail_count": s.fail_count,
+            "down_after": down_after(checks.get(s.service_id)),
+            "redirected_to": s.redirected_to,
+            "stale": s.stale,
         }
-        for s in states
+        for s in states if active(checks.get(s.service_id))
     }
-    # Services zonder check maar wel in onderhoud (bv. een node waarvan alleen de kinderen gecheckt worden).
+    # Services zonder (lopende) check maar wel in onderhoud (bv. een node waarvan alleen de kinderen gecheckt
+    # worden), of met een gepauzeerde check.
     for sid in services:
-        if str(sid) not in out and maintenance(sid):
-            out[str(sid)] = {"status": None, "maintenance_until": maintenance(sid)}
+        paused = bool(checks.get(sid, {}).get("type") and checks[sid].get("paused"))
+        if str(sid) not in out and (paused or maintenance(sid)):
+            out[str(sid)] = {"status": None, "maintenance_until": maintenance(sid), "paused": paused,
+                             "uptime_24h": uptime.get(sid)}
+    return out
+
+
+# Uptime over 24 uur, 7 en 30 dagen en een jaar naast elkaar (zoals Kuma), per service vijf minuten onthouden.
+UPTIME_ALL = {"24h": timedelta(hours=24), "7d": timedelta(days=7), "30d": timedelta(days=30), "1y": timedelta(days=365)}
+_uptime_all_cache: dict[tuple[int, int], tuple[float, dict]] = {}
+
+
+async def _uptime_all(db: AsyncSession, service_id: int, now: datetime) -> dict:
+    key = (id(db.bind), service_id)
+    hit = _uptime_all_cache.get(key)
+    if hit and hit[0] > time.monotonic():
+        return hit[1]
+    cols = []
+    for name, span in UPTIME_ALL.items():
+        recent = CheckResult.ts >= now - span
+        cols += [func.sum(case((and_(recent, CheckResult.ok, NOT_MAINT), 1), else_=0)),
+                 func.sum(case((and_(recent, NOT_MAINT), 1), else_=0))]
+    row = (await db.execute(select(*cols).where(CheckResult.service_id == service_id,
+                                                  CheckResult.ts >= now - UPTIME_ALL["1y"]))).one()
+    out = {}
+    for i, name in enumerate(UPTIME_ALL):
+        ok, total = row[2 * i] or 0, row[2 * i + 1] or 0
+        out[name] = ok / total if total else None
+    if len(_uptime_all_cache) > 1000:
+        _uptime_all_cache.clear()
+    _uptime_all_cache[key] = (time.monotonic() + 300, out)
     return out
 
 
 @router.get("/services/{service_id}/history")
 async def history(service_id: int, range: str = Query("24h", pattern="^(1h|24h|7d|30d|1y)$"),
                   user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    if await db.get(Service, service_id) is None:
+    svc = await db.get(Service, service_id)
+    if svc is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Service niet gevonden")
     span, size = RANGES[range]
     now = datetime.now(timezone.utc)
@@ -176,13 +216,16 @@ async def history(service_id: int, range: str = Query("24h", pattern="^(1h|24h|7
         "range": range,
         "bucket_seconds": size,
         "uptime": total_ok / total if total else None,
+        "uptime_all": await _uptime_all(db, service_id, now),
         "checks": total,
         "points": points,
         "outages": outages[::-1][:50],
         "state": {
             "status": state.status, "since": _aware(state.since), "latency_ms": state.latency_ms,
             "last_error": state.last_error, "last_check": _aware(state.last_check),
-            "cert_expires_at": _aware(state.cert_expires_at),
+            "cert_expires_at": _aware(state.cert_expires_at), "fail_count": state.fail_count,
+            "redirected_to": state.redirected_to, "stale": state.stale,
+            "down_after": down_after(svc.check),
         } if state else None,
         "recent": [
             {"ts": _aware(r.ts), "ok": r.ok, "latency_ms": r.latency_ms, "status_code": r.status_code, "error": r.error,
@@ -226,3 +269,38 @@ async def group_maintenance(group_id: int, data: MaintenanceIn, request: Request
     await audit(db, request, user, "maintenance", group=g.name, minutes=data.minutes)
     await db.commit()
     return {"maintenance_until": until}
+
+
+# --- Pauzeren ---------------------------------------------------------------------------------------------------
+
+class PauseIn(BaseModel):
+    paused: bool
+
+
+@router.post("/services/{service_id}/pause")
+async def pause_check(service_id: int, data: PauseIn, request: Request, sess: Session = Depends(current_session),
+                      user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Check pauzeren (instellingen blijven bewaard) of hervatten. Pauzeren vraagt een recente 2FA en geeft een
+    melding: een gestolen sessie zou anders als eerste de bewaking stilleggen."""
+    s = await db.get(Service, service_id)
+    if s is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Service niet gevonden")
+    check = dict(s.check or {})
+    if not check.get("type"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Deze tegel heeft geen check")
+    if bool(check.get("paused")) == data.paused:
+        return {"paused": data.paused}
+    if data.paused:
+        await recent_auth(sess, user)
+        check["paused"] = True
+        notify(db, f"Check gepauzeerd: {s.name}", "Was jij dit niet, kijk dan in ⚿ naar de sessies.", level="warn",
+               source="auth", service_id=s.id)
+    else:
+        check.pop("paused", None)
+    s.check, s.check_changed_at = check, datetime.now(timezone.utc)
+    # Bij pauzeren en hervatten begint de status opnieuw: geen oude "down" die zijn kinderen stil houdt.
+    await reset_state(db, s.id)
+    await audit(db, request, user, "check_paused" if data.paused else "check_resumed", service=s.name)
+    await record_revision(db, user, f"Check van '{s.name}' {'gepauzeerd' if data.paused else 'hervat'}")
+    await db.commit()
+    return {"paused": data.paused}
