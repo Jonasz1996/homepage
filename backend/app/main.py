@@ -7,7 +7,7 @@ from .config import get_settings
 from .db import get_maker
 from .deps import COOKIE, csrf_guard, secure_cookie
 from .routers import (apis, auth, capacity, configs, cron, heal, health, hooks, importexport, integrations, layout, logs, monitoring, network, notifications,
-                      netmap, oidc, planning, restoretest, search, ssh, timeline, upgrade)
+                      netmap, oidc, planning, restoretest, search, ssh, timeline, upgrade, zabbix)
 
 log = logging.getLogger("homepage.api")
 
@@ -65,6 +65,7 @@ app.include_router(search.router)
 app.include_router(restoretest.router)
 app.include_router(netmap.router)
 app.include_router(apis.router)
+app.include_router(zabbix.router)
 
 
 @app.middleware("http")

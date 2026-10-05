@@ -24,7 +24,7 @@ from .network import NETWORK_EVERY, PUBLIC_IP_EVERY, sample_power, watch_gateway
 from .report import weekly_notification
 from .updates import UPDATES_EVERY, run_updates
 from .upgrade import auto_updates, cleanup_snapshots, mark_interrupted
-from . import cluster, configs, containerlogs, devices, healing, planned, restoretest
+from . import cluster, configs, containerlogs, devices, healing, planned, restoretest, zabbix
 from .watchers import watch_npm, watch_pbs
 
 log = logging.getLogger("homepage.worker")
@@ -259,6 +259,7 @@ class Worker:
         last_lan = start - devices.DEVICES_EVERY + 45
         last_cluster = start - cluster.CLUSTER_EVERY + 20
         last_docker = start - containerlogs.EVERY + 15
+        last_zabbix = start - zabbix.EVERY + 10
         while True:
             try:
                 for sid, check, url in await self.due_services():
@@ -295,6 +296,9 @@ class Worker:
                     last_docker = time.monotonic()
                     self.job("containerlogs", lambda: self.step(
                         "containerlogs", lambda db: containerlogs.run_containerlogs(db, self.http)))
+                if time.monotonic() - last_zabbix > zabbix.EVERY:
+                    last_zabbix = time.monotonic()
+                    self.job("zabbix", lambda: self.step("zabbix", lambda db: zabbix.run_zabbix(db, self.http)))
                 if time.monotonic() - last_lan > devices.DEVICES_EVERY:
                     last_lan = time.monotonic()
                     self.job("lan", self.lan)
