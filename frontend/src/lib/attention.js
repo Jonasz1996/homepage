@@ -3,7 +3,7 @@ export const FIX_LABEL = {
   detail: 'tegel', edit: 'bewerken', health: 'hw', cron: 'cron', updates: 'apt', net: 'net', capacity: 'df',
   restoretest: 'hersteltest', planned: 'onderhoud', security: 'beveiliging', api: 'API-beheer', webhooks: 'webhooks',
   terminal: 'terminal', 'ssh-keys': 'sleutels', 'ssh-defaults': '⚙ standaard', 'ssh-discover': '⟳ pve',
-  logs: 'logs', 'logs-setup': 'logs', configs: 'diff', kuma: 'overnemen',
+  logs: 'logs', 'logs-setup': 'logs', configs: 'diff',
 }
 
 export const AREA = {

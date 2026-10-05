@@ -5,13 +5,11 @@ export const CHANGELOG = [
   {
     nr: 28,
     datum: '2026-10-05',
-    titel: 'Uptime Kuma vervangen en een node \'s nachts uit',
+    titel: 'Een node \'s nachts uit',
     items: [
-      'import → Uptime Kuma vervangen: het dashboard haalt je monitors uit Kuma, toont welke het al volgt en maakt van de rest met één knop tegels met een check.',
       'df → één node \'s nachts uit: welke node leeg kan, welke VM\'s en CT\'s waarheen verhuizen (met de commando\'s), wat het bespaart en een cronregel die hem \'s avonds uitzet en \'s ochtends weer aan.',
     ],
     instellen: [
-      'Ctrl+K → kuma vervangen, met een API-sleutel uit Kuma (Instellingen → API-sleutels). Staat alles op gedekt, zet Kuma dan uit.',
       'Kijk in df → voorstel berekenen welke HP \'s nachts uit kan.',
     ],
   },
