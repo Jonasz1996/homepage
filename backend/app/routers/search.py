@@ -101,7 +101,7 @@ def _npm_to(versions: list[ConfigVersion], ip: str) -> list[dict]:
                 if isinstance(h, dict) and str(h.get("forward_host") or "").strip() == ip:
                     names = h.get("domain_names") or []
                     out.append({"title": ", ".join(names) or f"host {h.get('id')}",
-                                "sub": f"{kind.replace('_', ' ')} → {ip}:{h.get('forward_port') or ''}".rstrip(":"),
+                                "sub": f"{kind.replace('_', ' ').replace('-', ' ')} → {ip}:{h.get('forward_port') or ''}".rstrip(":"),
                                 "url": f"https://{names[0]}" if names else None})
     return out
 

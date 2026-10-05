@@ -15,7 +15,7 @@ from ..health.domains import DOMAINS_EVERY, run_domains
 from ..health.scan import HEALTH_EVERY, run_health, settings as health_settings
 from ..health.selfcheck import HEARTBEAT_EVERY, SELFCHECK_EVERY, heartbeat, run_selfcheck
 from ..health.snapshots import SNAPSHOTS_EVERY, run_snapshots
-from ..models import Service
+from ..models import AppState, Service
 from ..ssh_discovery import SYNC_EVERY, auto_sync
 from .checks import HttpClients, run_check
 from .engine import cleanup, housekeeping, record
@@ -24,7 +24,7 @@ from .network import NETWORK_EVERY, PUBLIC_IP_EVERY, sample_power, watch_gateway
 from .report import weekly_notification
 from .updates import UPDATES_EVERY, run_updates
 from .upgrade import auto_updates, cleanup_snapshots, mark_interrupted
-from . import cluster, configs, containerlogs, devices, healing, planned
+from . import cluster, configs, containerlogs, devices, healing, planned, restoretest
 from .watchers import watch_npm, watch_pbs
 
 log = logging.getLogger("homepage.worker")
@@ -108,6 +108,14 @@ class Worker:
                 await db.commit()
         except Exception:
             log.exception("%s mislukt", name)
+
+    async def restoretest(self) -> None:
+        """De maandelijkse hersteltest, als het zover is (loopt minutenlang, los van de andere taken)."""
+        async with self.maker() as db:
+            st = await db.get(AppState, restoretest.STATE_KEY)
+            value = st.value if st else None
+        if restoretest.due(value, datetime.now(timezone.utc)):
+            await restoretest.run(self.maker, self.http)
 
     async def periodic(self) -> None:
         """Trage taken (externe API's) los van de checks, elk half uur."""
@@ -294,6 +302,7 @@ class Worker:
                     last_beat = time.monotonic()
                     self.job("beat", self.beat)
                     self.job("planned", lambda: self.step("gepland onderhoud", planned.apply))
+                    self.job("restoretest", self.restoretest)
                     self.job("config_copy", self.config_copy)
                     self.job("auto_updates", self.auto_updates)
                 if time.monotonic() - last_cleanup > 3600:

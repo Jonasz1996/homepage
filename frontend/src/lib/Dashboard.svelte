@@ -129,6 +129,8 @@
     { label: 'updates: openstaande pakketten en images', run: () => (modal = { kind: 'updates' }) },
     { label: 'netwerk: publiek ip, wan, tunnels, wake-on-lan', run: () => (modal = { kind: 'network' }) },
     { label: 'apparaten op het netwerk, poortscan', run: () => (modal = { kind: 'network', tab: 'apparaten' }) },
+    { label: 'netwerkkaart: wat valt er mee uit', run: () => (modal = { kind: 'network', tab: 'kaart' }) },
+    { label: 'hersteltest van back-ups (pbs)', run: () => (modal = { kind: 'restoretest' }) },
     { label: 'configuratiewijzigingen: opnsense, npm, proxmox, bestanden (diff)', run: () => (modal = { kind: 'configs' }) },
     { label: 'gepland onderhoud: vensters plannen', run: () => (modal = { kind: 'planned' }) },
     { label: 'webhooks: meldingen van proxmox, pbs, uptime kuma, home assistant', run: () => (modal = { kind: 'webhooks' }) },
@@ -414,12 +416,14 @@
     if (!what) return
     history.replaceState(null, '', location.pathname)
     const kinds = { history: 'history', report: 'history', updates: 'updates', network: 'network', capacity: 'capacity',
-                    security: 'security', configs: 'configs', webhooks: 'webhooks', planned: 'planned' }
+                    security: 'security', configs: 'configs', webhooks: 'webhooks', planned: 'planned',
+                    hersteltest: 'restoretest' }
     if (what === 'logs') openLogs()
     else if (what === 'cron') openCron()
     else if (what === 'health') openHealth()
     else if (what === 'terminal') openTerminal()
     else if (what === 'devices') modal = { kind: 'network', tab: 'apparaten' }
+    else if (what === 'kaart') modal = { kind: 'network', tab: 'kaart' }
     else if (kinds[what]) modal = { kind: kinds[what], tab: what === 'report' ? 'report' : undefined }
   }
 
@@ -683,6 +687,8 @@
   <Lazy load={() => import('./Webhooks.svelte')} services={allServices} onclose={() => (modal = null)} />
 {:else if modal?.kind === 'planned'}
   <Lazy load={() => import('./Planned.svelte')} services={allServices} groups={groupOptions} onclose={() => (modal = null)} />
+{:else if modal?.kind === 'restoretest'}
+  <Lazy load={() => import('./RestoreTestWindow.svelte')} onclose={() => (modal = null)} />
 {:else if modal?.kind === 'configs'}
   <Lazy load={() => import('./Configs.svelte')} initialItem={modal.item} onclose={() => (modal = null)} />
 {:else if modal?.kind === 'updates'}
