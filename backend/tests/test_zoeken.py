@@ -115,7 +115,7 @@ async def test_search_everywhere(authed):
     await db.flush()
     db.add(CronJob(key="k1", target=f"ssh:{h.id}", target_name="mediaserver", host_id=h.id, kind="cron",
                    schedule="0 3 * * *", command="/usr/local/bin/backup-plex.sh", name="backup-plex.sh"))
-    npm = {"proxy_hosts": [{"id": 4, "domain_names": ["plex.jbogaert.be"], "forward_host": "192.168.0.60",
+    npm = {"proxy-hosts": [{"id": 4, "domain_names": ["plex.jbogaert.be"], "forward_host": "192.168.0.60",
                             "forward_port": 32400}]}
     db.add(ConfigVersion(item="npm:1", name="NPM-hosts", kind="npm", sha="x", size=1,
                          content=encrypt(json.dumps(npm, indent=1))))
