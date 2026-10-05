@@ -297,6 +297,16 @@ Later, deel 3 (Authentik en gsm):
   - alles behalve GET is altijd een knop (actie) in het mini dashboard en in `Ctrl+K`, en vraagt een recente 2FA.
     Het adres, de soort of de aanmelding van een API met sleutels wijzigen vraagt ook een recente 2FA, tenzij je de
     sleutels opnieuw ingeeft. Een pad blijft altijd op het adres van de API
+- **zabbix** (een tegel of API van soort `zabbix`): elke minuut haalt de homepage de hosts en open problemen uit
+  Zabbix (5.4 en nieuwer). Elke tegel krijgt een stip "zbx": groen, of rood als een host onbereikbaar is of een
+  probleem van ernst "gemiddeld" of hoger heeft (de muis erop toont welke). In het mini dashboard staan per host CPU,
+  RAM, schijf /, uptime en ping met een grafiek van 24 u, de open problemen en een link naar Zabbix. Bij een tegel
+  horen de hosts met hetzelfde IP of dezelfde DNS-naam als de tegel (een domein achter NPM via het doorstuuradres),
+  of met dezelfde naam, plus de node waarop hij draait (de map uit ⟳ pve in de terminal, en "hangt af van"). Zelf
+  kiezen of uitzetten kan onder **bewerken → Monitoring → Zabbix-hosts**. Nodig: een API-token in Zabbix
+  (Gebruikers → API-tokens, voor een gebruiker die alle hosts mag lezen, bv. een eigen gebruiker in een groep met
+  leesrechten op alle hostgroepen) en als adres de webinterface (`https://zabbix.jbogaert.be`, zonder
+  `/api_jsonrpc.php`). Gebruikt alleen lezen: host.get, trigger.get, item.get en trend.get
 - **effecten** zoals in aiverslag: een achtergrond van punten en 0/1 die voor de muis wijken, een ripple op elke knop,
   bliksem en vonken bij een geslaagde actie (herstarten, wekken), een vuurbal met flits en schudden bij verwijderen
   en uitloggen, en een bliksem op het belletje als er een nieuwe storing binnenkomt. Uit te zetten met `Ctrl+K` →

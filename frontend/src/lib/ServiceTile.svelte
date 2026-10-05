@@ -2,7 +2,7 @@
   import { value } from './format.js'
   import { iconIsMono, iconUrl } from './icons.js'
 
-  let { service, status = null, widget = null, updates = null, editing = false, onedit, ondetail, dragging = false, dropBefore = false, ...events } = $props()
+  let { service, status = null, widget = null, updates = null, zbx = null, editing = false, onedit, ondetail, dragging = false, dropBefore = false, ...events } = $props()
 
   let src = $derived(iconUrl(service.icon))
   // Pas tonen als het icoon echt geladen is; anders de eerste letter.
@@ -38,6 +38,10 @@
   const until = (ts) => new Date(ts).toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' })
   const stateLabel = { up: 'bereikbaar', down: 'down', unknown: 'nog geen check', maint: 'onderhoud' }
   let ms = $derived(status?.latency_ms == null ? '' : status.latency_ms < 10 ? status.latency_ms.toFixed(1) : Math.round(status.latency_ms))
+
+  // Zabbix: rood als een host van deze service (of de node waarop ze draait) onbereikbaar is of een ernstig probleem heeft.
+  let zbxTitle = $derived(zbx ? 'Zabbix: ' + zbx.hosts.map((h) => `${h.name}${h.role === 'node' ? ' (node)' : ''}: ${
+    h.down ? 'onbereikbaar' : h.problems.length ? h.problems.map((p) => p.name).join(', ') : 'in orde'}`).join(' · ') : '')
 
   function detail(e) {
     e.preventDefault()
@@ -84,6 +88,7 @@
       {#if maint}<span class="mt">onderhoud tot {until(status.maintenance_until)}</span>
       {:else if health === 'down'}<span class="downtxt">down</span>{#if status?.cause}<span class="cause">via {status.cause}</span>{/if}
       {:else if ms !== ''}<span class="ms">{ms} ms</span>{/if}
+      {#if zbx}<span class="zb" class:bad={zbx.level === 'err'} title={zbxTitle}><i></i>zbx</span>{/if}
       {#if updates?.count}<span class="upd" class:sec={updates.security} title="{updates.count} updates open{updates.security ? `, ${updates.security} beveiliging` : ''}">↑{updates.count}</span>{/if}
       {#if certDays !== null && certDays <= 21}<span class="cert" class:bad={certDays <= 3}>cert {certDays} d</span>{/if}
       {service.description || host}
@@ -146,6 +151,10 @@
   .cert { color: var(--mid); margin-right: 4px }
   .cert.bad { color: var(--err) }
   .upd { color: var(--muted); margin-right: 4px }
+  .zb { display: inline-flex; align-items: center; gap: 3px; margin-right: 5px; color: var(--muted); font-size: 10.5px }
+  .zb i { width: 7px; height: 7px; border-radius: 50%; background: var(--ok) }
+  .zb.bad { color: var(--err) }
+  .zb.bad i { background: var(--err); box-shadow: 0 0 6px var(--err) }
   .upd.sec { color: var(--mid) }
   .downtxt { color: var(--err); margin-right: 4px; text-transform: uppercase; font-size: 10.5px; letter-spacing: .06em }
   .spark { position: absolute; left: 56px; right: 12px; bottom: 3px; width: calc(100% - 68px); height: 12px; pointer-events: none }
