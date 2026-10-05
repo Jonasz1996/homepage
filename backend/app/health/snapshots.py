@@ -97,5 +97,5 @@ async def delete_snapshot(svc: Service, http, node: str, kind: str, vmid: int, n
         raise IntegrationError("Ongeldige node, type of snapshotnaam")
     px = build(svc, http)
     upid = await px.request("DELETE", f"/api2/json/nodes/{node}/{kind}/{int(vmid)}/snapshot/{name}",
-                            headers=px.headers())
+                            headers=px.headers(write=True))
     return (upid or {}).get("data") or ""

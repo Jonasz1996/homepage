@@ -122,12 +122,14 @@ async def from_proxmox(svc: Service, clients: HttpClients) -> list[dict]:
     out = []
     for node in sorted(nodes):
         try:
-            rows = await integ.get(f"/nodes/{node}/apt/update")
+            # Vraagt Sys.Modify: een schrijfrecht, dus met het actietoken als er een is.
+            rows = await integ.get(f"/nodes/{node}/apt/update", write=True)
             out.append(target(f"pve:{svc.id}:{node}", node, "node", svc.id, _api_packages(rows)))
         except IntegrationError as e:
             msg = str(e)
             if "Geweigerd" in msg:
-                msg = "Het API-token mag de updates niet lezen (recht Sys.Modify op /nodes nodig)"
+                msg = (f"Het {'actietoken' if getattr(integ, 'split', False) else 'API-token'} mag de updates niet lezen "
+                       "(recht Sys.Modify op /nodes nodig)")
             out.append(target(f"pve:{svc.id}:{node}", node, "node", svc.id, error=msg))
     return out
 

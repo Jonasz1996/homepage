@@ -18,11 +18,13 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import outside
 from ..config import get_settings
 from ..db import get_db
 from ..deps import COOKIE, audit, current_user, recent_auth
 from ..models import AppState, AuditLog, Service, Session, SshHost, SshKey, User
 from ..monitoring.checks import HttpClients
+from .. import ssh_pin
 from ..ssh_discovery import apply, discover
 from ..ssh_login import DEFAULTS_KEY, login_for
 from ..security import encrypt, token_id
@@ -57,7 +59,7 @@ async def list_keys(user: User = Depends(current_user), db: AsyncSession = Depen
     return [_key_out(k) for k in (await db.execute(select(SshKey).order_by(SshKey.id))).scalars()]
 
 
-@router.post("/keys", status_code=201)
+@router.post("/keys", status_code=201, dependencies=[outside.guard("terminal")])
 async def create_key(data: KeyIn, request: Request, user: User = Depends(recent_auth),
                      db: AsyncSession = Depends(get_db)):
     try:
@@ -76,7 +78,7 @@ async def create_key(data: KeyIn, request: Request, user: User = Depends(recent_
     return _key_out(k)
 
 
-@router.delete("/keys/{key_id}")
+@router.delete("/keys/{key_id}", dependencies=[outside.guard("terminal")])
 async def delete_key(key_id: int, request: Request, user: User = Depends(recent_auth),
                      db: AsyncSession = Depends(get_db)):
     k = await db.get(SshKey, key_id)
@@ -150,7 +152,7 @@ async def list_hosts(user: User = Depends(current_user), db: AsyncSession = Depe
     return [_host_out(h) for h in hosts]
 
 
-@router.post("/hosts", status_code=201)
+@router.post("/hosts", status_code=201, dependencies=[outside.guard("terminal")])
 async def create_host(data: HostIn, request: Request, user: User = Depends(recent_auth),
                       db: AsyncSession = Depends(get_db)):
     await _check_refs(db, data)
@@ -163,7 +165,7 @@ async def create_host(data: HostIn, request: Request, user: User = Depends(recen
     return _host_out(h)
 
 
-@router.patch("/hosts/{host_id}")
+@router.patch("/hosts/{host_id}", dependencies=[outside.guard("terminal")])
 async def update_host(host_id: int, data: HostIn, request: Request, user: User = Depends(recent_auth),
                       db: AsyncSession = Depends(get_db)):
     h = await _get_host(db, host_id)
@@ -179,7 +181,7 @@ async def update_host(host_id: int, data: HostIn, request: Request, user: User =
     return _host_out(h)
 
 
-@router.delete("/hosts/{host_id}")
+@router.delete("/hosts/{host_id}", dependencies=[outside.guard("terminal")])
 async def delete_host(host_id: int, request: Request, user: User = Depends(recent_auth),
                       db: AsyncSession = Depends(get_db)):
     h = await _get_host(db, host_id)
@@ -189,7 +191,7 @@ async def delete_host(host_id: int, request: Request, user: User = Depends(recen
     return {"ok": True}
 
 
-@router.post("/hosts/{host_id}/forget-hostkey")
+@router.post("/hosts/{host_id}/forget-hostkey", dependencies=[outside.guard("terminal")])
 async def forget_hostkey(host_id: int, request: Request, user: User = Depends(recent_auth),
                          db: AsyncSession = Depends(get_db)):
     h = await _get_host(db, host_id)
@@ -199,7 +201,7 @@ async def forget_hostkey(host_id: int, request: Request, user: User = Depends(re
     return {"ok": True}
 
 
-@router.get("/ready")
+@router.get("/ready", dependencies=[outside.guard("terminal")])
 async def ready(user: User = Depends(recent_auth)):
     """De frontend vraagt dit vóór het openen van een terminal; 403 = eerst 2FA bevestigen."""
     return {"ok": True}
@@ -238,7 +240,7 @@ async def get_defaults(user: User = Depends(current_user), db: AsyncSession = De
     return _defaults_out(await _defaults(db))
 
 
-@router.put("/defaults")
+@router.put("/defaults", dependencies=[outside.guard("terminal")])
 async def put_defaults(data: DefaultsIn, request: Request, user: User = Depends(recent_auth),
                        db: AsyncSession = Depends(get_db)):
     if data.key_id is not None and await db.get(SshKey, data.key_id) is None:
@@ -267,7 +269,7 @@ async def get_snippets(user: User = Depends(current_user), db: AsyncSession = De
     return st.value if st else []
 
 
-@router.put("/snippets")
+@router.put("/snippets", dependencies=[outside.guard("terminal")])
 async def put_snippets(data: list[Snippet], request: Request, user: User = Depends(recent_auth),
                        db: AsyncSession = Depends(get_db)):
     if len(data) > 100:
@@ -298,7 +300,7 @@ class ImportItem(BaseModel):
         return _clean_host(v)
 
 
-@router.post("/import")
+@router.post("/import", dependencies=[outside.guard("terminal")])
 async def import_hosts(items: list[ImportItem], request: Request, user: User = Depends(recent_auth),
                        db: AsyncSession = Depends(get_db)):
     if len(items) > 1000:
@@ -307,6 +309,51 @@ async def import_hosts(items: list[ImportItem], request: Request, user: User = D
     await audit(db, request, user, "ssh_hosts_imported", **result)
     await db.commit()
     return result
+
+
+# --- Sleutel vastzetten op het dashboard (from= in authorized_keys) -------------------
+
+@router.get("/pin")
+async def pin_status(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    st = await db.get(AppState, ssh_pin.STATE_KEY)
+    return st.value if st else {"hosts": {}, "checked_at": None}
+
+
+def _no_hostkey(hosts: list[SshHost]) -> dict[int, dict]:
+    return {h.id: {"state": "fout", "text": "hostsleutel nog niet bevestigd: open één keer een terminal naar deze host"}
+            for h in hosts if not h.host_key}
+
+
+@router.post("/pin/check", dependencies=[outside.guard("terminal")])
+async def pin_check(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Per host: staat de sleutel van het dashboard vast op het IP van het dashboard?"""
+    hosts = await ssh_pin.all_hosts(db)
+    res = await ssh_pin.run_all(db, [h for h in hosts if h.host_key], ssh_pin.check)
+    value = await ssh_pin.save(db, {**_no_hostkey(hosts), **res})
+    await db.commit()
+    return value
+
+
+class PinIn(BaseModel):
+    host_ids: list[int] = Field(min_length=1, max_length=1000)
+    pin: bool = True
+
+
+@router.post("/pin", dependencies=[outside.guard("terminal")])
+async def pin_change(data: PinIn, request: Request, user: User = Depends(recent_auth),
+                     db: AsyncSession = Depends(get_db)):
+    hosts = await ssh_pin.all_hosts(db, data.host_ids)
+    also = await ssh_pin.seen_ips(db) if data.pin else set()
+    res = await ssh_pin.run_all(db, [h for h in hosts if h.host_key],
+                                lambda h, login: ssh_pin.change(h, login, data.pin, also))
+    res = {**_no_hostkey(hosts), **res}
+    value = await ssh_pin.save(db, res)
+    names = {h.id: h.name for h in hosts}
+    await audit(db, request, user, "ssh_pin" if data.pin else "ssh_unpin",
+                changed=[names[i] for i, r in res.items() if r.get("changed")],
+                errors=[names[i] for i, r in res.items() if r.get("error") or r["state"] == "fout"])
+    await db.commit()
+    return {**value, "results": {str(k): r for k, r in res.items()}}
 
 
 # --- WebSocket ----------------------------------------------------------------
@@ -357,6 +404,10 @@ async def terminal(ws: WebSocket, host_id: int, cols: int = 100, rows: int = 30,
     if user is None:
         await _send(ws, t="error", m=why)
         await ws.close(4401)
+        return
+    if why := await outside.blocked(ws, db, "terminal"):
+        await _send(ws, t="error", m=why)
+        await ws.close(4403)
         return
     h = await db.get(SshHost, host_id)
     if h is None:

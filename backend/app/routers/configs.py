@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import outside
 from ..db import get_db
 from ..deps import audit, current_session, current_user, recent_auth
 from ..models import AppState, ConfigVersion, Device, Session, SshHost, User
@@ -50,11 +51,13 @@ async def _version(db: AsyncSession, vid: int) -> ConfigVersion:
 
 
 @router.get("/configs/versions/{vid}/diff")
-async def diff(vid: int, against: int | None = None, sess: Session = Depends(current_session),
+async def diff(vid: int, request: Request, against: int | None = None, sess: Session = Depends(current_session),
                user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """Verschil met de vorige versie (of met `against`). Wachtwoorden en sleutels gemaskeerd."""
     v = await _version(db, vid)
     if v.kind == "file":
+        if why := await outside.blocked(request, db, "downloads"):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, why)
         # Eigen bestanden kunnen van alles bevatten dat het maskeren mist: vraagt een recente 2FA.
         await recent_auth(sess, user)
     if against:
@@ -70,7 +73,7 @@ async def diff(vid: int, against: int | None = None, sess: Session = Depends(cur
     return {"version": _v(v), "against": _v(old) if old else None, "diff": text}
 
 
-@router.get("/configs/versions/{vid}/download")
+@router.get("/configs/versions/{vid}/download", dependencies=[outside.guard("downloads")])
 async def download(vid: int, request: Request, user: User = Depends(recent_auth), db: AsyncSession = Depends(get_db)):
     """Volledige inhoud, ongemaskeerd (vraagt een recente 2FA)."""
     v = await _version(db, vid)
@@ -177,7 +180,7 @@ async def device_patch(mac: str, body: DeviceIn, request: Request, user: User = 
     return devices.device_out(d, datetime.now(timezone.utc))
 
 
-@router.post("/devices/{mac}/scan")
+@router.post("/devices/{mac}/scan", dependencies=[outside.guard("acties")])
 async def device_scan(mac: str, request: Request, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     d = await _device(db, mac)
     if not d.ip:

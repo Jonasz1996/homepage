@@ -1,5 +1,6 @@
 <script>
   import Cluster from './Cluster.svelte'
+  import SecurityCheck from './SecurityCheck.svelte'
   import { onMount, untrack } from 'svelte'
   import { api, poll, withReauth } from './api.js'
   import { rel } from './cronfmt.js'
@@ -7,7 +8,7 @@
 
   // Gezondheid van de hardware en van de homepage zelf: schijven (SMART, ZFS), temperaturen en throttling,
   // vergeten snapshots, vervaldatum van domeinen, en of de worker, de back-up en de kopie buiten de container in orde zijn.
-  let { open = false, initial = null, onclose } = $props()
+  let { open = false, initial = null, onclose, onfix } = $props()
 
   let data = $state(null)
   let error = $state('')
@@ -130,7 +131,7 @@
     </div>
 
     <div class="tabs">
-      {#each [['schijven', 'schijven'], ['temperatuur', 'temperatuur'], ['snapshots', 'snapshots'], ['domeinen', 'domeinen'], ['cluster', 'cluster'], ['homepage', 'homepage zelf']] as [k, label]}
+      {#each [['schijven', 'schijven'], ['temperatuur', 'temperatuur'], ['snapshots', 'snapshots'], ['domeinen', 'domeinen'], ['cluster', 'cluster'], ['homepage', 'homepage zelf'], ['beveiliging', 'beveiliging']] as [k, label]}
         <button class="mini" class:on={tab === k} onclick={() => (tab = k)}>{label}
           {#if k === 'snapshots' && s?.old_snapshots}<b class="n w">{s.old_snapshots}</b>{/if}
           {#if k === 'domeinen' && s?.domains_soon}<b class="n w">{s.domains_soon}</b>{/if}
@@ -295,6 +296,8 @@
 
     {:else if tab === 'cluster'}
       <Cluster />
+    {:else if tab === 'beveiliging'}
+      <SecurityCheck onfix={(fix) => (fix.window === 'health' ? (tab = fix.tab) : onfix?.(fix))} />
     {:else}
       <div class="head">
         <span class="hint">Leeft de worker, is er een recente en leesbare back-up, en staat er een kopie buiten de container?</span>
