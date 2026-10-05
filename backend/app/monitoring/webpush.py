@@ -50,6 +50,8 @@ RS = 4096
 
 PUSH_HOSTS = ("fcm.googleapis.com",)
 PUSH_SUFFIXES = (".push.apple.com", ".push.services.mozilla.com", ".notify.windows.com")
+# Een toestel dat de pushdienst niet meer kent, blijft zo lang staan (zie PushSubscription.gone_at).
+GONE_KEEP = timedelta(days=30)
 
 # Verstuurd per toestel (tijdstippen), voor het maximum per minuut. Per proces: genoeg, want de API doet dit
 # alleen als de worker niet draait.
@@ -76,19 +78,29 @@ def endpoint_hash(endpoint: str) -> str:
 
 def endpoint_ok(endpoint) -> bool:
     """Alleen echte pushdiensten: anders kan een pushadres de server naar het eigen netwerk laten verbinden."""
-    if not isinstance(endpoint, str) or not endpoint or len(endpoint) > 1000 or not endpoint.isascii():
+    if not isinstance(endpoint, str) or not endpoint or len(endpoint) > 1000:
         return False
-    if any(c in endpoint for c in "\\ \t\r\n@"):
+    # Alleen zichtbare ASCII: een stuurteken laat httpx later weigeren, en dat legde het versturen naar alle
+    # toestellen stil.
+    if any(not 0x21 <= ord(c) <= 0x7E for c in endpoint) or any(c in endpoint for c in "\\@"):
         return False
     try:
         p = urlsplit(endpoint)
         port = p.port
-    except ValueError:
+        if httpx.URL(endpoint).host != (p.hostname or ""):
+            return False
+    except (ValueError, httpx.InvalidURL):
         return False
     host = (p.hostname or "").lower()
     if p.scheme != "https" or port not in (None, 443) or not host:
         return False
     return host in PUSH_HOSTS or host.endswith(PUSH_SUFFIXES)
+
+
+def service_of(endpoint: str) -> str | None:
+    """Welke pushdienst (fcm.googleapis.com, .push.apple.com, ...): een browser blijft bij dezelfde."""
+    host = (urlsplit(endpoint).hostname or "").lower()
+    return next((x for x in PUSH_HOSTS + PUSH_SUFFIXES if host == x or host.endswith(x)), None)
 
 
 def check_keys(p256dh: str, auth: str) -> tuple[bytes, bytes] | None:
@@ -194,10 +206,14 @@ async def set_sub(db: AsyncSession, origin: str | None) -> None:
 
 # --- versturen ----------------------------------------------------------------------------------------------
 
-def accepts(min_level: str, level: str, source: str) -> bool:
-    """Laat dit toestel deze melding krijgen? Herstel en het weekrapport altijd, aanmeldingen vanaf warn."""
-    if source == "rapport" or level == "ok":
+def accepts(min_level: str, level: str, source: str, recovers: str | None = None) -> bool:
+    """Laat dit toestel deze melding krijgen? Het weekrapport altijd, aanmeldingen vanaf warn. Herstel (ok) telt
+    zoals de melding die hij herstelt (recovers: het niveau daarvan): "NAS weer bereikbaar" komt zo op een toestel
+    dat ook "NAS down" kreeg, maar een geslaagde back-up of "2FA ingeschakeld" niet op een toestel voor storingen."""
+    if source == "rapport":
         return True
+    if level == "ok":
+        level = recovers or "info"
     rank = LEVELS.get(level, 0)
     if source == "auth" and rank >= LEVELS["warn"]:
         return True
@@ -240,6 +256,8 @@ async def deliver(client: httpx.AsyncClient, info: dict, payload: dict, state: d
         headers["Topic"] = topic
     try:
         r = await client.post(endpoint, content=body, headers=headers, follow_redirects=False, timeout=TIMEOUT)
+    except httpx.InvalidURL:
+        return 0, "ongeldig pushadres"
     except httpx.HTTPError as e:
         return None, f"netwerkfout: {type(e).__name__}"
     if r.status_code in (200, 201, 202):
@@ -259,7 +277,7 @@ def _kind(code: int | None) -> str:
 
 
 def _mark_ok(sub: PushSubscription, now: datetime) -> None:
-    sub.last_ok_at, sub.fail_count, sub.last_error, sub.warned = now, 0, None, False
+    sub.last_ok_at, sub.fail_count, sub.last_error, sub.warned, sub.gone_at = now, 0, None, False, None
 
 
 def _mark_failed(db: AsyncSession, sub: PushSubscription, error: str) -> None:
@@ -272,14 +290,16 @@ def _mark_failed(db: AsyncSession, sub: PushSubscription, error: str) -> None:
                level="err", source="homepage")
 
 
-async def _gone(db: AsyncSession, sub: PushSubscription) -> None:
-    """De pushdienst kent het toestel niet meer (afgemeld, app verwijderd): weg ermee, en zeggen op de andere."""
-    label = sub.label
+async def _gone(db: AsyncSession, sub: PushSubscription, now: datetime | None = None) -> None:
+    """De pushdienst kent het toestel niet meer (afgemeld, app verwijderd): niets meer naartoe sturen, en zeggen op de
+    andere. De rij blijft nog even: meldt de browser zich zelf opnieuw aan, dan werkt hij weer."""
     await db.execute(delete(PushQueue).where(PushQueue.subscription_id == sub.id))
-    await db.delete(sub)
-    notify(db, f"Je toestel {label} krijgt geen meldingen meer"[:200],
-           "De pushdienst kent het niet meer (afgemeld of app verwijderd). Zet het opnieuw aan in 'Meldingen op je gsm'.",
-           level="err", source="homepage")
+    if sub.gone_at is None:
+        sub.gone_at = now or datetime.now(timezone.utc)
+        sub.last_error = "de pushdienst kent dit toestel niet meer"
+        notify(db, f"Je toestel {sub.label} krijgt geen meldingen meer"[:200],
+               "De pushdienst kent het niet meer (afgemeld of app verwijderd). Zet het opnieuw aan in 'Meldingen op je "
+               "gsm'.", level="err", source="homepage")
 
 
 def _recent(sid: int) -> int:
@@ -294,13 +314,14 @@ async def _claim(db: AsyncSession, now: datetime) -> None:
     # Te oud om nog naar de gsm te sturen (bv. de worker lag een dag stil): alleen in het meldingencentrum.
     await db.execute(update(Notification).where(Notification.pushed_at.is_(None), Notification.ts <= now - KEEP)
                      .values(pushed_at=now).execution_options(synchronize_session=False))
-    subs = list((await db.execute(select(PushSubscription.id, PushSubscription.min_level))).all())
+    subs = list((await db.execute(select(PushSubscription.id, PushSubscription.min_level)
+                                  .where(PushSubscription.gone_at.is_(None)))).all())
     if not subs:
         await db.execute(update(Notification).where(Notification.pushed_at.is_(None))
                          .values(pushed_at=now).execution_options(synchronize_session=False))
         return
     rows = (await db.execute(
-        select(Notification.id, Notification.level, Notification.source)
+        select(Notification.id, Notification.level, Notification.source, Notification.service_id)
         .where(Notification.pushed_at.is_(None), Notification.ts > now - KEEP)
         .order_by(Notification.id).limit(CLAIM_LIMIT))).all()
     for n in rows:
@@ -308,9 +329,24 @@ async def _claim(db: AsyncSession, now: datetime) -> None:
                                .values(pushed_at=now).execution_options(synchronize_session=False))
         if res.rowcount != 1:
             continue  # een ander proces was sneller
+        recovers = None
+        if n.level == "ok" and n.service_id:
+            recovers = (await db.execute(
+                select(Notification.level).where(Notification.service_id == n.service_id, Notification.id < n.id,
+                                                 Notification.level != "ok")
+                .order_by(Notification.id.desc()).limit(1))).scalar()
         for sid, min_level in subs:
-            if accepts(min_level, n.level, n.source):
-                db.add(PushQueue(subscription_id=sid, notification_id=n.id, attempts=0, next_at=now, created_at=now))
+            if not accepts(min_level, n.level, n.source, recovers):
+                continue
+            if n.service_id:
+                # Nieuwer nieuws over dezelfde service: een oudere melding die nog wacht (opnieuw proberen) zou
+                # anders na deze aankomen en hem op de gsm vervangen ("down" na "weer bereikbaar"). Wat nu al klaar
+                # staat, gaat gewoon eerst.
+                older = select(Notification.id).where(Notification.service_id == n.service_id, Notification.id < n.id)
+                await db.execute(delete(PushQueue).where(PushQueue.subscription_id == sid, PushQueue.next_at > now,
+                                                         PushQueue.notification_id.in_(older))
+                                 .execution_options(synchronize_session=False))
+            db.add(PushQueue(subscription_id=sid, notification_id=n.id, attempts=0, next_at=now, created_at=now))
 
 
 async def _send_due(db: AsyncSession, client: httpx.AsyncClient, now: datetime) -> None:
@@ -336,11 +372,21 @@ async def _send_due(db: AsyncSession, client: httpx.AsyncClient, now: datetime) 
     for r in mine:
         by_sub[r.subscription_id].append(r)
     for sid, items in by_sub.items():
-        sub = await db.get(PushSubscription, sid)
-        if sub is None:
-            continue
-        await _send_device(db, client, sub, items, state, key, now)
-        await db.commit()
+        # Elk toestel apart: een fout bij het ene (kapotte rij, intussen verwijderd) houdt de andere niet tegen.
+        try:
+            sub = await db.get(PushSubscription, sid)
+            if sub is None or sub.gone_at is not None:
+                await db.execute(delete(PushQueue).where(PushQueue.id.in_([r.id for r in items])))
+            else:
+                await _send_device(db, client, sub, items, state, key, now)
+            await db.commit()
+        except Exception:
+            log.exception("web push naar toestel %s mislukt", sid)
+            await db.rollback()
+            await db.execute(update(PushQueue).where(PushQueue.id.in_([r.id for r in items]))
+                             .values(next_at=now + timedelta(seconds=BACKOFF[0]))
+                             .execution_options(synchronize_session=False))
+            await db.commit()
 
 
 async def _send_device(db: AsyncSession, client: httpx.AsyncClient, sub: PushSubscription, items: list,
@@ -364,11 +410,11 @@ async def _send_device(db: AsyncSession, client: httpx.AsyncClient, sub: PushSub
             await db.execute(update(PushQueue).where(PushQueue.id.in_([r.id for r in fresh]))
                              .values(next_at=now + timedelta(seconds=60)).execution_options(synchronize_session=False))
             return
-        # Te veel tegelijk: de nieuwste, en één bericht voor de rest (die staan in het meldingencentrum).
+        # Te veel tegelijk: de nieuwste, en één bericht voor de rest (die staan in het meldingencentrum). De rest
+        # blijft in de wachtrij tot dat bericht aankwam.
         drop, fresh = fresh[:len(fresh) - (budget - 1)], fresh[len(fresh) - (budget - 1):]
         ids = [r.notification_id for r in drop if r.notification_id]
         dropped = list((await db.execute(select(Notification.level).where(Notification.id.in_(ids)))).scalars())
-        await db.execute(delete(PushQueue).where(PushQueue.id.in_([r.id for r in drop])))
         dropped += ["info"] * (len(drop) - len(dropped))
     ids = [r.notification_id for r in fresh if r.notification_id]
     notes = {n.id: n for n in (await db.execute(select(Notification).where(Notification.id.in_(ids)))).scalars()}
@@ -383,7 +429,7 @@ async def _send_device(db: AsyncSession, client: httpx.AsyncClient, sub: PushSub
                                     topic=f"svc{n.service_id}" if n.service_id else None)
         kind = _kind(code)
         if kind == "gone":
-            await _gone(db, sub)
+            await _gone(db, sub, now)
             return
         if kind == "ok":
             _mark_ok(sub, now)
@@ -411,11 +457,18 @@ async def _send_device(db: AsyncSession, client: httpx.AsyncClient, sub: PushSub
         code, error = await deliver(client, info, summary, state, key)
         kind = _kind(code)
         if kind == "gone":
-            await _gone(db, sub)
+            await _gone(db, sub, now)
         elif kind == "ok":
             _mark_ok(sub, now)
-        elif error:
-            sub.last_error = error[:300]
+            await db.execute(delete(PushQueue).where(PushQueue.id.in_([r.id for r in drop])))
+        else:
+            # Niet aangekomen: de weggelaten meldingen later opnieuw (dan opnieuw samengevat), tot een dag oud.
+            sub.last_error = (error or f"HTTP {code}")[:300]
+            attempts = max((r.attempts for r in drop), default=0) + 1
+            await db.execute(update(PushQueue).where(PushQueue.id.in_([r.id for r in drop]))
+                             .values(attempts=attempts,
+                                     next_at=now + timedelta(seconds=BACKOFF[min(attempts, len(BACKOFF)) - 1]))
+                             .execution_options(synchronize_session=False))
 
 
 async def run_webpush(db: AsyncSession, client: httpx.AsyncClient) -> None:
@@ -447,9 +500,26 @@ async def send_test(db: AsyncSession, client: httpx.AsyncClient, sub: PushSubscr
 async def status(db: AsyncSession) -> dict:
     """Voor de instellingen-checklist: hoeveel toestellen, welke falen, wanneer het laatst iets aankwam."""
     subs = list((await db.execute(select(PushSubscription).order_by(PushSubscription.id))).scalars())
-    oks = [_aware(s.last_ok_at) for s in subs if s.last_ok_at]
-    return {"devices": len(subs), "failing": [s.label for s in subs if (s.fail_count or 0) >= 3],
+    live = [s for s in subs if s.gone_at is None]
+    oks = [_aware(s.last_ok_at) for s in live if s.last_ok_at]
+    return {"devices": len(live),
+            "failing": [s.label for s in live if (s.fail_count or 0) >= 3] + [f"{s.label} (afgemeld)" for s in subs
+                                                                              if s.gone_at is not None],
             "last_ok": max(oks) if oks else None}
+
+
+async def forget_renew(db: AsyncSession, user_id: int) -> None:
+    """Na een nieuw wachtwoord of "andere sessies afmelden": de vernieuwgeheimen van de toestellen gelden niet meer
+    (wie er een kopieerde, kan zo de meldingen niet naar zich toe halen). De toestellen blijven meldingen krijgen;
+    vernieuwt de browser later zelf zijn pushadres, dan zet je dat toestel opnieuw aan."""
+    await db.execute(update(PushSubscription).where(PushSubscription.user_id == user_id)
+                     .values(renew_hash=hashlib.sha256(os.urandom(32)).hexdigest())
+                     .execution_options(synchronize_session=False))
+
+
+async def forget_gone(db: AsyncSession, now: datetime) -> None:
+    """Toestellen die de pushdienst al een maand niet meer kent: weg (de worker, bij het opruimen)."""
+    await db.execute(delete(PushSubscription).where(PushSubscription.gone_at < now - GONE_KEEP))
 
 
 async def endpoint_hosts(db: AsyncSession) -> list[tuple[str, str]]:

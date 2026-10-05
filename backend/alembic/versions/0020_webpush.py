@@ -27,6 +27,7 @@ def upgrade() -> None:
         sa.Column('last_error', sa.String(length=300), nullable=True),
         sa.Column('fail_count', sa.Integer(), server_default='0', nullable=False),
         sa.Column('warned', sa.Boolean(), server_default=sa.false(), nullable=False),
+        sa.Column('gone_at', sa.DateTime(timezone=True), nullable=True),
         sa.ForeignKeyConstraint(['user_id'], ['users.id'], ondelete='CASCADE'),
         sa.PrimaryKeyConstraint('id'),
         sa.UniqueConstraint('endpoint_hash'),

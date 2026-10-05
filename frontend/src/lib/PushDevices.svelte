@@ -96,7 +96,7 @@
       if (mine && saved?.renew) {
         // De server kent dit toestel nog, alleen het pushadres is nieuw: zelfde rij, naam en keuze houden.
         r = await api('/webpush/subscriptions/renew', { method: 'PUT', body: { id: saved.id, renew: saved.renew, subscription } })
-          .then(() => ({ id: saved.id, renew: saved.renew })).catch(() => null)
+          .then((x) => ({ id: saved.id, renew: x?.renew || saved.renew })).catch(() => null)
       }
       r ||= await withReauth(() => api('/webpush/subscriptions', {
         method: 'POST', body: { ...subscription, label: label.trim() || guessLabel(), min_level: level },

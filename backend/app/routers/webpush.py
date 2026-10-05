@@ -21,7 +21,7 @@ from ..db import get_db
 from ..deps import audit, client_ip, current_user, notify, recent_auth
 from ..models import PushSubscription, User
 from ..monitoring import webpush
-from ..security import LoginLimiter, encrypt
+from ..security import LoginLimiter, decrypt_json, encrypt
 
 router = APIRouter(prefix="/api/webpush", tags=["webpush"])
 
@@ -81,7 +81,8 @@ def _origin(request: Request) -> str | None:
 
 def _out(s: PushSubscription) -> dict:
     return {"id": s.id, "label": s.label, "min_level": s.min_level, "created_at": s.created_at,
-            "last_ok_at": s.last_ok_at, "last_error": s.last_error, "fail_count": s.fail_count}
+            "last_ok_at": s.last_ok_at, "last_error": s.last_error, "fail_count": s.fail_count,
+            "gone": s.gone_at is not None}
 
 
 async def _get(db: AsyncSession, sid: int) -> PushSubscription:
@@ -123,7 +124,7 @@ async def subscribe(body: SubscribeIn, request: Request, user: User = Depends(re
     # Hetzelfde toestel opnieuw: dezelfde rij, met nieuwe sleutels en een nieuw vernieuwgeheim.
     s.user_id, s.data, s.min_level = user.id, encrypt(json.dumps(data)), body.min_level
     s.label = body.label.strip() or "toestel"
-    s.renew_hash, s.fail_count, s.warned, s.last_error = _sha(renew), 0, False, None
+    s.renew_hash, s.fail_count, s.warned, s.last_error, s.gone_at = _sha(renew), 0, False, None, None
     await audit(db, request, user, "webpush_added", label=s.label, min_level=s.min_level, host=_host(body.endpoint))
     await db.commit()
     return {"id": s.id, "renew": renew}
@@ -176,14 +177,29 @@ async def renew_subscription(body: RenewIn, request: Request, db: AsyncSession =
         renew_limiter.fail(who)
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Ongeldig vernieuwgeheim")
     data = _data(body.subscription)
+    # Een browser blijft bij zijn eigen pushdienst (Chrome bij Google, Safari bij Apple). Een ander adres bij een
+    # andere dienst is dus niet dit toestel.
+    try:
+        old = decrypt_json(s.data).get("endpoint") or ""
+    except Exception:  # noqa: BLE001 - onleesbare oude rij: dan het nieuwe adres zonder vergelijking
+        old = ""
+    if old and webpush.service_of(old) != webpush.service_of(body.subscription.endpoint):
+        renew_limiter.fail(who)
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Andere pushdienst: zet het toestel opnieuw aan")
     h = webpush.endpoint_hash(body.subscription.endpoint)
     if h != s.endpoint_hash:
         # Had de pagina dit nieuwe adres al aangemeld, dan is dat hetzelfde toestel: één rij houden.
         await db.execute(delete(PushSubscription).where(PushSubscription.endpoint_hash == h,
                                                         PushSubscription.id != s.id))
-    s.endpoint_hash, s.data = h, encrypt(json.dumps(data))
-    s.fail_count, s.warned, s.last_error = 0, False, None
+    # Elk geheim werkt één keer: wie een oud geheim kopieerde, kan er niets meer mee.
+    renew = secrets.token_urlsafe(32)
+    s.endpoint_hash, s.data, s.renew_hash = h, encrypt(json.dumps(data)), _sha(renew)
+    s.fail_count, s.warned, s.last_error, s.gone_at = 0, False, None, None
     await audit(db, request, None, "webpush_renewed", label=s.label, host=_host(body.subscription.endpoint))
+    # Bron "auth": komt op elk toestel. Een vernieuwing die je niet verwacht, zie je zo meteen.
+    notify(db, f"Pushadres van {s.label} vernieuwd"[:200],
+           "De browser van dat toestel meldde zich opnieuw aan bij de pushdienst. Verwachtte je dat niet, zet het "
+           "toestel dan uit in 🔔 → gsm en opnieuw aan.", level="warn", source="auth")
     await db.commit()
-    return {"ok": True, "id": s.id}
+    return {"ok": True, "id": s.id, "renew": renew}
 

@@ -250,10 +250,12 @@ class Worker:
             await db.commit()
 
     async def tidy(self) -> None:
+        from . import webpush
         async with self.maker() as db:
             if self.self_cleanup:
                 await cleanup(db)
             await housekeeping(db)
+            await webpush.forget_gone(db, datetime.now(timezone.utc))
             await db.commit()
 
     def spawn(self, coro) -> asyncio.Task:

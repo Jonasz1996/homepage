@@ -635,6 +635,9 @@ class PushSubscription(Base):
     fail_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # Al gemeld dat het misloopt (één keer, tot het weer lukt).
     warned: Mapped[bool] = mapped_column(Boolean, default=False, server_default=sa_false())
+    # De pushdienst kent het adres niet meer (404/410). Blijft nog 30 dagen staan: Firefox meldt zich soms later
+    # zelf opnieuw aan (pushsubscriptionchange), en dat lukt alleen als de rij met het vernieuwgeheim er nog is.
+    gone_at: Mapped[datetime | None]
 
 
 class PushQueue(Base):

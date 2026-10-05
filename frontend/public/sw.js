@@ -106,11 +106,14 @@ self.addEventListener('pushsubscriptionchange', (e) => {
       userVisibleOnly: true, applicationServerKey: keyBytes(saved.applicationServerKey),
     })
     const j = sub.toJSON()
-    await fetch('/api/webpush/subscriptions/renew', {
+    const r = await fetch('/api/webpush/subscriptions/renew', {
       method: 'PUT',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'homepage' },
       body: JSON.stringify({ id: saved.id, renew: saved.renew, subscription: { endpoint: j.endpoint, keys: j.keys } }),
     })
+    // Elk vernieuwgeheim werkt één keer: het nieuwe bewaren voor de volgende keer.
+    const out = r.ok ? await r.json().catch(() => null) : null
+    if (out?.renew) await pushStore('readwrite', (s) => s.put({ ...saved, renew: out.renew }, 'webpush')).catch(() => {})
   })())
 })

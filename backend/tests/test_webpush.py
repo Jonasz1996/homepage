@@ -233,7 +233,7 @@ async def test_subscribe_needs_recent_auth_and_hides_secrets(authed):
     assert again["id"] == first["id"] and again["renew"] != first["renew"]
     items = (await authed.get("/api/webpush/subscriptions")).json()
     assert len(items) == 1 and items[0]["label"] == "Pixel 8" and items[0]["min_level"] == "warn"
-    assert set(items[0]) == {"id", "label", "min_level", "created_at", "last_ok_at", "last_error", "fail_count"}
+    assert set(items[0]) == {"id", "label", "min_level", "created_at", "last_ok_at", "last_error", "fail_count", "gone"}
     text = json.dumps(items)
     assert "toestel-a" not in text and "p256dh" not in text
 
@@ -371,7 +371,9 @@ async def test_410_removes_device_and_tells_the_others(authed):
     svc = PushService([a, b])
     svc.status[A] = 410
     await _run(svc)
-    assert [s.label for s in await _rows(PushSubscription)] == ["iPhone"]
+    # Blijft nog even staan (de browser kan zich zelf opnieuw aanmelden), maar krijgt niets meer.
+    assert [(s.label, s.gone_at is not None) for s in await _rows(PushSubscription)] == [("oude gsm", True),
+                                                                                         ("iPhone", False)]
     gone = await _rows(Notification, Notification.title == "Je toestel oude gsm krijgt geen meldingen meer")
     assert len(gone) == 1 and gone[0].level == "err" and gone[0].pushed_at is None
     await _run(svc)
@@ -530,7 +532,11 @@ async def test_renew_with_secret(authed):
                          headers={"X-Requested-With": ""})
     assert r.status_code == 403
     r = await authed.put("/api/webpush/subscriptions/renew", json={"id": first["id"], "renew": first["renew"], "subscription": new.sub()})
-    assert r.status_code == 200 and r.json()["id"] == first["id"]
+    assert r.status_code == 200 and r.json()["id"] == first["id"] and r.json()["renew"] != first["renew"]
+    # Het geheim werkt één keer.
+    r2 = await authed.put("/api/webpush/subscriptions/renew", json={"id": first["id"], "renew": first["renew"],
+                                                                      "subscription": new.sub()})
+    assert r2.status_code == 403
     (sub,) = await _rows(PushSubscription)
     data = decrypt_json(sub.data)
     assert data["endpoint"] == new.endpoint and data["p256dh"] == new.sub()["keys"]["p256dh"]
@@ -542,7 +548,7 @@ async def test_renew_with_secret(authed):
     await _notify({"title": "na vernieuwen", "level": "err"})
     svc = PushService([a, new])
     await _run(svc)
-    assert [m["title"] for m in svc.to(new)] == ["na vernieuwen"] and not svc.to(a)
+    assert [m["title"] for m in svc.to(new)] == ["Pushadres van Pixel vernieuwd", "na vernieuwen"] and not svc.to(a)
 
     # Te veel foute pogingen vanaf één IP: even niets meer, ook niet met het juiste geheim.
     for _ in range(8):
@@ -583,3 +589,93 @@ async def test_long_payload_is_trimmed_to_fit(authed):
     (msg,) = svc.to(a)
     assert len(msg["title"]) == 200 and 800 < len(msg["body"]) < 1000
     assert len(json.dumps(msg, ensure_ascii=False, separators=(",", ":")).encode()) <= webpush.MAX_PLAIN
+
+
+# --- na het nalezen ----------------------------------------------------------------------------------------------
+
+def test_stuurteken_in_pushadres_geweigerd():
+    for bad in ("https://x\x0b.push.apple.com/zz", "https://web.push.apple.com/a\x7fb", "https://web.push.apple.com/a\x01b"):
+        assert not webpush.endpoint_ok(bad)
+
+
+async def test_een_kapot_toestel_houdt_de_andere_niet_tegen(authed):
+    a, b = Phone(A), Phone(B)
+    await _subscribe(authed, a, "kapot")
+    await _subscribe(authed, b, "iPhone")
+    agen, db = await _db()
+    await db.execute(update(PushSubscription).where(PushSubscription.label == "kapot").values(data="geen-fernet"))
+    await db.commit()
+    await agen.aclose()
+    await _notify({"title": "NAS down", "level": "err"})
+    svc = PushService([a, b])
+    await _run(svc)
+    assert [m["title"] for m in svc.to(b)] == ["NAS down"]
+    # De rij van het kapotte toestel wacht even en wordt dan opnieuw geprobeerd, niet vijf minuten vastgehouden.
+    (row,) = await _rows(PushQueue)
+    assert webpush._aware(row.next_at) - datetime.now(timezone.utc) <= timedelta(seconds=webpush.BACKOFF[0])
+
+
+async def test_herstel_alleen_als_het_iets_herstelt(authed):
+    a = Phone(A)
+    await _subscribe(authed, a, "storingen", "err")
+    await _notify({"title": "Back-up gelukt", "level": "ok", "source": "webhook"},
+                  {"title": "2FA ingeschakeld", "level": "ok", "source": "auth"})
+    svc = PushService([a])
+    await _run(svc)
+    assert svc.to(a) == []
+
+
+async def test_nieuwer_nieuws_vervangt_een_wachtende_melding(authed):
+    a = Phone(A)
+    await _subscribe(authed, a, "Pixel")
+    agen, db = await _db()
+    db.add(Page(name="p", groups=[Group(name="g", services=[Service(name="NAS")])]))
+    await db.commit()
+    sid = (await db.execute(select(Service.id))).scalar_one()
+    await agen.aclose()
+    await _notify({"title": "NAS down", "level": "err", "source": "monitor", "service_id": sid})
+    svc = PushService([a])
+    svc.down = True
+    await _run(svc)  # mislukt: wacht 30 s
+    await _notify({"title": "NAS weer bereikbaar", "level": "ok", "source": "monitor", "service_id": sid})
+    svc.down = False
+    await _run(svc)
+    assert [m["title"] for m in svc.to(a)] == ["NAS weer bereikbaar"] and not await _rows(PushQueue)
+
+
+async def test_samenvatting_mislukt_dan_blijven_ze_wachten(authed):
+    a = Phone(A)
+    await _subscribe(authed, a, "Pixel")
+    await _notify(*({"title": f"m{i}", "level": "err"} for i in range(15)))
+    svc = PushService([a])
+    svc.down = True
+    await _run(svc)
+    # Niets aangekomen: alle 15 wachten nog (ook de 6 die in de samenvatting zaten).
+    assert len(await _rows(PushQueue)) == 15
+
+
+async def test_nieuw_wachtwoord_maakt_vernieuwgeheim_ongeldig_en_afgemeld_toestel_kan_terug(authed):
+    a, other = Phone(A), Phone("https://fcm.googleapis.com/fcm/send/nieuw")
+    first = await _subscribe(authed, a, "Pixel")
+    svc = PushService([a])
+    svc.status[A] = 410
+    await _notify({"title": "NAS down", "level": "err"})
+    await _run(svc)
+    (sub,) = await _rows(PushSubscription)
+    assert sub.gone_at is not None
+    # Naar een andere pushdienst mag niet.
+    r = await authed.put("/api/webpush/subscriptions/renew", json={"id": first["id"], "renew": first["renew"],
+                                                                     "subscription": Phone(B).sub()})
+    assert r.status_code == 422
+    r = await authed.put("/api/webpush/subscriptions/renew", json={"id": first["id"], "renew": first["renew"],
+                                                                     "subscription": other.sub()})
+    assert r.status_code == 200
+    (sub,) = await _rows(PushSubscription)
+    assert sub.gone_at is None
+    renew = r.json()["renew"]
+    from .conftest import PASSWORD
+    r = await authed.post("/api/auth/password", json={"current": PASSWORD, "new": "een-ander-lang-wachtwoord"})
+    assert r.status_code == 200, r.text
+    r = await authed.put("/api/webpush/subscriptions/renew", json={"id": first["id"], "renew": renew,
+                                                                     "subscription": other.sub()})
+    assert r.status_code == 403
