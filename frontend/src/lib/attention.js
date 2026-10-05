@@ -7,7 +7,7 @@ export const FIX_LABEL = {
 }
 
 export const AREA = {
-  services: 'down', 'back-ups': 'back-up', cluster: 'cluster', hardware: 'hardware', opslag: 'opslag', netwerk: 'netwerk',
+  services: 'down', checks: 'check', 'back-ups': 'back-up', cluster: 'cluster', hardware: 'hardware', opslag: 'opslag', netwerk: 'netwerk',
   homepage: 'dashboard', zabbix: 'zabbix', cron: 'cron', updates: 'updates', certificaten: 'certificaat',
   domeinen: 'domein', integraties: 'API', beveiliging: 'beveiliging', apparaten: 'apparaten', snapshots: 'snapshots',
   onderhoud: 'onderhoud',

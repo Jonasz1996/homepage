@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     # Welke versie er draait (install.sh schrijft het): voor "wat is er nieuw" en homepage-terugzetten.
     version_file: Path = Path("/etc/homepage/versie")
     offsite_dir: Path = Path("/mnt/homepage-backup")
+    # Waar de worker de API bereikt, om te merken dat die niet meer antwoordt.
+    api_url: str = "http://127.0.0.1:8000"
+    # De API kijkt elke minuut of de worker leeft (en stuurt dan zelf de meldingen naar de gsm). Uit in de tests.
+    watchdog: bool = True
 
 
 @lru_cache

@@ -17,8 +17,9 @@ from ..health.selfcheck import HEARTBEAT_EVERY, SELFCHECK_EVERY, heartbeat, run_
 from ..health.snapshots import SNAPSHOTS_EVERY, run_snapshots
 from ..models import AppState, Service
 from ..ssh_discovery import SYNC_EVERY, auto_sync
-from .checks import HttpClients, run_check
-from .engine import cleanup, housekeeping, record
+from . import watchdog
+from .checks import HttpClients, Outcome, check_service
+from .engine import active, cleanup, housekeeping, mass_check, record
 from .capacity import SAMPLE_EVERY, check_forecasts, sample
 from .network import NETWORK_EVERY, PUBLIC_IP_EVERY, sample_power, watch_gateways, watch_public_ip, watch_tunnels
 from .report import weekly_notification
@@ -44,6 +45,7 @@ class Worker:
         self.tasks: set[asyncio.Task] = set()
         self.self_cleanup = True
         self.http = HttpClients()
+        self.bad: set[int] = set()
         self.started = datetime.now(timezone.utc).replace(microsecond=0)
         # Periodieke taken per naam: een trage ronde (SSH die hangt) mag niet stapelen met de volgende.
         self.jobs: dict[str, asyncio.Task] = {}
@@ -67,10 +69,18 @@ class Worker:
         due = []
         seen = set()
         for sid, check, url in rows:
-            if not check or not check.get("type"):
+            # Push-checks wachten op een signaal (push.evaluate), gepauzeerde lopen niet.
+            if not active(check) or check.get("type") == "push":
                 continue
+            try:
+                interval = max(int(check.get("interval") or 60), MIN_INTERVAL)
+            except (TypeError, ValueError):
+                # Een oude, kapotte waarde mag de andere checks niet tegenhouden.
+                if sid not in self.bad:
+                    self.bad.add(sid)
+                    log.warning("check van service %s heeft een ongeldig interval: %r", sid, check.get("interval"))
+                interval = 60
             seen.add(sid)
-            interval = max(int(check.get("interval") or 60), MIN_INTERVAL)
             if sid not in self.next_due:
                 # Eerste keer: spreiden zodat niet alles tegelijk vertrekt.
                 self.next_due[sid] = now + random.uniform(0, min(interval, 30))
@@ -86,19 +96,55 @@ class Worker:
         self.running.add(sid)
         try:
             async with self.sem:
-                outcome = await run_check(check, url, self.http)
+                try:
+                    outcome = await check_service(self.maker, sid, check, url, self.http)
+                except Exception as e:  # noqa: BLE001 - telt als mislukte check, anders bevriest de tegel
+                    log.exception("check voor service %s mislukt", sid)
+                    outcome = Outcome(False, error=f"Interne fout in de check: {type(e).__name__}")
             async with self.maker() as db:
                 service = await db.get(Service, sid)
-                if service is None:
+                if service is None or not active(service.check):
                     return
-                await record(db, service, outcome)
+                state = await record(db, service, outcome)
                 await db.commit()
+                retry = (service.check or {}).get("retry_interval")
+                if not outcome.ok and state.status != "down" and isinstance(retry, int) and retry >= MIN_INTERVAL:
+                    # Twijfel: sneller opnieuw kijken, dan is een echte storing ook sneller bevestigd.
+                    self.next_due[sid] = time.monotonic() + retry
             if not outcome.ok:
                 await healing.check(self.maker, sid, self.http)
         except Exception:
             log.exception("check voor service %s mislukt", sid)
         finally:
             self.running.discard(sid)
+
+    async def push_beats(self) -> None:
+        """Elke tick: push-checks (signalen die binnenkwamen of uitbleven)."""
+        from . import push
+        try:
+            async with self.maker() as db:
+                ids = await push.evaluate(db)
+                await db.commit()
+        except Exception:
+            log.exception("push-checks mislukt")
+            return
+        for sid in ids:
+            await healing.check(self.maker, sid, self.http)
+
+    async def web_push(self) -> None:
+        """Elke tick: nieuwe meldingen naar de gsm('s) die het willen."""
+        from . import webpush
+        try:
+            async with self.maker() as db:
+                await webpush.run_webpush(db, self.http.get(False))
+        except Exception:
+            log.exception("web push mislukt")
+
+    async def minute(self) -> None:
+        """Elke minuut: massastoring voorbij, checks die niet meer lopen, antwoordt de API nog."""
+        await self.step("massastoring", mass_check)
+        await self.step("vastgelopen checks", watchdog.stale_checks)
+        await self.step("API bereikbaar", lambda db: watchdog.check_api(db, self.http.get(False)))
 
     async def step(self, name: str, fn) -> None:
         """Eén deelstap in een eigen sessie: een fout rolt alleen deze stap terug, de volgende stappen lopen gewoon."""
@@ -218,11 +264,13 @@ class Worker:
                                log.error("achtergrondtaak mislukt", exc_info=t.exception()))
         return task
 
-    def job(self, name: str, make) -> bool:
-        """Start make() als taak `name`, tenzij de vorige ronde van die taak nog loopt. Geeft terug of hij startte."""
+    def job(self, name: str, make, quiet: bool = False) -> bool:
+        """Start make() als taak `name`, tenzij de vorige ronde van die taak nog loopt. Geeft terug of hij startte.
+        quiet: voor taken die elke paar seconden aan de beurt zijn (anders staat het log daar vol van)."""
         running = self.jobs.get(name)
         if running and not running.done():
-            log.info("%s loopt nog van de vorige keer, deze ronde overgeslagen", name)
+            if not quiet:
+                log.info("%s loopt nog van de vorige keer, deze ronde overgeslagen", name)
             return False
         self.jobs[name] = self.spawn(make())
         return True
@@ -241,6 +289,10 @@ class Worker:
     async def run(self) -> None:
         await self.detect_timescale()
         await self.interrupted()
+        # Was het dashboard een tijd stil (crash, herstart van de container)? Dat zegt het, anders lijkt de uptime
+        # van die periode gewoon 100%.
+        await self.step("stilte na herstart", lambda db: watchdog.report_gap(db, self.started))
+        last_minute = time.monotonic()
         last_cleanup = 0.0
         # Eerste ronde na een minuut, daarna elk half uur.
         last_periodic = time.monotonic() - PERIODIC + 60
@@ -265,6 +317,11 @@ class Worker:
             try:
                 for sid, check, url in await self.due_services():
                     self.spawn(self.run_one(sid, check, url))
+                self.job("push", self.push_beats, quiet=True)
+                self.job("webpush", self.web_push, quiet=True)
+                if time.monotonic() - last_minute > 60:
+                    last_minute = time.monotonic()
+                    self.job("minute", self.minute)
                 if time.monotonic() - last_periodic > PERIODIC:
                     last_periodic = time.monotonic()
                     self.job("periodic", self.periodic)

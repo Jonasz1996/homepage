@@ -46,8 +46,10 @@ async def test_zonder_worker_staat_dat_bovenaan(authed):
 
 
 async def _seed(authed) -> dict[str, int]:
-    ids = await _tiles(authed, ("pve2", "link", {}), ("plex", "link", {}), ("nas", "link", {}), ("wiki", "link", {}),
-                       ("git", "link", {}), ("pbs-pi", "proxmoxbackupserver", {}), ("pve", "proxmox", {}),
+    http = {"check": {"type": "http"}}
+    ids = await _tiles(authed, ("pve2", "link", http), ("plex", "link", http), ("nas", "link", http),
+                       ("wiki", "link", http), ("git", "link", http), ("pbs-pi", "proxmoxbackupserver", {}),
+                       ("pve", "proxmox", {}),
                        ("zabbix", "zabbix", {}))
     agen, db = await _db()
     plex = await db.get(Service, ids["plex"])

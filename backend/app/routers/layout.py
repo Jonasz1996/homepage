@@ -4,9 +4,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..deps import audit, current_session, current_user, recent_auth
+from ..deps import audit, current_session, current_user, notify, recent_auth
 from ..layout import load_pages, pages_out, record_revision, restore_snapshot, service_out
 from ..models import ApiConnection, Group, Page, Revision, Service, Session, User
+from ..monitoring.engine import identity, reset_state, silencing
 from ..schemas import GroupIn, OrderIn, PageIn, ServiceIn
 from ..security import decrypt_json, encrypt_json
 
@@ -158,6 +159,7 @@ def _target(type_: str | None, url: str | None, config: dict | None) -> tuple:
     return type_, url, (config or {}).get("url")
 
 
+
 @router.patch("/services/{service_id}")
 async def update_service(service_id: int, data: ServiceIn, request: Request, sess: Session = Depends(current_session),
                          user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
@@ -174,6 +176,16 @@ async def update_service(service_id: int, data: ServiceIn, request: Request, ses
         await audit(db, request, user, "service_target_changed", service=service.name, url=data.url,
                     type=data.type, old_url=service.url, old_type=service.type)
     await _check_parent(db, service_id, data.parent_id)
+    # Een check pauzeren of zijn meldingen uitzetten is wat iemand met een gestolen sessie als eerste zou doen:
+    # dat vraagt een recente 2FA, en je krijgt er een melding van (ook op je gsm).
+    silenced = silencing(service.check, data.check)
+    if silenced:
+        await recent_auth(sess, user)
+        await audit(db, request, user, "check_silenced", service=service.name, what=silenced)
+        notify(db, f"{silenced.capitalize()}: {service.name}", "Was jij dit niet, kijk dan in ⚿ naar de sessies.",
+               level="warn", source="auth", service_id=service.id)
+    if identity(service.check, service.url) != identity(data.check, data.url):
+        await reset_state(db, service.id)
     if data.group_id != service.group_id:
         await _get(db, Group, data.group_id)
         service.position = await _next_position(db, Service.position, Service.group_id, data.group_id)
@@ -247,11 +259,17 @@ async def list_revisions(user: User = Depends(current_user), db: AsyncSession = 
 
 
 @router.post("/revisions/{revision_id}/restore")
-async def restore_revision(revision_id: int, request: Request, user: User = Depends(current_user),
-                           db: AsyncSession = Depends(get_db)):
+async def restore_revision(revision_id: int, request: Request, sess: Session = Depends(current_session),
+                           user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     rev = await _get(db, Revision, revision_id)
     label = f"Teruggezet naar versie van {rev.created_at:%d/%m %H:%M}"
-    await restore_snapshot(db, rev.snapshot)
+    silenced = await restore_snapshot(db, rev.snapshot)
+    if silenced:
+        # Een oude versie terugzetten mag geen achterdeur zijn om checks stil te leggen.
+        await recent_auth(sess, user)
+        notify(db, f"Checks stil door een oude versie: {', '.join(silenced[:5])}"[:200],
+               "Gepauzeerd of meldingen uit. Was jij dit niet, kijk dan in ⚿ naar de sessies.", level="warn",
+               source="auth")
     await audit(db, request, user, "revision_restored", revision=revision_id)
     await record_revision(db, user, label)
     await db.commit()

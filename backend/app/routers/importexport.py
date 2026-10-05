@@ -12,7 +12,7 @@ from ..db import get_db
 from ..deps import audit, current_user
 from ..layout import load_pages, record_revision
 from ..models import Group, Page, Service, User
-from ..schemas import ImportIn
+from ..schemas import ImportIn, clean_check
 from ..security import encrypt_json
 
 router = APIRouter(prefix="/api", tags=["import"])
@@ -116,6 +116,7 @@ async def import_yaml(data: ImportIn, request: Request, user: User = Depends(cur
     page_pos = (await db.execute(select(func.coalesce(func.max(Page.position), -1)))).scalar_one() + 1
     target = await db.get(Page, data.page_id) if data.page_id else None
     n_groups = n_services = 0
+    skipped: list[str] = []
     for page_name, groups in parsed:
         page = target
         if page is None or page_name:
@@ -133,10 +134,16 @@ async def import_yaml(data: ImportIn, request: Request, user: User = Depends(cur
             await db.flush()
             n_groups += 1
             for pos, s in enumerate(services):
+                try:
+                    check = clean_check(s.get("check") if isinstance(s.get("check"), dict) else None)
+                except ValueError:
+                    check = {}
+                if s.get("check") and not check:
+                    skipped.append(str(s["name"])[:80])
                 db.add(Service(
                     group_id=group.id, position=pos, name=str(s["name"])[:80],
                     description=s.get("description"), url=_clean_url(s.get("url")), icon=_clean_icon(s.get("icon")),
-                    type=s.get("type") or "link", check=s.get("check") or {}, config=s.get("config") or {},
+                    type=s.get("type") or "link", check=check, config=s.get("config") or {},
                     notes=str(s["notes"])[:20000] if s.get("notes") else None,
                     secrets=encrypt_json(s.get("secrets") or {}),
                 ))
@@ -144,7 +151,10 @@ async def import_yaml(data: ImportIn, request: Request, user: User = Depends(cur
     await audit(db, request, user, "import", groups=n_groups, services=n_services)
     await record_revision(db, user, f"Import: {n_groups} groepen, {n_services} services")
     await db.commit()
-    return {"groups": n_groups, "services": n_services}
+    out = {"groups": n_groups, "services": n_services}
+    if skipped:
+        out["checks_skipped"] = skipped
+    return out
 
 
 @router.get("/export", response_class=PlainTextResponse)

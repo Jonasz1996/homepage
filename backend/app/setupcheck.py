@@ -12,8 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .health import scan as hw, security
 from .integrations import IntegrationError, build
-from .models import AppState, CronJob, LogEntry, Service, SshHost, WebhookSource
-from .monitoring import cluster, configs, coverage, devices, pbssync, restoretest, upgrade, zabbix as zbx
+from .models import AppState, CronJob, LogEntry, Service, ServiceState, SshHost, WebhookSource
+from .monitoring import cluster, configs, coverage, devices, pbssync, restoretest, upgrade, watchdog, zabbix as zbx
+from .monitoring.engine import active
 from .ssh_login import defaults as ssh_defaults
 from .ssh_pin import STATE_KEY as PIN_KEY
 
@@ -252,6 +253,59 @@ async def zabbix_row(db: AsyncSession, svcs: list[Service], results: dict[int, d
                         f"{hosts} hosts, gekoppeld aan {tiles} tegel{'s' if tiles != 1 else ''}.", extra=extra)
 
 
+async def checks_row(db: AsyncSession, svcs: list[Service]) -> dict:
+    """Het dashboard vervangt Uptime Kuma: heeft elke tegel een check, en kijkt die naar het juiste?"""
+    title, key = "Checks op je tegels (in plaats van Uptime Kuma)", "monitoring:dekking"
+    running = [s for s in svcs if active(s.check)]
+    states = {st.service_id: st for st in (await db.execute(select(ServiceState))).scalars()}
+    todo = []
+    bare = [s for s in svcs if s.url and not (s.check or {}).get("type")]
+    if bare:
+        todo.append(f"{len(bare)} tegel{'s' if len(bare) != 1 else ''} met een adres maar zonder check: "
+                    f"{_list([s.name for s in bare], 6)}. ✎ bewerken → tegel → Monitoring.")
+    paused = [s.name for s in svcs if (s.check or {}).get("type") and (s.check or {}).get("paused")]
+    if paused:
+        todo.append(f"Gepauzeerd: {_list(paused, 6)}.")
+    for s in running:
+        st = states.get(s.id)
+        if st and st.stale:
+            todo.append(f"{s.name}: de check loopt niet meer (journalctl -u homepage-worker).")
+        elif st and st.redirected_to and not s.check.get("same_host"):
+            todo.append(f"{s.name}: verwijst door naar {st.redirected_to}, dus de check ziet de loginpagina en niet "
+                        "de app. Check een pad zonder login (bv. /api/health), of vink 'down als hij doorverwijst' aan.")
+    kuma = [w for w in (await db.execute(select(WebhookSource).where(WebhookSource.kind == "uptimekuma"))).scalars()
+            if w.enabled and w.last_at and datetime.now(timezone.utc) - w.last_at.replace(tzinfo=w.last_at.tzinfo
+                                                                                      or timezone.utc) < timedelta(days=7)]
+    if kuma:
+        todo.append(f"Uptime Kuma stuurt nog meldingen (webhook {kuma[0].name}, laatst {_local(kuma[0].last_at)}): "
+                    "zet Kuma pas uit als alles hier staat (README → Uptime Kuma uitzetten).")
+    first = bare[0] if bare else next((s for s in running if states.get(s.id) and (
+        states[s.id].stale or states[s.id].redirected_to)), None)
+    fix = {"window": "edit", "service_id": first.id} if first else None
+    if not running:
+        return row(key, "monitoring", title, "none", "Nog geen enkele tegel met een check: niets merkt het als een "
+                   "service uitvalt.", todo or ["✎ bewerken → tegel → Monitoring: kies een check."], fix)
+    text = f"{len(running)} check{'s' if len(running) != 1 else ''} lopen."
+    return row(key, "monitoring", title, "half" if todo else "ok", text, todo[:8], fix)
+
+
+async def watcher_row(db: AsyncSession) -> dict:
+    """Ziet iemand het als de hele container uitvalt? Dat kan alleen iets buiten het dashboard: Zabbix."""
+    title, fix = "Iemand die het dashboard zelf bewaakt", {"window": "health", "tab": "homepage"}
+    seen = await _state(db, watchdog.SEEN_KEY)
+    at = datetime.fromisoformat(seen["at"]) if seen.get("at") else None
+    how = ["Zet in Zabbix een HTTP-item op http://<IP van de container>/api/healthz (antwoord 200 = gezond, 503 = "
+           "worker of checks staan stil) met een trigger als het geen 200 is (README → Het dashboard zelf bewaken)."]
+    if not at:
+        return row("wachter", "monitoring", title, "none", "Niets vraagt /api/healthz op: valt de hele container uit, "
+                   "dan krijg je geen enkele melding.", how, fix)
+    if datetime.now(timezone.utc) - at > timedelta(minutes=15):
+        return row("wachter", "monitoring", title, "half", f"Laatst opgevraagd op {_local(at)}: staat de bewaking in "
+                   "Zabbix nog aan?", how, fix)
+    return row("wachter", "monitoring", title, "ok", f"{seen.get('ip') or 'Iets'} vraagt /api/healthz op, laatst om "
+               f"{_local(at)}.", fix=fix)
+
+
 async def hardware(db: AsyncSession) -> dict:
     hosts = (await _state(db, hw.STATE_KEY)).get("hosts") or []
     title, fix = "Schijven en temperatuur", {"window": "health", "tab": "schijven"}
@@ -432,6 +486,8 @@ async def run(db: AsyncSession, clients, results: dict[int, dict]) -> dict:
         _integration("adguard", "netwerk", "AdGuard Home", of("adguard"), results, "Nog geen AdGuard-tegel.",
                      ["Tegel of API van type adguard met je AdGuard-login."], "Werkt.", optional=True),
         await wake(db, svcs),
+        await checks_row(db, svcs),
+        await watcher_row(db),
         await zabbix_row(db, of("zabbix"), results),
         await home_assistant(db, clients, of("homeassistant"), results),
         await hardware(db),

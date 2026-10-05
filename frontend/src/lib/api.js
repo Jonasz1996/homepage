@@ -20,7 +20,7 @@ export async function api(path, { method = 'GET', body } = {}) {
   try { data = text ? JSON.parse(text) : null } catch { data = text }
   if (!r.ok) {
     const d = data?.detail
-    const msg = typeof d === 'string' ? d : Array.isArray(d) ? d.map((x) => x.msg).join(', ') : r.statusText
+    const msg = typeof d === 'string' ? d : Array.isArray(d) ? d.map((x) => String(x.msg).replace(/^Value error, /, '')).join(', ') : r.statusText
     if (r.status === 401 && !path.startsWith('/auth/')) window.dispatchEvent(new Event('hp:unauth'))
     if (r.status === 403 && msg.startsWith('buiten:')) {
       signalOutside(msg)
