@@ -39,6 +39,10 @@ class NginxProxyManager(Integration):
     label = "Nginx Proxy Manager"
     config_help = {"url": "http://192.168.0.245:81 (de beheerpoort van NPM)"}
     secret_help = {"username": "e-mailadres van de NPM-gebruiker", "password": "wachtwoord"}
+    call_prefix = "/api"
+
+    async def call_auth(self) -> dict:
+        return {"headers": {"Authorization": f"Bearer {await self.token()}"}}
 
     async def token(self) -> str:
         user, secret = self.need("username", "password")

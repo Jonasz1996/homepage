@@ -34,6 +34,10 @@ class OPNsense(Integration):
         "key": "API-key (System → Access → Users → API keys)",
         "secret": "API-secret",
     }
+    call_prefix = "/api"
+
+    async def call_auth(self) -> dict:
+        return {"auth": self.auth()}
 
     def auth(self) -> httpx.BasicAuth:
         key, secret = self.need("key", "secret")

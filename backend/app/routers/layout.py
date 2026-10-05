@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_db
 from ..deps import audit, current_session, current_user, recent_auth
 from ..layout import load_pages, pages_out, record_revision, restore_snapshot, service_out
-from ..models import Group, Page, Revision, Service, Session, User
+from ..models import ApiConnection, Group, Page, Revision, Service, Session, User
 from ..schemas import GroupIn, OrderIn, PageIn, ServiceIn
 from ..security import decrypt_json, encrypt_json
 
@@ -129,10 +129,17 @@ async def _check_parent(db: AsyncSession, service_id: int | None, parent_id: int
         cur = parent.parent_id
 
 
+async def _api_type(db: AsyncSession, data: ServiceIn) -> None:
+    """Een tegel met een API uit API-beheer krijgt de soort van die API als type."""
+    if data.api_id is not None:
+        data.type = (await _get(db, ApiConnection, data.api_id)).kind
+
+
 @router.post("/services", status_code=201)
 async def create_service(data: ServiceIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     await _get(db, Group, data.group_id)
     await _check_parent(db, None, data.parent_id)
+    await _api_type(db, data)
     service = Service(**data.model_dump(exclude={"secrets"}),
                       position=await _next_position(db, Service.position, Service.group_id, data.group_id))
     _apply_secrets(service, data.secrets)
@@ -155,6 +162,9 @@ def _target(type_: str | None, url: str | None, config: dict | None) -> tuple:
 async def update_service(service_id: int, data: ServiceIn, request: Request, sess: Session = Depends(current_session),
                          user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     service = await _get(db, Service, service_id)
+    if "api_id" not in data.model_fields_set:
+        data.api_id = service.api_id
+    await _api_type(db, data)
     # Bewaarde secrets naar een ander adres of type sturen = ze kunnen weglekken: vraagt een recente 2FA,
     # tenzij alle secrets in hetzelfde verzoek opnieuw ingegeven (of gewist) worden.
     moved = _target(data.type, data.url, data.config) != _target(service.type, service.url, service.config)

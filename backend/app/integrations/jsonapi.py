@@ -48,17 +48,21 @@ class JsonApi(Integration):
     }
     secret_help = {"token": "optioneel: Bearer-token", "username": "optioneel: basic auth", "password": "optioneel: basic auth"}
 
-    async def fetch(self) -> Any:
+    async def call_auth(self) -> dict:
         headers = dict(self.config.get("headers") or {})
         auth = None
         if self.secrets.get("token"):
             headers["Authorization"] = f"Bearer {self.secrets['token']}"
         elif self.secrets.get("username"):
             auth = (self.secrets["username"], self.secrets.get("password", ""))
+        return {"headers": headers, "auth": auth}
+
+    async def fetch(self) -> Any:
+        kw = await self.call_auth()
         method = str(self.config.get("method") or "GET").upper()
         if method not in ("GET", "POST"):
             raise IntegrationError("method moet GET of POST zijn")
-        return await self.request(method, "", headers=headers, auth=auth)
+        return await self.request(method, "", **kw)
 
     def mapping(self) -> list[dict]:
         rows = self.config.get("fields") or self.config.get("mappings") or []

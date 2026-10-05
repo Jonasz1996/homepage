@@ -28,6 +28,8 @@ class ServiceIn(BaseModel):
     secrets: dict[str, str | None] | None = None
     parent_id: int | None = None
     notes: str | None = Field(default=None, max_length=20000)
+    # API uit API-beheer; zonder dit veld blijft de huidige keuze staan.
+    api_id: int | None = None
 
     @field_validator("url")
     @classmethod
@@ -53,6 +55,7 @@ class ServiceOut(BaseModel):
     parent_id: int | None = None
     maintenance_until: datetime | None = None
     notes: str | None = None
+    api_id: int | None = None
     secret_keys: list[str] = []
 
 

@@ -85,6 +85,8 @@ class Integration:
     config_help: ClassVar[dict[str, str]] = {}
     secret_help: ClassVar[dict[str, str]] = {}
     actions: ClassVar[set[str]] = set()
+    # Eigen calls uit API-beheer: pad van de API achter het adres (bv. /api2/json bij Proxmox).
+    call_prefix: ClassVar[str] = ""
 
     def __init__(self, url: str | None, config: dict, secrets: dict, client: httpx.AsyncClient):
         self.config = config or {}
@@ -97,6 +99,12 @@ class Integration:
         # anders belandt het API-pad achter de # en krijg je de webpagina in plaats van de API.
         parts = urlsplit(base)
         self.base = urlunsplit((parts.scheme, parts.netloc, parts.path, "", "")).rstrip("/")
+        # Eigen calls van de API (zie integrations/calls.py); build() vult ze in.
+        self.calls: list[dict] = []
+
+    async def call_auth(self) -> dict:
+        """Aanmelding voor een eigen call: {"headers": ..., "auth": ..., "params": ...}."""
+        raise IntegrationError(f"Eigen calls zijn voor {self.label} nog niet mogelijk")
 
     def need(self, *keys: str) -> list[str]:
         missing = [k for k in keys if not self.secrets.get(k)]
