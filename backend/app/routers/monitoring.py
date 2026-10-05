@@ -170,7 +170,8 @@ async def _uptime_all(db: AsyncSession, service_id: int, now: datetime) -> dict:
 @router.get("/services/{service_id}/history")
 async def history(service_id: int, range: str = Query("24h", pattern="^(1h|24h|7d|30d|1y)$"),
                   user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    if await db.get(Service, service_id) is None:
+    svc = await db.get(Service, service_id)
+    if svc is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Service niet gevonden")
     span, size = RANGES[range]
     now = datetime.now(timezone.utc)
@@ -224,6 +225,7 @@ async def history(service_id: int, range: str = Query("24h", pattern="^(1h|24h|7
             "last_error": state.last_error, "last_check": _aware(state.last_check),
             "cert_expires_at": _aware(state.cert_expires_at), "fail_count": state.fail_count,
             "redirected_to": state.redirected_to, "stale": state.stale,
+            "down_after": down_after(svc.check),
         } if state else None,
         "recent": [
             {"ts": _aware(r.ts), "ok": r.ok, "latency_ms": r.latency_ms, "status_code": r.status_code, "error": r.error,

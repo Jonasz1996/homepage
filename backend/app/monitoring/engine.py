@@ -48,10 +48,13 @@ def active(check: dict | None) -> bool:
 
 
 def down_after(check: dict | None) -> int:
+    """Na zoveel mislukte checks op rij down. Een push-check meldt een uitgebleven signaal hoogstens één keer per
+    interval: daar is één keer al genoeg (zoals in Kuma)."""
+    default = 1 if (check or {}).get("type") == "push" else DOWN_AFTER
     try:
-        n = int((check or {}).get("down_after") or DOWN_AFTER)
+        n = int((check or {}).get("down_after") or default)
     except (TypeError, ValueError):
-        n = DOWN_AFTER
+        n = default
     return min(max(n, 1), 10)
 
 

@@ -29,7 +29,8 @@
   let dnsExpect = $state(c0.expect || '')
   let dnsRecord = $state(c0.record || 'A')
   // Wanneer down, hoe melden, en de HTTP-opties (wat Uptime Kuma ook kon).
-  let downAfter = $state(c0.down_after || 3)
+  const baseDown = (t) => (t === 'push' ? 1 : 3)
+  let downAfter = $state(c0.down_after || baseDown(c0.type))
   let retryInterval = $state(c0.retry_interval || '')
   let remindHours = $state(c0.remind_hours || 0)
   let notifyMode = $state(c0.notify || 'push')
@@ -116,7 +117,7 @@
       type: t,
       interval: Math.max(15, Number(checkInterval) || 60),
       ...(withTarget && checkTarget.trim() ? { target: checkTarget.trim() } : {}),
-      ...(Number(downAfter) !== 3 ? { down_after: Number(downAfter) } : {}),
+      ...(Number(downAfter) !== baseDown(t) ? { down_after: Number(downAfter) } : {}),
       ...(Number(retryInterval) ? { retry_interval: Number(retryInterval) } : {}),
       ...(Number(remindHours) ? { remind_hours: Number(remindHours) } : {}),
       ...(notifyMode !== 'push' ? { notify: notifyMode } : {}),
@@ -249,7 +250,7 @@
       <div class="grid">
         <div>
           <label class="lbl" for="sf-ct">Check</label>
-          <select id="sf-ct" bind:value={checkType}>
+          <select id="sf-ct" bind:value={checkType} onchange={() => { if (!c0.down_after) downAfter = baseDown(checkType) }}>
             <option value="">geen</option>
             <option value="http">HTTP(S)</option>
             <option value="ping">ping</option>

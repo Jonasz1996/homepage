@@ -135,6 +135,33 @@ test('één node \'s nachts uit', async () => {
   await page.keyboard.press('Escape')
 })
 
+test('kuma vervangen: push-check, foute header en pauzeren', async () => {
+  await page.getByRole('button', { name: '✎ bewerken' }).click()
+  await page.getByRole('button', { name: 'Service toevoegen aan Infra' }).click()
+  await page.fill('#sf-name', 'Back-up')
+  await page.selectOption('#sf-ct', 'http')
+  await page.locator('summary', { hasText: 'verzoek' }).click()
+  await page.fill('#sf-h', 'Authorization: Bearer geheim')
+  await page.getByRole('button', { name: 'Opslaan' }).click()
+  await expect(page.getByText(/lijkt geheim/)).toBeVisible()
+  await page.fill('#sf-h', '')
+  await page.selectOption('#sf-ct', 'push')
+  await expect(page.locator('#sf-da')).toHaveValue('1')
+  await page.getByRole('button', { name: 'Opslaan' }).click()
+  await page.getByRole('button', { name: '✓ klaar' }).click()
+
+  await page.locator('.tile', { hasText: 'Back-up' }).hover()
+  await page.getByRole('button', { name: 'Details van Back-up' }).click()
+  await page.getByRole('button', { name: 'push-adres maken' }).click()
+  await expect(page.locator('.pm code').first()).toContainText('/api/push/')
+  await page.getByRole('button', { name: '⏸ pauzeren' }).click()
+  await expect(page.getByRole('button', { name: '▶ hervatten' }).first()).toBeVisible()
+  await expect(page.getByText('De check staat gepauzeerd')).toBeVisible()
+  await page.getByRole('button', { name: '▶ hervatten' }).first().click()
+  await expect(page.getByRole('button', { name: '⏸ pauzeren' })).toBeVisible()
+  await page.keyboard.press('Escape')
+})
+
 test('gsm: knoppen achter het menu', async () => {
   await page.setViewportSize({ width: 390, height: 844 })
   const menu = page.getByRole('button', { name: 'Menu' })
