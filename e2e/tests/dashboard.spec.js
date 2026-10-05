@@ -139,6 +139,7 @@ test('kuma vervangen: push-check, foute header en pauzeren', async () => {
   await page.getByRole('button', { name: '✎ bewerken' }).click()
   await page.getByRole('button', { name: 'Service toevoegen aan Infra' }).click()
   await page.fill('#sf-name', 'Back-up')
+  await page.locator('summary', { hasText: 'Monitoring' }).click()
   await page.selectOption('#sf-ct', 'http')
   await page.locator('summary', { hasText: 'verzoek' }).click()
   await page.fill('#sf-h', 'Authorization: Bearer geheim')

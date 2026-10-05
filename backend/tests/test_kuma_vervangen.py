@@ -9,7 +9,8 @@ from sqlalchemy import select, update
 
 from app.db import get_db
 from app.main import app
-from app.models import AppState, AuditLog, CheckResult, Event, Notification, Service, ServiceState, Session
+from app.models import (AppState, AuditLog, CheckResult, CronJob, Event, Notification, Service, ServiceState,
+                        Session)
 from app.monitoring import checks, engine, watchdog
 from app.monitoring.checks import Outcome, check_http
 from app.monitoring.engine import mass_check, record
@@ -339,10 +340,17 @@ async def test_checklist_dekking(authed):
     g = await _group(authed)
     await _svc(authed, g, "zonder")
     sid = await _svc(authed, g, "met", {"type": "http"})
+    await _svc(authed, g, "backup", {"type": "push"})
     agen, db = await _db()
     await _record(db, sid, [Outcome(True, 5.0, 200, redirected_to="auth.lan")], NOW)
+    db.add(CronJob(key="k1", target="ssh:1", target_name="pve2", kind="crontab", name="rsync",
+                   command="rsync -a /data /mnt && curl -fsS https://kuma.lan/api/push/AbCdEf0123456789xyz?status=up"))
+    await db.commit()
     rows = {r["key"]: r for grp in (await authed.get("/api/attention/setup")).json()["groups"] for r in grp["rows"]}
     row = rows["monitoring:dekking"]
-    assert row["state"] == "half" and "zonder" in row["todo"][0] and "auth.lan" in row["todo"][1]
-    assert rows["wachter"]["state"] == "none"
+    todo = " | ".join(row["todo"])
+    assert row["state"] == "half" and "zonder" in row["todo"][0] and "auth.lan" in todo
+    assert "backup: push-check zonder adres" in todo and "Cronjob rsync op pve2" in todo
+    assert rows["wachter"]["state"] == "none" and rows["webpush"]["state"] == "none"
+    assert rows["webpush"]["fix"] == {"window": "webpush"}
     await agen.aclose()

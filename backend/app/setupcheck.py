@@ -313,8 +313,8 @@ async def watcher_row(db: AsyncSession) -> dict:
     title, fix = "Iemand die het dashboard zelf bewaakt", {"window": "health", "tab": "homepage"}
     seen = await _state(db, watchdog.SEEN_KEY)
     at = datetime.fromisoformat(seen["at"]) if seen.get("at") else None
-    how = ["Zet in Zabbix een HTTP-item op http://<IP van de container>/api/healthz (antwoord 200 = gezond, 503 = "
-           "worker of checks staan stil) met een trigger als het geen 200 is (README → Het dashboard zelf bewaken)."]
+    how = ["Zet in Zabbix een web-scenario op http://<IP van de container>/api/healthz met statuscode 200 (503 = "
+           "worker of checks staan stil), en een trigger als het mislukt (README → Uptime Kuma vervangen)."]
     if not at:
         return row("wachter", "monitoring", title, "none", "Niets vraagt /api/healthz op: valt de hele container uit, "
                    "dan krijg je geen enkele melding.", how, fix)
