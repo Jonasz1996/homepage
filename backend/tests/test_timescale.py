@@ -46,8 +46,8 @@ async def test_hypertables_en_beleid(authed):
         "SELECT application_name, hypertable_name FROM timescaledb_information.jobs WHERE hypertable_name IS NOT NULL")))}
     for t in HYPERTABLES:
         assert ("Retention Policy", t) in jobs
-    for t in HYPERTABLES - {"readings"}:
-        assert ("Compression Policy", t) in jobs
+    for t in HYPERTABLES - {"readings"}:  # nieuwere TimescaleDB noemt de compressietaak "Columnstore Policy"
+        assert ("Compression Policy", t) in jobs or ("Columnstore Policy", t) in jobs, t
 
 
 async def test_gecomprimeerde_metingen(authed):
