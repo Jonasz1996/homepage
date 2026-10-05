@@ -428,22 +428,26 @@ Monitoring**:
   staat de tegel oranje op *twijfel (1/3)*; met *bij twijfel opnieuw na* kijkt hij dan sneller opnieuw
 - **melden**: hier en op je gsm, alleen hier (🔔), of niet (alleen de tijdlijn). Zolang hij down is: nooit, elk uur,
   elke 4 uur of elke dag een herinnering. De melding over het certificaat kan per tegel uit
-- **pauzeren** (in het mini dashboard, of in bewerken): de check loopt niet en meldt niets. Pauzeren of de meldingen
-  uitzetten vraagt je 2FA en geeft een melding, zodat wie je sessie steelt niet stilletjes de bewaking uitzet. Een
-  gepauzeerde check staat ter info in **!**
+- **pauzeren** (in het mini dashboard, of in bewerken): de check loopt niet en meldt niets. Pauzeren, de meldingen
+  uitzetten, de check weghalen of een tegel (groep, pagina) met een lopende check verwijderen vraagt je 2FA en geeft
+  een melding, zodat wie je sessie steelt niet stilletjes de bewaking uitzet. Een gepauzeerde check staat ter info
+  in **!**
 - **uptime** over 24 u, 7 d, 30 d en 1 jaar in het mini dashboard; op de tegel als hij onder 99,9 % zakt
 - **afhankelijkheden**: hangt een tegel af van een andere (CT op een node, container op Portainer), dan krijg je één
   melding voor de ouder. Is de ouder terug en het kind niet, dan alsnog een melding voor het kind. Faalt het grootste
-  deel van alle checks tegelijk (netwerk of DNS van de container), dan één melding in plaats van honderd
-- verander je wat een check bekijkt (ander type of adres), dan begint de status opnieuw, zonder oude down-status
+  deel van alle checks tegelijk (netwerk of DNS van de container), dan één melding in plaats van honderd; zolang dat
+  duurt, staat het bovenaan in **!**. Wat al apart als down gemeld was (een pc die meestal uit staat), telt daarvoor
+  niet mee
+- verander je wat een check bekijkt (ander type of adres), dan begint de status opnieuw, zonder oude down-status. Een
+  push-check begint ook opnieuw na een ander interval of na hervatten: signalen van daarvoor tellen niet
 
 **Push-monitors** (vervangt de push-monitors van Uptime Kuma). Kies bij een tegel als check *push* en maak in het
 mini dashboard een push-adres. Een script, een automatisering in Home Assistant of de back-up van je VPS roept dat
 adres aan, bv. `curl -fsS -m 10 "https://<dashboard>/api/push/<token>?status=up&msg=OK"`. Dat is dezelfde vorm als
 in Kuma: in een bestaand script veranderen alleen de host en het token; `status=down`, `msg` en `ping` mogen erbij,
-met GET of POST. Blijft het signaal langer uit dan het interval plus wat speling (10 %, minstens 30 s), of meldt het
-script `status=down`, dan gaat de tegel down en krijg je een melding. Standaard werkt het adres alleen thuis
-(LAN/VPN). Voor een VPS vink je *ook van buitenaf* aan; zet dan in Cloudflare Access of Authentik een uitzondering
+met GET of POST. Blijft het signaal langer uit dan het interval (minstens 60 s) plus wat speling (10 %, minstens
+30 s), of meldt het script `status=down`, dan gaat de tegel down en krijg je een melding. Standaard werkt het adres
+alleen thuis (LAN/VPN). Voor een VPS vink je *ook van buitenaf* aan; zet dan in Cloudflare Access of Authentik een uitzondering
 voor `/api/push/*`. Het adres zelf is het geheim: met *nieuw adres* maak je een ander, en het oude werkt meteen niet
 meer. Tokens komen niet in de logs van nginx en uvicorn in de container. NPM en Cloudflare schrijven het volledige
 adres wel in hun eigen logs: zet in NPM bij de proxy host voor `/api/push/` de access log uit als je dat niet wil.
