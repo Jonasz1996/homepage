@@ -813,3 +813,26 @@ async def test_vernieuwen_tegelijk_een_wint(authed):
         await route._rotate(db, s, s.renew_hash)
     assert e.value.status_code == 409
     await agen.aclose()
+
+
+async def test_herstel_na_down_en_dan_problemen(authed):
+    """"WAN down", dan "WAN problemen" (alleen voor waarschuwingen), dan "weer online": het herstel komt ook op het
+    toestel dat alleen storingen krijgt, anders blijft daar "down" staan."""
+    a, b = Phone(A), Phone(B)
+    await _subscribe(authed, a, "storingen", "err")
+    await _subscribe(authed, b, "waarschuwingen", "warn")
+    gw = "gw1:WAN"
+    svc = PushService([a, b])
+    await _notify({"title": "WAN: down", "level": "err", "source": "netwerk", "key": gw})
+    await _run(svc)
+    await _notify({"title": "WAN: problemen", "level": "warn", "source": "netwerk", "key": gw})
+    await _run(svc)
+    await _notify({"title": "WAN is weer online", "level": "ok", "source": "netwerk", "key": gw, "recovers": "warn"})
+    await _run(svc)
+    assert [m["title"] for m in svc.to(a)] == ["WAN: down", "WAN is weer online"]
+    assert [m["title"] for m in svc.to(b)] == ["WAN: down", "WAN: problemen", "WAN is weer online"]
+    # Een volgende storing van alleen "problemen" herstelt daarna weer alleen voor waarschuwingen.
+    await _notify({"title": "WAN: problemen", "level": "warn", "source": "netwerk", "key": gw})
+    await _notify({"title": "WAN is weer online", "level": "ok", "source": "netwerk", "key": gw, "recovers": "warn"})
+    await _run(svc)
+    assert len(svc.to(a)) == 2

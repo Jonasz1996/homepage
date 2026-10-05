@@ -167,13 +167,13 @@ async def _parent_failing(db: AsyncSession, service: Service) -> Service | None:
     return None
 
 
-async def failing_share(db: AsyncSession, now: datetime | None = None, start: bool = False) -> tuple[int, int]:
+async def failing_share(db: AsyncSession, now: datetime | None = None, wave_from: datetime | None = None
+                        ) -> tuple[int, int]:
     """(aantal checks dat nu faalt, aantal lopende checks).
 
     Wat al apart gemeld is (een pc die meestal uit staat) telt niet mee, en ook niet wat daardoor stil down is (de
-    CT's op een node die down is): anders begint een massastoring te snel, en eindigt ze nooit. Bij het begin (start)
-    telt wat de laatste 15 minuten apart gemeld werd wel mee: dat hoort bij dezelfde golf (snelle checks zijn eerder
-    down dan trage)."""
+    CT's op een node die gemeld is): anders begint een massastoring te snel, en eindigt ze nooit. Wat sinds wave_from
+    apart gemeld werd, telt wel mee: dat hoort bij dezelfde golf (snelle checks zijn eerder down dan trage)."""
     now = now or datetime.now(timezone.utc)
     svcs = {sid: (check, parent) for sid, check, parent in
             (await db.execute(select(Service.id, Service.check, Service.parent_id))).all()}
@@ -182,15 +182,16 @@ async def failing_share(db: AsyncSession, now: datetime | None = None, start: bo
         return 0, 0
     states = {st.service_id: st for st in (await db.execute(
         select(ServiceState).where(ServiceState.service_id.in_(ids)))).scalars()}
-    known = {sid for sid, st in states.items() if st.status == "down" and not st.quiet
-             and not (start and (_aware(st.since) or now) > now - MASS_WAVE)}
+    reported = {sid for sid, st in states.items() if st.status == "down" and not st.quiet}
+    known = {sid for sid in reported if not (wave_from and (_aware(states[sid].since) or now) > wave_from)}
     explained = set(known)
     for sid, st in states.items():
         if st.status != "down" or not st.quiet:
             continue
         seen, p = {sid}, svcs[sid][1]
         while p and p not in seen and p in svcs:
-            if p in known:
+            # Ook een node uit de golf zelf: zijn CT's zijn stil omdat hij down is, niet door de massastoring.
+            if p in reported:
                 explained.add(sid)
                 break
             seen.add(p)
@@ -208,7 +209,7 @@ async def _mass_start(db: AsyncSession, now: datetime) -> bool:
     """Faalt nu het grootste deel van de checks? Dan één melding en geen aparte per service."""
     if await in_mass_outage(db):
         return True
-    failing, total = await failing_share(db, now, start=True)
+    failing, total = await failing_share(db, now, now - MASS_WAVE)
     if total < MASS_MIN or failing < MASS_SHARE * total:
         return False
     await ensure_state(db, MASS_KEY, {})
@@ -226,17 +227,26 @@ async def _mass_start(db: AsyncSession, now: datetime) -> bool:
     return True
 
 
-async def mass_check(db: AsyncSession) -> None:
-    """Elke minuut (worker): is de massastoring voorbij?"""
-    if not await in_mass_outage(db):
+async def mass_check(db: AsyncSession, now: datetime | None = None) -> None:
+    """Elke minuut (worker): is de massastoring voorbij?
+
+    Geteld zoals bij het begin, met dezelfde golf: anders is ze een minuut later al voorbij (wat de golf startte,
+    telt dan niet meer mee) en begint ze bij de volgende down opnieuw. Wat van die golf een kwartier later nog altijd
+    down is, is apart gemeld: dat houdt ze niet open, als de rest weer werkt."""
+    now = now or datetime.now(timezone.utc)
+    st = await db.get(AppState, MASS_KEY)
+    if not st or not (st.value or {}).get("since"):
         return
-    failing, total = await failing_share(db)
-    if total < MASS_MIN or failing < MASS_END_SHARE * total:
-        st = await db.get(AppState, MASS_KEY)
-        since = _aware(datetime.fromisoformat(st.value["since"])) if st.value.get("since") else None
+    since = _aware(datetime.fromisoformat(st.value["since"]))
+    failing, total = await failing_share(db, now, since - MASS_WAVE)
+    over = total < MASS_MIN or failing < MASS_END_SHARE * total
+    if not over and now - since > MASS_WAVE:
+        # Zoals een nieuwe massastoring nu zou tellen: zo begint er meteen erna ook geen nieuwe.
+        failing, total = await failing_share(db, now, now - MASS_WAVE)
+        over = not failing or failing < MASS_END_SHARE * total
+    if over:
         st.value = {}
-        took = f" na {_fmt_duration(datetime.now(timezone.utc) - since)}" if since else ""
-        event(db, "gezondheid", f"Het dashboard bereikt weer bijna alles{took}", level="ok")
+        event(db, "gezondheid", f"Het dashboard bereikt weer bijna alles na {_fmt_duration(now - since)}", level="ok")
 
 
 def _cert_notes(db: AsyncSession, service: Service, state: ServiceState, expires: datetime, now: datetime) -> None:

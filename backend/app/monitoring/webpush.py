@@ -22,7 +22,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import ensure_state
@@ -342,8 +342,11 @@ async def _claim(db: AsyncSession, now: datetime) -> None:
                                .values(pushed_at=now).execution_options(synchronize_session=False))
         if res.rowcount != 1:
             continue  # een ander proces was sneller
+        recovers = n.recovers
+        if n.level == "ok" and n.push_key:
+            recovers = max((recovers, await _peak(db, n.push_key, n.id)), key=lambda lv: LEVELS.get(lv or "", -1))
         for sid, min_level in subs:
-            if not accepts(min_level, n.level, n.source, n.recovers):
+            if not accepts(min_level, n.level, n.source, recovers):
                 continue
             if n.push_key:
                 # Nieuwer nieuws over dezelfde storing: een oudere melding die nog wacht (opnieuw proberen) zou
@@ -351,6 +354,17 @@ async def _claim(db: AsyncSession, now: datetime) -> None:
                 # over dezelfde tegel (een andere node in de cluster) blijft gewoon staan.
                 await _supersede(db, sid, n.id, n.push_key)
             db.add(PushQueue(subscription_id=sid, notification_id=n.id, attempts=0, next_at=now, created_at=now))
+
+
+async def _peak(db: AsyncSession, key: str, notification_id: int) -> str | None:
+    """Het zwaarste niveau van deze storing sinds het vorige herstel met dezelfde sleutel. "WAN down", dan
+    "WAN problemen", dan "WAN weer online": dat herstel hoort ook op een toestel dat alleen storingen krijgt (dat
+    kreeg "down", niet "problemen"), anders blijft daar "down" staan."""
+    last_ok = select(func.coalesce(func.max(Notification.id), 0)).where(
+        Notification.push_key == key, Notification.level == "ok", Notification.id < notification_id).scalar_subquery()
+    levels = (await db.execute(select(Notification.level).distinct().where(
+        Notification.push_key == key, Notification.id < notification_id, Notification.id > last_ok))).scalars().all()
+    return max(levels, key=lambda lv: LEVELS.get(lv, -1), default=None)
 
 
 async def _supersede(db: AsyncSession, sub_id: int, notification_id: int, key: str) -> None:

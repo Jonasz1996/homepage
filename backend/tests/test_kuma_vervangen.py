@@ -581,12 +581,46 @@ async def test_massastoring_met_snelle_en_trage_checks(authed):
     start = NOW - timedelta(minutes=30)
     for sid in fast:
         await _record(db, sid, [FAIL] * 3, start, step=timedelta(seconds=15))
+    # De worker kijkt elke minuut of het voorbij is: dat mag een net begonnen storing niet meteen beëindigen.
     for rnd in range(3):
-        for sid in slow:
-            await _record(db, sid, [FAIL], start + timedelta(minutes=5 * rnd))
+        for i, sid in enumerate(slow):
+            at = start + timedelta(minutes=5 * rnd, seconds=20 * i)
+            await _record(db, sid, [FAIL], at)
+            await mass_check(db, now=at)
+            await db.commit()
     titles = await _titles(db)
     assert titles.count("Het dashboard bereikt bijna niets") == 1
-    assert not [t for t in titles if t.startswith("s") and t.endswith("is down")]
+    assert not [t for t in titles if t.startswith("s") and "down" in t]
+    # De trage herstellen, de snelle blijven down (die zijn apart gemeld): na een kwartier is het voorbij.
+    for sid in slow:
+        await _record(db, sid, [OK], start + timedelta(minutes=14))
+    await mass_check(db, now=start + timedelta(minutes=14))
+    await db.commit()
+    assert (await db.get(AppState, engine.MASS_KEY)).value
+    await mass_check(db, now=start + timedelta(minutes=26))
+    await db.commit()
+    assert not (await db.get(AppState, engine.MASS_KEY)).value
+    await _record(db, slow[0], [FAIL] * 3, start + timedelta(minutes=27))
+    titles = await _titles(db)
+    assert titles.count("Het dashboard bereikt bijna niets") == 1 and "s0 is down" in titles
+    await agen.aclose()
+
+
+async def test_massastoring_node_net_gemeld_met_stille_kinderen(authed):
+    """Een node is net down (zijn CT's zijn daardoor stil): één andere storing erbij is geen massastoring."""
+    g = await _group(authed)
+    node = await _svc(authed, g, "pve1", {"type": "ping"})
+    cts = [await _svc(authed, g, f"ct{i}", {"type": "http"}, parent_id=node) for i in range(10)]
+    others = [await _svc(authed, g, f"o{i}", {"type": "http"}) for i in range(5)]
+    agen, db = await _db()
+    start = NOW - timedelta(minutes=30)
+    await _record(db, node, [FAIL] * 3, start)
+    for sid in cts:
+        await _record(db, sid, [FAIL] * 3, start + timedelta(minutes=1))
+    assert (await db.get(ServiceState, cts[0])).quiet
+    await _record(db, others[0], [FAIL] * 3, start + timedelta(minutes=4))
+    titles = await _titles(db)
+    assert "Het dashboard bereikt bijna niets" not in titles and "o0 is down" in titles
     await agen.aclose()
 
 

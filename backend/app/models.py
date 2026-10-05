@@ -164,8 +164,9 @@ class Notification(Base):
     pushed_at: Mapped[datetime | None]
     # Over welke storing dit gaat (bv. "svc12" voor up/down van een tegel): nieuwer nieuws over dezelfde storing
     # vervangt op de gsm het oudere. Leeg: een losse melding.
-    push_key: Mapped[str | None] = mapped_column(String(120))
-    # Bij herstel (ok): het niveau van wat hij herstelt, zodat hij komt op elk toestel dat de storing kreeg.
+    push_key: Mapped[str | None] = mapped_column(String(120), index=True)
+    # Bij herstel (ok): het niveau van wat hij herstelt, zodat hij komt op elk toestel dat de storing kreeg. Minstens:
+    # bij het versturen telt ook het zwaarste niveau van de storing sinds het vorige herstel (webpush._peak).
     recovers: Mapped[str | None] = mapped_column(String(8))
 
 
