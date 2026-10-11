@@ -27,7 +27,8 @@ from .network import NETWORK_EVERY, PUBLIC_IP_EVERY, sample_power, watch_gateway
 from .report import weekly_notification
 from .updates import UPDATES_EVERY, run_updates
 from .upgrade import auto_updates, cleanup_snapshots, mark_interrupted
-from . import cluster, configs, containerlogs, coverage, devices, healing, planned, restoretest, rollup, routes, zabbix
+from . import (buitencheck, cluster, configs, containerlogs, coverage, devices, healing, planned, restoretest, rollup,
+               routes, zabbix)
 from .watchers import watch_npm, watch_pbs
 
 log = logging.getLogger("homepage.worker")
@@ -135,6 +136,13 @@ class Worker:
         # Op de achtergrond: een herstelactie (SSH-herstart) duurt minuten, en houdt de andere push-checks anders op.
         for sid in ids:
             self.spawn(healing.check(self.maker, sid, self.http))
+
+    async def outside_round(self) -> None:
+        """Elke minuut: de tegels met het oudste resultaat van buitenaf laten bekijken door de Cloudflare Worker."""
+        try:
+            await buitencheck.run_round(self.maker, self.http)
+        except Exception:
+            log.exception("check van buitenaf mislukt")
 
     async def web_push(self) -> None:
         """Elke tick: nieuwe meldingen naar de gsm('s) die het willen."""
@@ -339,6 +347,8 @@ class Worker:
         # Uurtotalen pas na 2 minuten: eerst de push-signalen die tijdens de stilstand binnenkwamen (die krijgen het
         # tijdstip van toen), dan pas die uren optellen.
         last_rollup = start - rollup.ROLLUP_EVERY + 120
+        # Check van buitenaf: de eerste ronde 90 s na de start.
+        last_outside = start - buitencheck.EVERY + 90
         while True:
             try:
                 for sid, check, url in await self.due_services():
@@ -386,6 +396,11 @@ class Worker:
                 if time.monotonic() - last_routes > routes.REFRESH_EVERY:
                     last_routes = time.monotonic()
                     self.job("routes", lambda: self.step("routes via NPM", lambda db: routes.refresh(db, self.http)))
+                if time.monotonic() - last_outside > buitencheck.EVERY:
+                    last_outside = time.monotonic()
+                    # Loopt de vorige ronde nog (een trage Worker), dan deze overslaan: de tegels met het oudste
+                    # resultaat gaan de volgende keer, er valt er geen uit.
+                    self.job("buitencheck", self.outside_round, quiet=True)
                 if time.monotonic() - last_lan > devices.DEVICES_EVERY:
                     last_lan = time.monotonic()
                     self.job("lan", self.lan)
