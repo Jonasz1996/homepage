@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .config import get_settings
 from .health import scan as hw, security
 from .integrations import IntegrationError, build
 from .models import (AppState, CronJob, HealRule, LogEntry, PushMonitor, Service, ServiceState, SshHost, User,
@@ -524,6 +525,31 @@ async def ssh_rows(db: AsyncSession, has_proxmox: bool) -> list[dict]:
     return out
 
 
+def lan_row() -> dict:
+    """Kan het hele LAN het dashboard rechtstreeks openen (http://IP: login en cookie onversleuteld), of alleen NPM?
+    install.sh schrijft in /etc/homepage/nginx wat nginx toelaat."""
+    title, env = "Dashboard alleen via NPM", "/etc/homepage/homepage.env"
+    run = "bash /opt/homepage/deploy/install.sh"
+    try:
+        text = get_settings().nginx_file.read_text()
+    except OSError:
+        return row("lan", "beveiliging", title, "none", "Onbekend: nginx is (nog) niet door install.sh van deze versie "
+                   "ingesteld.", [f"Werk het dashboard bij of voer {run} uit."])
+    st = {k.strip(): v.strip() for k, _, v in (line.partition("=") for line in text.splitlines())}
+    npm = st.get("npm") or "?"
+    if st.get("lan") == "dicht":
+        return row("lan", "beveiliging", title, "ok", f"nginx laat alleen NPM ({npm}) en de container zelf binnen; van "
+                   "het LAN alleen push-monitors, webhooks en /api/healthz.")
+    if st.get("reden") == "npm-onbekend":
+        todo = (f"Het IP van NPM was bij de installatie niet opgegeven, dus bleef het LAN open. Klopt HOMEPAGE_NPM_IP={npm} "
+                f"in {env} en werkt het dashboard via NPM, zet dan HOMEPAGE_LAN_OPEN=0 en voer {run} uit.")
+    else:
+        todo = (f"HOMEPAGE_LAN_OPEN=1 staat in {env}. Werkt het dashboard via NPM ({npm}), zet het dan op 0 en voer "
+                f"{run} uit.")
+    return row("lan", "beveiliging", title, "half", "Het hele LAN kan het dashboard rechtstreeks openen op http://IP: "
+               "je wachtwoord en sessiecookie gaan daar onversleuteld over het netwerk.", [todo])
+
+
 async def safety(db: AsyncSession, cfg: dict) -> list[dict]:
     out = []
     c = await security.check_2fa(db)
@@ -539,6 +565,7 @@ async def safety(db: AsyncSession, cfg: dict) -> list[dict]:
     c = await security.check_access(db)
     out.append(row("access", "beveiliging", "Slot voor het dashboard", "ok" if c["level"] == "ok" else "none", c["text"],
                    fix=c["fix"]))
+    out.append(lan_row())
     pin = await _state(db, PIN_KEY)
     res = [r.get("state") for r in (pin.get("hosts") or {}).values()]
     pinned, loose = res.count("vast"), res.count("los") + res.count("anders")
