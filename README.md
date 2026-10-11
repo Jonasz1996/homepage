@@ -24,6 +24,29 @@ Fase 1 en 2 van het [stappenplan](https://claude.ai/code/artifact/fe2b226c-d5ef-
 - zoeken met `Ctrl+K` of `/`, Enter opent het eerste resultaat
 - dagelijkse back-up van de database, zonder de logregels (`/var/backups/homepage`, de 5 nieuwste blijven)
 
+**Titelbalk en menu's.** Bovenaan staan **!** Aandacht (alles wat nu mis is; het enige getal dat telt), **◉**
+Meldingen (gebeurtenissen; de tijdlijn is het archief) en drie menu's. Op de gsm staan die drie achter **☰**. Elk
+venster staat in `frontend/src/lib/windows.js`, met de oude korte naam die je in Ctrl+K nog kunt typen:
+
+| Menu | Vensters (oude naam) |
+| --- | --- |
+| Infrastructuur | Gezondheid (`hw`), Capaciteit (`df`), Netwerk (`net`), Cronjobs (`cron`), Logs (`logs`), Tijdlijn (`history`) |
+| Beheer | Terminal (`>_`), Updates (`apt`), Gepland onderhoud, Configuratiewijzigingen (`diff`), Hersteltest, Dashboard bewerken (`✎`) |
+| Instellingen | Beveiliging (`⚿`), API-beheer (`api`), Webhooks, Meldingen op je gsm, Instellingen-checklist, Effecten, Wat is er nieuw, Uitloggen |
+
+- de terugknop van je gsm (of de browser) sluit het bovenste venster of menu, niet de app; `/?open=<naam>` opent
+  een venster rechtstreeks (zo werken de snelkoppelingen van de app en de pushberichten)
+- bevestigen en een getal invullen gebeurt in eigen vensters, niet met de vensters van de browser (die doen in een
+  Android-WebView vaak niets)
+- het hoofdscherm ververst met één verzoek (`/api/overzicht`, elke 30 s, met per deel een eigen termijn). Valt de
+  verbinding weg, dan zegt een balk sinds wanneer en hoe oud wat je ziet is, met *opnieuw proberen*; naast de datum
+  staat wanneer het laatst bijgewerkt is
+- een tabblad en een dichtgeklapte groep krijgen een rood bolletje met het aantal tegels dat down is (oranje bij
+  twijfel, een check die niet meer loopt of Zabbix rood); *x down* bovenaan en **alleen problemen** tonen enkel die
+  tegels, van alle pagina's. Groepen dichtklappen onthoudt elk toestel apart
+- **Effecten** (Instellingen of Ctrl+K) zet alles uit wat beweegt: de achtergrond, de draaiende randen, de blur, de
+  glans op de titel en de scanlijnen. Standaard uit op een touchscreen en bij "minder beweging" in je systeem
+
 Fase 3, monitoring:
 
 - checks per service: HTTP(S), ping, TCP-poort, DNS, push, Docker-container of de API van de tegel, met eigen
