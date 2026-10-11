@@ -171,7 +171,7 @@
               dan weet het dashboard of poort 443 open staat.</p>
           {/if}
         {/if}
-        {#each inb.tunnels || [] as t (t.name)}
+        {#each inb.tunnels || [] as t, i (i)}
           <p class="sm">tunnel {t.name} · {t.deleted ? 'verwijderd' : t.status}{t.managed ? ` · ${MANAGED[t.managed] || t.managed}` : ''} · {t.names} {t.names === 1 ? 'naam' : 'namen'}</p>
         {/each}
         {#if inb.forwards}

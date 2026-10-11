@@ -67,9 +67,10 @@ def _policy_verdict(p: dict) -> str:
         return "bypass"
     if decision != "allow" or not include or require:
         return "login"
-    if kinds == {"everyone"}:
+    # De include-regels gelden met "of": één regel voor iedereen (of een land) of een publiek maildomein volstaat.
+    if kinds & {"everyone", "geo"}:
         return "everyone"
-    if kinds == {"email_domain"} and all(_name(v.get("domain")) in PUBLIC_MAIL for _, v in include):
+    if any(k == "email_domain" and _name(v.get("domain")) in PUBLIC_MAIL for k, v in include):
         return "public_mail"
     return "login"
 
