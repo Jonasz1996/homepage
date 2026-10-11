@@ -720,8 +720,9 @@ async def public_names(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]
                         fix, sig=",".join(sorted(names))))
     n = int(s.get("verborgen_n") or 0)
     if n:
+        # De namen zelf als vingerafdruk: wordt een andere naam bereikbaar, dan komt het punt terug (ook als n gelijk blijft).
         out.append(item("pub:verborgen", "warn", "publiek", f"{n} interne namen via je thuis-IP bereikbaar zonder login",
-                        s.get("origin_text") or "", fix, sig=n))
+                        s.get("origin_text") or "", fix, sig=",".join(sorted(s.get("verborgen") or [])) or n))
     errors = s.get("errors") or []
     if errors:
         out.append(item("pub:fout", "warn", "publiek", "Niet na te gaan wat publiek is", str(errors[0]), fix,

@@ -122,8 +122,9 @@ wildcardcertificaat of een eigen Let's Encrypt-certificaat), het record in Cloud
 naam in AdGuard, een tegel met check en Zabbix, en zet de CT/VM in een back-upjob van PBS. Eerst een proef die zegt
 wat er zou gebeuren en wat ontbreekt; uitvoeren vraagt je 2FA. Stopt het halverwege, dan haalt **ongedaan maken**
 weg wat de run al maakte. Het tabblad **opruimen** (of **opruimen…** bij een tegel op `<naam>.jbogaert.be`) doet het
-omgekeerde: DNS eerst, de tegel als laatste, en alleen records die naar NPM wijzen of van dit dashboard komen.
-Dit stel je één keer in:
+omgekeerde: DNS eerst, de tegel als laatste, en alleen records en rewrites die naar NPM wijzen of van dit dashboard
+komen. Moet je na een run nog iets zelf doen (bv. de hostname in `config.yml` van een lokaal beheerde tunnel), dan
+zegt het venster dat in plaats van "werkt". Dit stel je één keer in:
 
 1. **NPM, een tweede gebruiker om te schrijven.** NPM → Users → Add User: naam `dashboard-acties`, **een echt
    e-mailadres dat je leest** (Let's Encrypt registreert dat adres voor elk certificaat dat het dashboard vraagt; NPM
@@ -171,7 +172,10 @@ Dit stel je één keer in:
 6. **"Alleen thuis"**: een toegangslijst in NPM (bv. "LAN") met `allow 192.168.0.0/16` (plus het bereik van de VPN) en
    verder niets, satisfy all. Ze moet ook het dashboard toelaten (het IP van de container, bv. 192.168.10.156), anders
    kleurt de check van de tegel rood. Gaat `*.jbogaert.be` via de tunnel naar NPM, dan kan "alleen thuis" niet: elke
-   naam is dan publiek, en een toegangslijst helpt niet (dat verkeer komt van `cloudflared` op je LAN).
+   naam is dan publiek, en een toegangslijst helpt niet (dat verkeer komt van `cloudflared` op je LAN). Is dat niet na
+   te gaan (een lokaal beheerde tunnel, of een vangregel naar een naam die het dashboard niet kent), dan rekent het op
+   het ergste; zet de Docker-naam van NPM bij `npm_names` (API-beheer, NPM). Een toegangslijst is niet nodig als alle
+   namen via de tunnel gaan zonder wildcard; wijst er één (of `*.jbogaert.be`) naar je thuis-IP, dan wel.
 7. **Van buitenaf**: niets; het volgt ⚿ → van buitenaf → acties.
 
 Fase 5, SSH-terminal (knop `>_` in de titelbalk):
@@ -336,8 +340,9 @@ Later, deel 2 (internet, Wake-on-LAN en stroom):
      je thuis-IP voor iedereen naar NPM gaat of alleen voor Cloudflare. Zonder kopie gaat het ervan uit dat hij open
      staat zodra een record naar je thuis-IP wijst
   4. Lees eerst het kader *hoe het binnenkomt*. Staat daar *rechtstreeks naar NPM: open voor iedereen*, beperk de
-     doorverwijzing van 443 dan tot Cloudflare (een alias met `https://www.cloudflare.com/ips-v4`), gebruik alleen de
-     tunnel, of laat NPM het certificaat van Cloudflare eisen (Authenticated Origin Pulls met `ssl_verify_client on`).
+     doorverwijzing van 443 dan tot Cloudflare (een alias met `https://www.cloudflare.com/ips-v4` als bron, in de
+     NAT-regel of in de WAN-filterregel die hem doorlaat), gebruik alleen de tunnel, of laat NPM het certificaat van
+     Cloudflare eisen (Authenticated Origin Pulls met `ssl_verify_client on`).
      Werk daarna de rode namen af: Cloudflare Access met een echte regel (niet "iedereen"), Authentik of een access
      list met wachtwoord, of *bewust open*. Een IP-lijst die je LAN toelaat, houdt via de tunnel niemand tegen:
      cloudflared komt zelf van je LAN
@@ -681,8 +686,9 @@ Monitoring**:
 - **melden**: hier en op je gsm, alleen hier (🔔), of niet (alleen de tijdlijn). Zolang hij down is: nooit, elk uur,
   elke 4 uur of elke dag een herinnering. De melding over het certificaat kan per tegel uit
 - **pauzeren** (in het mini dashboard, of in bewerken): de check loopt niet en meldt niets. Pauzeren, de meldingen
-  uitzetten, de check weghalen of een tegel (groep, pagina) met een lopende check verwijderen vraagt je 2FA en geeft
-  een melding, zodat wie je sessie steelt niet stilletjes de bewaking uitzet. Hetzelfde geldt voor onderhoud
+  uitzetten, de check weghalen of een tegel (groep, pagina) met een lopende check verwijderen (ook als alleen de
+  check van buitenaf loopt) vraagt je 2FA en geeft een melding, zodat wie je sessie steelt niet stilletjes de
+  bewaking uitzet. Hetzelfde geldt voor onderhoud
   beginnen of verlengen, gepland onderhoud aanzetten of verschuiven, een cronjob dempen, een webhook uitzetten,
   vernieuwen of weghalen, een logregel uitzetten, lager zetten of weghalen, een beveiligingspunt in **!** negeren,
   de meldingen over een certificaat uitzetten, een check onder een ouder hangen die down of in onderhoud is, of een
@@ -794,8 +800,9 @@ Instellen in **Infrastructuur → Netwerk → check van buitenaf**, op een van t
 
 - **via Cloudflare zetten** (aanbevolen): maak in Cloudflare (My Profile → API Tokens → Create Token → Custom token)
   een apart API-token met alleen *Account → Workers Scripts → Edit*, voor je account. Zet het in API-beheer bij je
-  Cloudflare-API (soort *Cloudflare Tunnel*, adres `https://api.cloudflare.com/client/v4`, instelling `account` =
-  account-id) als geheim `workers_token`, naast het leestoken voor de tunnels. Gebruikte je nog nooit Workers, open
+  Cloudflare-API (soort *Cloudflare Tunnel*, adres `https://api.cloudflare.com/client/v4`, zonder *zelfondertekend
+  certificaat toestaan*, instelling `account` = account-id) als geheim `workers_token`, naast het leestoken voor de
+  tunnels. Gebruikte je nog nooit Workers, open
   dan in Cloudflare één keer *Workers & Pages* en kies een naam onder workers.dev (bv. `jonas`). Vul in het venster
   de domeinen in (`jbogaert.be`), kies onder *voorstel* de tegels (aangevinkt zijn de namen die NPM kent zonder
   toegangslijst), bekijk de **proef** (welke calls, met welk token, het volledige script) en klik **In Cloudflare

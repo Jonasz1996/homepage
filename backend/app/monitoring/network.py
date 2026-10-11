@@ -89,6 +89,9 @@ async def watch_tunnels(db: AsyncSession, clients: HttpClients) -> None:
             st.value = {**st.value, "error": str(e), "checked_at": _now()}
             continue
         track, changes = debounce(st.value.get("track", {}), {t["name"]: t["status"] for t in tunnels})
+        # Welke tunnels als down gemeld zijn (de check van buitenaf zwijgt dan over 1033/530). Een tunnel die al down of
+        # inactive was toen hij voor het eerst gezien werd (een oude, of een die nooit draaide), is nooit gemeld.
+        reported = set(st.value.get("reported") or [])
         for name, old, new in changes:
             if new == "healthy":
                 notify(db, f"Tunnel {name} is weer gezond", None, level="ok", source="netwerk", service_id=svc.id,
@@ -97,7 +100,9 @@ async def watch_tunnels(db: AsyncSession, clients: HttpClients) -> None:
                 notify(db, f"Tunnel {name}: {new}", f"Was {old}. Van buitenaf is het dashboard misschien niet bereikbaar.",
                        level="err" if new in ("down", "inactive") else "warn", source="netwerk", service_id=svc.id,
                        key=f"tun{svc.id}:{name}")
-        st.value = {"track": track, "items": tunnels, "checked_at": _now(), "error": None}
+            (reported.add if new in ("down", "inactive") else reported.discard)(name)
+        st.value = {"track": track, "items": tunnels, "reported": sorted(reported & set(track)), "checked_at": _now(),
+                    "error": None}
 
 
 async def fetch_public_ip(client: httpx.AsyncClient) -> str | None:

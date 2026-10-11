@@ -10,8 +10,8 @@ die niet, dan werkt de service gewoon en zegt de run dat de back-up niet ingeste
 De proefstap en de echte call komen telkens uit dezelfde bouwsteen (Op), zoals in monitoring/healing.py.
 
 Opruimen raakt alleen <label>.<zone>: records van NPM (of met het commentaar van dit dashboard), tunnelregels naar NPM,
-een rewrite voor die naam, de proxy host met alleen die naam, zijn eigen certificaat en de tegel. DNS eerst, zodat er
-nooit een naam naar een host wijst die al weg is; de tegel als laatste.
+een rewrite naar NPM, de proxy host met alleen die naam, zijn eigen certificaat en de tegel. DNS eerst, zodat er nooit
+een naam naar een host wijst die al weg is; de tegel als laatste.
 
 De runs staan in één AppState-rij (geen migratie); welke run echt nog loopt, weet alleen dit proces (_running).
 """
@@ -57,6 +57,7 @@ COMMENT = "homepage: nieuwe service"
 ORDER_CREATE = ("npm_host", "cf_ingress", "cf_record", "npm_cert", "npm_attach", "lan_dns", "tile", "backup")
 ORDER_CLEANUP = ("cf_record", "cf_ingress", "lan_dns", "npm_host", "npm_cert", "backup", "tile")
 LE_TIMEOUT, STEP_TIMEOUT = 120, 30
+REFRESH_TIMEOUT = 15                 # s; de routes na een nieuwe tegel, ruim binnen STEP_TIMEOUT
 GUEST_TTL = 900                      # s; de run kijkt een onthouden CT/VM na met één call
 ADMIN_PORTS = {81: "NPM-beheer", 8006: "Proxmox VE", 8007: "PBS", 9443: "Portainer", 9090: "Cockpit", 10000: "Webmin"}
 ADDR = ("A", "AAAA", "CNAME")
@@ -259,6 +260,16 @@ async def _guest_row(sysx: System, tile: int, vmid: int, how: str) -> dict | Non
             "node": fresh.get("node"), "pool": fresh.get("pool"), "status": fresh.get("status"), "how": how}
 
 
+async def _still(sysx: System, vmid: int, ip: str) -> dict | None:
+    """De CT/VM zoals Proxmox hem nu kent, als hij dit IP nog heeft; anders None."""
+    fresh = await sysx.integ.guest(vmid)
+    if not fresh:
+        return None
+    got, _ = await ssh_discovery._guest_ip(sysx.integ, fresh["node"], fresh["type"], fresh["vmid"],
+                                           fresh.get("status") == "running")
+    return fresh if got == ip else None
+
+
 async def find_guest(db: AsyncSession, clients, snap: Snap, ip: str, *, at_run: bool = False) -> tuple[dict | None, str | None]:
     """(CT/VM met dit IP, of None; fout). Eerst de SSH-hosts uit Proxmox, anders alle machines opzoeken (zoals ⟳ pve in
     de terminal). Onthouden voor GUEST_TTL; de run kijkt een onthouden CT/VM na met één call."""
@@ -274,23 +285,22 @@ async def find_guest(db: AsyncSession, clients, snap: Snap, ip: str, *, at_run: 
         sysx = sysm.pve_ref(g["pve"])
         if sysx is not None:
             try:
-                fresh = await sysx.integ.guest(g["vmid"])
-                if fresh:
-                    got, _ = await ssh_discovery._guest_ip(sysx.integ, fresh["node"], fresh["type"], fresh["vmid"],
-                                                           fresh.get("status") == "running")
-                    if got == ip:
-                        g = {**g, **{k: fresh.get(k) for k in ("node", "type", "pool", "status", "name")}}
-                        _guest_cache[ip] = (g, now)
-                        return dict(g), None
+                if fresh := await _still(sysx, g["vmid"], ip):
+                    g = {**g, **{k: fresh.get(k) for k in ("node", "type", "pool", "status", "name")}}
+                    _guest_cache[ip] = (g, now)
+                    return dict(g), None
             except IntegrationError:
                 pass
     found = None
-    for host, source in snap.ssh:
-        m = SRC_RE.match(source or "")
-        if host == ip and m and int(m.group(1)) in sysm.pve_by_tile:
-            found = (sysm.pve_by_tile[int(m.group(1))], int(m.group(3)), "SSH-host")
-            break
     try:
+        for host, source in snap.ssh:
+            m = SRC_RE.match(source or "")
+            if host == ip and m and int(m.group(1)) in sysm.pve_by_tile:
+                # De SSH-hosts veranderen pas bij ⟳ pve: een CT/VM die intussen een ander IP kreeg (of waarvan het
+                # nummer hergebruikt is), telt niet; dan alle machines opzoeken.
+                if await _still(sysm.pve_by_tile[int(m.group(1))], int(m.group(3)), ip):
+                    found = (sysm.pve_by_tile[int(m.group(1))], int(m.group(3)), "SSH-host")
+                break
         if found is None:
             items = (await ssh_discovery.discover(db, clients))["items"]
             await db.close()
@@ -542,8 +552,9 @@ def op_tile_add(sysm: Systems, tile: dict, group_label: str, who: str) -> Op:
             await db.commit()
             sid = s.id
             # De routes meteen vernieuwen, zodat de check de nieuwe host al kent (anders tot 5 minuten via de naam).
+            # Met een eigen, kortere time-out: een trage NPM mag van een gemaakte tegel geen mislukte stap maken.
             try:
-                await routes.refresh(db, ctx["clients"])
+                await asyncio.wait_for(routes.refresh(db, ctx["clients"]), REFRESH_TIMEOUT)
                 await db.commit()
             except Exception:  # noqa: BLE001 - de tegel bestaat; de worker vernieuwt de routes zelf binnen 5 minuten
                 log.warning("routes vernieuwen na een nieuwe tegel mislukt", exc_info=True)
@@ -775,6 +786,7 @@ class _Acc:
         self.skipped: list[dict] = []
         self.after: list[str] = []
         self.warnings: list[str] = []
+        self.todo: list[str] = []         # wat je na een geslaagde run nog zelf moet doen voor de naam werkt
         self.why: list[str] = []
         self.ops: list[Op] = []
 
@@ -791,7 +803,7 @@ class _Acc:
         p = Plan(ops, {})
         p.plan = proef.plan(title, [o.proef for o in ops], checks=self.checks, skipped=self.skipped, after=self.after,
                             warnings=self.warnings, kan=not self.why and bool(ops), waarom=self.why, hash=p.hash,
-                            **extra)
+                            todo=self.todo, **extra)
         return p
 
 
@@ -836,7 +848,7 @@ def npm_targets(records: list[dict], names: set[str], zone: str, skip: str | Non
 
 def pattern_of(records: list[dict], names: set[str], zone: str) -> Pattern:
     """Hoe de namen van NPM nu in Cloudflare staan: wat het meest voorkomt, kopieert het dashboard."""
-    apex = {_norm(r["content"]) for r in records if _norm(r["name"]) == zone and r["type"] in ("A", "AAAA")}
+    apex = _apex(records, zone)
     pairs = [(r["type"], _norm(r["content"])) for r in records if r["type"] in ADDR and _norm(r["name"]) in names]
     if not pairs:
         return Pattern("onbekend", None, None, 0, "geen record van een naam uit NPM gevonden")
@@ -888,13 +900,61 @@ def tunnel_rule(ingress: list[dict], fqdn: str, npm_hosts: set[str]) -> dict | N
     return rule
 
 
+async def _npm_hosts(integ) -> tuple[str | None, set[str]]:
+    """(IP van NPM, de namen waarmee een tunnel NPM bereikt): het IP, de host van de API en npm_names (API-beheer, NPM;
+    bv. de Docker-naam die cloudflared gebruikt)."""
+    npm_ip = await routes._npm_ip(integ.base)
+    raw = integ.config.get("npm_names")
+    names = {_norm(x) for x in (raw.split(",") if isinstance(raw, str) else raw or []) if str(x).strip()}
+    return npm_ip, {h for h in (npm_ip, _host_of(integ.base)) if h} | names
+
+
+def _maybe_npm(service, npm_hosts: set[str]) -> bool:
+    """Kan deze service van de tunnel NPM zijn? Zoals "npm?" in monitoring/exposure.py: een naam die het dashboard niet
+    kent (meestal een Docker-naam bij cloudflared), loopback of een Docker-adres telt als NPM. Nee alleen voor een
+    vaste foutcode, of een ander adres of een andere poort dan 80/443 (een app)."""
+    s = str(service or "").strip()
+    if s.startswith("http_status:"):
+        return False
+    host = _svc_host(s)
+    if host in npm_hosts:
+        return True
+    try:
+        u = urlsplit(s)
+        port = u.port or (443 if u.scheme == "https" else 80)
+    except ValueError:
+        return False
+    if u.scheme not in ("http", "https") or port not in (80, 443) or not host:
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    return ip.is_loopback or ip in routes._DOCKER
+
+
 def _routes_all(ingress: list[dict], zone: str, npm_hosts: set[str]) -> bool:
-    """Brengt deze tunnel elke naam van de zone naar NPM (een regel *.zone, of een vangnet naar NPM)?"""
+    """Brengt deze tunnel elke naam van de zone (misschien) naar NPM: een regel *.zone, of een vangnet dat NPM kan zijn?
+    Zonder vangnet: niet na te gaan, dus ja."""
     for r in ingress:
         name = _norm(r.get("hostname"))
-        if name == f"*.{zone}" or (not name and _svc_host(r.get("service")) in npm_hosts):
+        if name == f"*.{zone}":
             return True
-    return False
+        if not name and not r.get("path"):
+            return _maybe_npm(r.get("service"), npm_hosts)
+    return True
+
+
+def _apex(records: list[dict], zone: str) -> set[str]:
+    return {_norm(r["content"]) for r in records if _norm(r["name"]) == zone and r["type"] in ("A", "AAAA")}
+
+
+def port_forward(records: list[dict], names: set[str], zone: str) -> bool:
+    """Wijst een naam van NPM, of *.zone, naar je thuis-IP? Dan bereikt poort 443 van buitenaf NPM, ook als de meeste
+    namen via de tunnel gaan."""
+    apex = _apex(records, zone)
+    return any(_kind_of(r["type"], _norm(r["content"]), zone, apex) == "portforward" for r in records
+               if r["type"] in ADDR and _norm(r["name"]) in names | {f"*.{zone}"})
 
 
 def _allows(acl: dict, ip: str) -> bool:
@@ -1036,8 +1096,7 @@ async def plan_create(db: AsyncSession, clients, body, *, at_run: bool = False, 
             else:
                 acc.why.append("Geen duidelijk patroon in Cloudflare: maak het record zelf")
     wild = [r for r in records if _norm(r["name"]) == f"*.{zone}" and r["type"] in ADDR]
-    npm_ip = await routes._npm_ip(n.base)
-    npm_hosts = {h for h in (npm_ip, _host_of(n.base)) if h}
+    npm_ip, npm_hosts = await _npm_hosts(n)
 
     # De tunnel: welke regels, en brengt hij elke naam naar NPM?
     account = cf.integ.account if cf else ""
@@ -1061,6 +1120,7 @@ async def plan_create(db: AsyncSession, clients, body, *, at_run: bool = False, 
                 acc.check("tunnel: lokaal beheerd", None, "config.yml op de machine van cloudflared")
                 acc.skip("tunnelregel", "lokaal beheerde tunnel")
                 acc.warnings.append(f"Lokaal beheerde tunnel: zet de hostname {fqdn} zelf in config.yml van cloudflared.")
+                acc.todo.append(f"zet de hostname {fqdn} in config.yml van cloudflared")
             elif any(_norm(r.get("hostname")) in (fqdn, f"*.{zone}") for r in ingress):
                 acc.check("tunnel: regel nodig", True, "de tunnel heeft al een regel die de naam dekt")
                 acc.skip("tunnelregel", "de tunnel heeft al een regel voor deze naam of *." + zone)
@@ -1079,7 +1139,13 @@ async def plan_create(db: AsyncSession, clients, body, *, at_run: bool = False, 
         if proxied_wild:
             acc.skip("DNS-record", f"*.{zone} in Cloudflare dekt de naam al")
         elif pattern.lead in ("tunnel", "portforward") and pattern.kind != "onbekend":
-            rtype, content = ("CNAME", pattern.top[1]) if pattern.lead == "tunnel" else ("CNAME", zone)
+            # Port-forward: een CNAME naar de zone als de namen naar de zone of haar adres wijzen, anders dezelfde
+            # vorm als de andere namen (bv. A → je thuis-IP terwijl de zone zelf elders staat).
+            top_type, top = pattern.top
+            if pattern.lead == "tunnel" or top_type == "CNAME" or top not in _apex(records, zone):
+                rtype, content = top_type, top
+            else:
+                rtype, content = "CNAME", zone
             rec = {"type": rtype, "name": fqdn, "content": content, "proxied": True, "ttl": 1, "comment": COMMENT}
             acc.ops.append(op_cf_record_add(cf, sysm, zone_id, rec))
     elif not publiek:
@@ -1099,17 +1165,35 @@ async def plan_create(db: AsyncSession, clients, body, *, at_run: bool = False, 
     if acl_id and acl is None:
         acc.check("toegangslijst", False, f"#{acl_id} bestaat niet", f"Toegangslijst #{acl_id} bestaat niet in NPM")
     if not publiek:
-        tunnel_open = False
-        if pattern.kind == "tunnel":
-            to_tunnel = [r for r in wild if r["type"] == "CNAME" and TUNNEL_CNAME.match(_norm(r["content"]))]
-            if to_tunnel:
-                tunnel_open = tc_err is not None or _routes_all((tc or {}).get("config", {}).get("ingress") or [],
-                                                                zone, npm_hosts)
+        # *.zone naar een tunnel: lees de tunnel waar die wildcard echt naartoe wijst. Alleen een tunnel die in
+        # Cloudflare beheerd wordt en waarvan het vangnet zeker niet NPM is, laat de naam thuis.
+        tunnel_open = None
+        wild_tunnels = {m.group(1) for r in wild
+                        if r["type"] == "CNAME" and (m := TUNNEL_CNAME.match(_norm(r["content"])))}
+        for t in sorted(wild_tunnels):
+            wtc, werr = (tc, tc_err) if t == tunnel_id and (tc or tc_err) else (None, None)
+            if wtc is None and werr is None:
+                if cf is None or not cfm.ACCOUNT_RE.match(account):
+                    werr = "geen account-id in de Cloudflare DNS-API: de tunnel is niet te lezen"
+                else:
+                    try:
+                        wtc = await cf.integ.tunnel_config(account, t)
+                    except IntegrationError as e:
+                        werr = mask(str(e))[:200]
+            if werr:
+                tunnel_open = f"*.{zone} gaat via tunnel {t[:8]}…, niet na te gaan waarheen ({werr})"
+            elif wtc.get("source") != "cloudflare":
+                tunnel_open = f"*.{zone} gaat via een lokaal beheerde tunnel ({t[:8]}…): misschien naar NPM"
+            elif _routes_all(wtc.get("config", {}).get("ingress") or [], zone, npm_hosts):
+                tunnel_open = f"*.{zone} gaat via de tunnel (misschien) naar NPM"
+            if tunnel_open:
+                break
+        pf = port_forward(records, names - {fqdn}, zone)
         if tunnel_open:
-            acc.check("alleen thuis: niet bereikbaar van buiten", False, "*.{zone} gaat via de tunnel naar NPM",
+            acc.check("alleen thuis: niet bereikbaar van buiten", False, tunnel_open,
                       "Via de tunnel is elke naam publiek. Een toegangslijst helpt daar niet: dat verkeer komt van "
                       "cloudflared op je LAN.")
-        elif pattern.kind == "tunnel":
+        elif pattern.kind == "tunnel" and not pf:
             acc.check("alleen thuis: niet bereikbaar van buiten", True, "geen wildcard via de tunnel; geen record")
             if acl is None and lan_lists:
                 acc.warnings.append(f"Aanbevolen: toegangslijst {lan_lists[0].get('name')} (alleen thuis), ook als "
@@ -1168,8 +1252,12 @@ async def plan_create(db: AsyncSession, clients, body, *, at_run: bool = False, 
     ag = sysm.adguard
     if ag is None:
         acc.check("LAN-DNS: geen AdGuard", None, "zet de naam zelf in je LAN-DNS als het nodig is")
+        if not publiek:
+            acc.todo.append(f"zet {fqdn} in je LAN-DNS (naar NPM), als een wildcard daar het nog niet doet")
     elif not npm_ip:
         acc.skip("naam in AdGuard", "het IP van NPM is onbekend")
+        if not publiek:
+            acc.todo.append(f"zet {fqdn} in je LAN-DNS (naar NPM)")
     else:
         try:
             rw = [r for r in await ag.integ.rewrites() if r["enabled"]]
@@ -1185,6 +1273,7 @@ async def plan_create(db: AsyncSession, clients, body, *, at_run: bool = False, 
             elif other:
                 acc.check("LAN-DNS", None, f"AdGuard stuurt {fqdn} naar {other['answer']}")
                 acc.skip("naam in AdGuard", f"er is al een rewrite naar {other['answer']}: pas die zelf aan")
+                acc.todo.append(f"AdGuard stuurt {fqdn} naar {other['answer']}: pas die rewrite aan naar {npm_ip}")
             else:
                 acc.check("LAN-DNS: exacte rewrite in AdGuard nodig", True)
                 acc.ops.append(op_lan_dns_add(ag, sysm, fqdn, npm_ip))
@@ -1375,6 +1464,8 @@ async def plan_cleanup(db: AsyncSession, clients, body, *, who: str = "") -> Pla
         names = set()
         acc.check("NPM", None, "geen NPM-API: proxy hosts niet nagekeken")
 
+    npm_ip, npm_hosts = await _npm_hosts(npm.integ) if npm else (None, set())
+
     # Cloudflare: alleen A/AAAA/CNAME naar NPM of met het commentaar van dit dashboard.
     if cf:
         try:
@@ -1401,8 +1492,6 @@ async def plan_cleanup(db: AsyncSession, clients, body, *, who: str = "") -> Pla
                 acc.skip(f"{r['type']}-record", f"naar {r['content']} blijft: wijst niet naar NPM")
             else:
                 acc.skip(f"{r['type']}-record", "blijft: niet van NPM")
-        npm_ip = await routes._npm_ip(npm.integ.base) if npm else None
-        npm_hosts = {h for h in (npm_ip, _host_of(npm.integ.base) if npm else None) if h}
         account = cf.integ.account
         for t in sorted(tunnels):
             if not cfm.ACCOUNT_RE.match(account):
@@ -1426,12 +1515,17 @@ async def plan_cleanup(db: AsyncSession, clients, body, *, who: str = "") -> Pla
     else:
         acc.check("Cloudflare", None, "geen Cloudflare DNS-API: records niet nagekeken")
 
-    # AdGuard.
+    # AdGuard: alleen een rewrite naar NPM, zoals bij Cloudflare.
     if sysm.adguard:
         try:
             for r in await sysm.adguard.integ.rewrites():
-                if r["domain"] == fqdn:
+                if r["domain"] != fqdn:
+                    continue
+                if npm_ip and r["answer"] == npm_ip:
                     acc.ops.append(op_lan_dns_del(sysm.adguard, fqdn, r["answer"]))
+                else:
+                    acc.skip("rewrite in AdGuard", f"naar {r['answer']} blijft: "
+                             + ("wijst niet naar NPM" if npm_ip else "het IP van NPM is onbekend"))
         except IntegrationError as e:
             acc.skip("naam in AdGuard", f"AdGuard: {mask(str(e))[:200]}")
 
@@ -1508,9 +1602,9 @@ async def _plan_backup_del(acc: _Acc, sysm: Systems, guest: dict, note: str | No
 
 # --- ongedaan maken ---------------------------------------------------------------------------------------------------
 
-async def plan_undo(db: AsyncSession, clients, run: dict, *, who: str = "") -> Plan:
+async def plan_undo(db: AsyncSession, clients, run: dict, *, who: str = "", maker=None) -> Plan:
     """Weghalen wat deze run maakte, met de strenge controles (zelfde inhoud, zelfde doel). Een stap waarvan de
-    uitkomst onbekend is, zoekt het object op zijn naam op: gevonden, dan mee weg."""
+    uitkomst onbekend is, zoekt het object op zijn naam op: gevonden, dan mee weg (een tegel via maker)."""
     snap = await gather(db, clients)
     sysm = snap.sysm
     acc = _Acc()
@@ -1523,7 +1617,7 @@ async def plan_undo(db: AsyncSession, clients, run: dict, *, who: str = "") -> P
         if any(c.get("kind") == spec.get("kind") for c in created):
             continue
         try:
-            found = await find_created(sysm, spec)
+            found = await find_created(sysm, spec, maker)
         except IntegrationError as e:
             acc.skip(s.get("title") or spec["kind"], f"niet na te gaan: {mask(str(e))[:200]}")
             continue
@@ -1667,7 +1761,10 @@ async def options(db: AsyncSession, clients) -> dict:
                                  "tunnel_account": bool(cfm.ACCOUNT_RE.match(c.account))}
         if zone:
             try:
-                out["pattern"] = pattern_of(await c.records(), names, zone).kind
+                recs = await c.records()
+                kind = pattern_of(recs, names, zone).kind
+                # "tunnel" alleen als geen naam ernaast naar je thuis-IP wijst: dan vraagt "alleen thuis" geen lijst.
+                out["pattern"] = "gemengd" if kind == "tunnel" and port_forward(recs, names, zone) else kind
             except IntegrationError as e:
                 notes.append(f"Cloudflare: {mask(str(e))[:200]}")
     if sysm.adguard:
@@ -1694,7 +1791,7 @@ async def options(db: AsyncSession, clients) -> dict:
 # --- runs -------------------------------------------------------------------------------------------------------------
 
 RUN_FIELDS = ("id", "kind", "of", "fqdn", "by", "at", "updated_at", "status", "warning", "input", "hash", "created",
-              "removed", "error", "undone_by")
+              "removed", "error", "undone_by", "todo")
 
 
 def _interrupt(r: dict) -> None:
@@ -1739,7 +1836,7 @@ async def start(db: AsyncSession, kind: str, plan: Plan, body: dict, user: User,
            "steps": [{"nr": i, "key": o.key, "title": o.title, "call": o.proef.get("call"), "status": "wacht",
                       "detail": None, "started_at": None, "finished_at": None, "fatal": o.fatal, "spec": o.spec}
                      for i, o in enumerate(plan.ops, 1)],
-           "created": [], "removed": [], "error": None, "undone_by": None}
+           "created": [], "removed": [], "error": None, "undone_by": None, "todo": list(plan.plan.get("todo") or [])}
     st = await ensure_state(db, STATE_KEY, {"runs": []})
     runs = [run, *runs_of(st.value)]
     keep = runs[:KEEP_RUNS] + [r for r in runs[KEEP_RUNS:] if r.get("status") == "bezig"]
@@ -1789,6 +1886,8 @@ def _finish_notify(db: AsyncSession, run: dict) -> None:
         body = f"{_labels(run['created'])}."
         if run.get("warning"):
             body += f" Back-up niet ingesteld: {run['warning']}. hw → back-ups toont hem rood tot dat geregeld is."
+        if run.get("todo"):
+            body += f" Nog zelf te doen: {'; '.join(run['todo'])}."
         notify(db, f"Nieuwe service {fqdn} klaar", mask(body), level="warn" if run.get("warning") else "info",
                source="nieuweservice", service_id=tile, push=False)
     else:
@@ -1852,6 +1951,14 @@ async def execute(maker, run_id: str, ops: list[Op], clients, user_id: int | Non
             r["created"], r["removed"] = list(ctx["created"]), list(ctx["removed"])
             if r.get("kind") == "ongedaan" and (orig := next((x for x in runs if x.get("id") == r.get("of")), None)):
                 orig["status"], orig["undone_by"] = "ongedaan", r["id"]
+            if r.get("kind") in ("opruimen", "ongedaan"):
+                # Een eerdere run van hetzelfde soort voor dezelfde naam die halverwege stopte, is nu afgewerkt: niet
+                # langer onder ! (undone_by: ongedaan gemaakt of afgewerkt door deze run).
+                for x in runs:
+                    if (x is not r and x.get("kind") == r["kind"] and x.get("fqdn") == r.get("fqdn")
+                            and x.get("of") == r.get("of") and not x.get("undone_by")
+                            and effective(x).get("status") in ("gestopt", "onderbroken")):
+                        x["undone_by"] = r["id"]
             _finish_notify(db, r)
         await _save(maker, run_id, finish)
         done = True

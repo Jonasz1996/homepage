@@ -106,7 +106,8 @@ WHY = {
     "onbekend_zone": "Valt in een zone die het Cloudflare-token niet ziet ({zone}): niet na te gaan of de naam publiek is.",
     "onbekend_tunnel": "De tunnel gaat naar {service}. Is dat NPM, dan kent NPM deze naam niet; is het een app, dan staat "
                        "hij open. Zet de naam van NPM bij npm_names (API-beheer, NPM).",
-    "onbekend_access": "Niet na te gaan: Cloudflare Access is niet leesbaar (token), en verder staat er geen login voor.",
+    "onbekend_access": "Niet na te gaan: Cloudflare Access is niet leesbaar (token, of een fout bij Cloudflare), en verder "
+                       "staat er geen login voor.",
     "onbekend_npm": "NPM kent deze naam niet als proxy host, en de redirection- en 404-hosts zijn niet leesbaar.",
     "onbekend_geen_npm": "Gaat naar NPM, maar er is geen NPM-tegel of -API: niet na te gaan of er een login voor staat.",
     "wildcard": "Elke naam onder {zone} bestaat publiek en komt bij {to}.",
@@ -360,6 +361,38 @@ def _from_cf(src: str, aliases: dict, depth: int = 0) -> bool:
     return bool(entries) and all(_from_cf(e, aliases, depth + 1) if e in aliases else _in_cf(e) for e in entries)
 
 
+def _covers(value: str | None, ip: str, aliases: dict, depth: int = 0) -> bool | None:
+    """Valt dit IP onder het doel van een filterregel (any, een IP of netwerk, een alias)? None: niet na te gaan (een
+    interfacenet zoals lan, of een alias met namen)."""
+    v = (value or "any").strip()
+    if v.lower() == "any":
+        return True
+    a = aliases.get(v)
+    if a is not None:
+        hits = [_covers(e, ip, aliases, depth + 1) for e in re.split(r"[\s,]+", a["content"]) if e] if depth <= 3 else []
+        return True if True in hits else False if hits and None not in hits else None
+    n, x = _net(v), _ip(ip)
+    return None if n is None or x is None else n.version == x.version and x in n
+
+
+def _filter_from(passes: list[tuple], wan: set[str], to_ips: list[str], to: tuple[int, int] | None,
+                 aliases: dict) -> list[tuple[str, bool]]:
+    """(bron, alleen Cloudflare) van elke WAN-filterregel die verkeer naar dit doel kan doorlaten. Bij twijfel (een
+    interfacenet, een poort die niet te lezen is) telt de regel mee."""
+    out = []
+    for iface, proto, frm, inverted, dst, dport in passes:
+        ifaces = {x.strip().lower() for x in (iface or "").split(",") if x.strip()}
+        if (ifaces and not ifaces & wan) or (proto or "any").lower() not in ("any", "tcp", "tcp/udp"):
+            continue
+        if to_ips and all(_covers(dst, ip, aliases) is False for ip in to_ips):
+            continue
+        rng = _port_range(dport, aliases)
+        if rng and to and (rng[1] < to[0] or rng[0] > to[1]):
+            continue
+        out.append((("!" if inverted else "") + (frm or "any"), not inverted and _from_cf(frm or "any", aliases)))
+    return out
+
+
 def wan_forwards(xml: str, size: int) -> dict:
     """De poortdoorverwijzingen op een WAN-interface uit config.xml: {status ok|onbekend, why, rules}. Alleen de velden
     van de doorverwijzing blijven over; de rest van de configuratie (wachtwoorden, sleutels) niet."""
@@ -381,15 +414,19 @@ def wan_forwards(xml: str, size: int) -> dict:
             aliases[name] = {"type": (_t(a, "type") or "").lower(), "url": _t(a, "url") or "",
                              "content": _t(a, "content", "address") or ""}
 
-    raw = []  # (interface, protocol, extern, doel, lokale poort, bron, omgekeerd, omschrijving)
+    def source(el) -> str:
+        return "any" if el is None or el.find("any") is not None else (_t(el, "network", "address") or "any")
+
+    # (interface, protocol, extern, doel, lokale poort, bron, omgekeerd, omschrijving, gekoppelde filterregel)
+    raw = []
     nat = root.find("nat")
     for r in nat.findall("rule") if nat is not None else []:
         if _off(r, "disabled") or _off(r, "nordr"):
             continue
         src = r.find("source")
-        frm = "any" if src is None or src.find("any") is not None else (_t(src, "network", "address") or "any")
         raw.append((_t(r, "interface"), _t(r, "protocol"), _t(r, "destination/port"), _t(r, "target"),
-                    _t(r, "local-port"), frm, src is not None and src.find("not") is not None, _t(r, "descr")))
+                    _t(r, "local-port"), source(src), src is not None and src.find("not") is not None, _t(r, "descr"),
+                    _t(r, "associated-rule-id")))
     mvc = root.find("OPNsense/Firewall")
     found_mvc = False
     for sec in list(mvc) if mvc is not None else []:
@@ -405,11 +442,27 @@ def wan_forwards(xml: str, size: int) -> dict:
                         _t(r, "target", "redirect_target_ip", "target_ip"),
                         _t(r, "local-port", "local_port", "target_port"),
                         _t(r, "source/network", "source_net", "source/address") or "any",
-                        (_t(r, "source/not", "source_not") or "0") == "1", _t(r, "descr", "description")))
+                        (_t(r, "source/not", "source_not") or "0") == "1", _t(r, "descr", "description"), None))
+    # De filterregels die verkeer doorlaten: (interface, protocol, bron, omgekeerd, doel, doelpoort).
+    passes = []
+    flt = root.find("filter")
+    for r in flt.findall("rule") if flt is not None else []:
+        if _off(r, "disabled") or (_t(r, "type") or "pass").lower() != "pass":
+            continue
+        src, dst = r.find("source"), r.find("destination")
+        passes.append((_t(r, "interface"), _t(r, "protocol"), source(src), src is not None and src.find("not") is not None,
+                       source(dst), _t(r, "destination/port")))
+    for sec in list(mvc) if mvc is not None else []:
+        for r in sec.iter("rule") if sec.tag.lower() == "filter" else []:
+            if _t(r, "enabled") == "0" or (_t(r, "action") or "pass").lower() != "pass":
+                continue
+            passes.append((_t(r, "interface"), _t(r, "protocol"), _t(r, "source_net") or "any",
+                           (_t(r, "source_not") or "0") == "1", _t(r, "destination_net") or "any",
+                           _t(r, "destination_port")))
     if nat is None and not found_mvc:
         return {"status": "onbekend", "why": "geen NAT-instellingen gevonden: formaat onbekend", "rules": []}
     rules = []
-    for iface, proto, ext, target, local, frm, inverted, descr in raw:
+    for iface, proto, ext, target, local, frm, inverted, descr, assoc in raw:
         ifaces = [x.strip().lower() for x in (iface or "").split(",") if x.strip()]
         if not any(i in wan for i in ifaces):
             continue
@@ -419,10 +472,17 @@ def wan_forwards(xml: str, size: int) -> dict:
         to = _port_range(local, aliases) or ext_range
         if to and ext_range and to[0] == to[1] and ext_range[1] > ext_range[0]:
             to = (to[0], to[0] + ext_range[1] - ext_range[0])
+        to_ips = _alias_ips(target, aliases) or [target]
+        frm_text, from_cf = ("!" if inverted else "") + (frm or "any"), not inverted and _from_cf(frm or "any", aliases)
+        if not from_cf and assoc != "pass":
+            # Zonder "Pass" laat pas een filterregel op WAN het verkeer door. Laten die allemaal alleen Cloudflare door,
+            # dan komt ook niemand anders bij het doel. Geen enkele gevonden: zoals de NAT-regel (voorzichtig).
+            via = _filter_from(passes, wan, to_ips, to, aliases)
+            if via and all(cf for _, cf in via):
+                frm_text, from_cf = ", ".join(sorted({f for f, _ in via})) + " (filterregel)", True
         rule = {"iface": ",".join(ifaces), "proto": (proto or "any").lower(), "ext": ext or "any",
-                "to_ip": ", ".join(_alias_ips(target, aliases) or [target]), "to_port": to[0] if to else None,
-                "from": ("!" if inverted else "") + (frm or "any"),
-                "from_cf": not inverted and _from_cf(frm or "any", aliases), "descr": (descr or "")[:80]}
+                "to_ip": ", ".join(to_ips), "to_port": to[0] if to else None, "from": frm_text,
+                "from_cf": from_cf, "descr": (descr or "")[:80]}
         if to and to[1] != to[0]:
             rule["to_last"] = to[1]
         rules.append(rule)
@@ -680,9 +740,9 @@ def ingress_for(cfg: dict | None, name: str) -> list[dict]:
 
 
 def access_for(apps: list[dict], name: str) -> tuple[str | None, str | None, str | None, list[str]]:
-    """(oordeel, app, pad, zwakkere paden) van de app van Cloudflare Access die deze naam het best raakt: een exacte
-    naam boven een wildcard, zonder pad boven met pad. Zwakkere paden: andere apps op een pad van deze naam die minder
-    vragen (bv. Bypass voor /api)."""
+    """(oordeel, app, pad, zwakkere paden) van de app van Cloudflare Access die deze naam het best raakt: zonder pad
+    boven met pad (die dekt de hele naam), dan een exacte naam boven een wildcard. Zwakkere paden: andere apps op een
+    pad van deze naam die minder vragen (bv. Bypass voor /api)."""
     best, weaker = None, []
     rank = ("bypass", "everyone", "public_mail", "login")
     for app in apps:
@@ -691,7 +751,7 @@ def access_for(apps: list[dict], name: str) -> tuple[str | None, str | None, str
             exact = host == name
             if not (exact or (host.startswith("*.") and name.endswith(host[1:]))):
                 continue
-            key = (0 if exact else 1, 1 if h.get("path") else 0)
+            key = (1 if h.get("path") else 0, 0 if exact else 1)
             if best is None or key < best[0]:
                 best = (key, app, h.get("path"))
             if h.get("path"):
@@ -746,6 +806,7 @@ class _Analysis:
         self.tunnels: dict[str, dict] = {}
         self.configs: dict[str, dict | None] = {}
         self.apps: list[dict] = []
+        self.tunnel_names: dict[str, set[str]] = {}  # tunnel-id → de namen die erheen wijzen
         seen = set()
         for cf in cfs:
             for z in cf.zones:
@@ -845,7 +906,8 @@ class _Analysis:
             npm_login.append(cfg["login"])
         if e.get("target_hp") and e["target_hp"] in self.auth_targets:
             npm_login.append("Authentik zelf" if key and self._is_auth(key) else "Authentik (proxy)")
-        if ctx.dashboard_ip and e.get("target_host") == ctx.dashboard_ip:
+        # Dit dashboard: nginx in de container (poort 80, of 443); een andere poort op hetzelfde IP is een andere app.
+        if ctx.dashboard_ip and e.get("target_hp") in (f"{ctx.dashboard_ip}:80", f"{ctx.dashboard_ip}:443"):
             npm_login.append("eigen login met 2FA (dit dashboard)")
             notes.append(("self", {}))
         if path in ("dns-only", "thuis") and cfg["origin_lock"]:
@@ -869,7 +931,7 @@ class _Analysis:
                 cf_login.append("Cloudflare Access (tunnel)")
         login = npm_login + cf_login
         common = {"npm_key": key, "notes": notes}
-        if (via_cf and self.rights.get("access_read") is False and not npm_login and not closed
+        if (via_cf and self.rights.get("access_read") is not True and not npm_login and not closed
                 and not (rule and rule.get("access_required"))):
             return _res(path, "onbekend", "warn", "onbekend_access", undecided=True, **common)
         if closed:
@@ -898,6 +960,9 @@ class _Analysis:
             notes.append(("locations", {"paths": ", ".join(e["locations"][:4])}))
         if cfg["jwt_presence"]:
             notes.append(("jwt_presence", {}))
+        if e["access_list_id"] and e["al"] is None and self.rights.get("npm_access_lists") is not True:
+            # Een toegangslijst die deze ronde niet te lezen was: het oordeel kan de volgende ronde anders zijn.
+            r["undecided"] = True
         return r
 
     # --- tunnel zonder NPM ---
@@ -918,7 +983,7 @@ class _Analysis:
             login.append("Cloudflare Access (tunnel)")
         if login:
             return _res("tunnel", "slot", "ok", "slot", params={"login": ", ".join(login)}, login=login, notes=notes)
-        if self.rights.get("access_read") is False:
+        if self.rights.get("access_read") is not True:
             return _res("tunnel", "onbekend", "warn", "onbekend_access", undecided=True, notes=notes)
         return _res("tunnel", "open", "err", "open_tunnel_direct", params={"service": rule.get("service")}, notes=notes)
 
@@ -938,6 +1003,7 @@ class _Analysis:
                 dns["to"] = f"tunnel {f['id'][:8]}… (onbekend)"
                 return _res("tunnel", "wees", "warn", "wees_tunnel_onbekend"), dns, f"tunnel:{f['id']}"
             dns["to"] = f"tunnel {t['name']}" + (" (verwijderd)" if t["deleted"] else "")
+            self.tunnel_names.setdefault(t["id"], set()).add(name)
             if t["deleted"]:
                 return _res("tunnel", "wees", "warn", "wees_tunnel_weg", params={"name": t["name"]}), dns, f"tunnel:{t['id']}"
             return self.tunnel(name, t, key, entries), dns, f"tunnel:{t['id']}"
@@ -982,10 +1048,12 @@ class _Analysis:
         if not ctx.ip_known:
             note = [("ip_unknown", {"why": ctx.ip_why or "nog niet gekend"})]
             if not v6 and entries:
+                # Beoordeeld alsof het record naar huis wijst (vingerafdruk "thuis", zoals met een gekend IP). Onzeker
+                # is alleen wat het IP zelf zegt (een oud IP: overname); een login of dicht geldt hoe dan ook ("ip").
                 r = self.npm_eval(name, key, entries, path)
                 r["notes"] = r["notes"] + note
-                r["undecided"] = True
-                return r, dns, addr
+                r["undecided"] = r["undecided"] or "ip"
+                return r, dns, "thuis"
             if v6 and addr in ctx.npm_ipv6:
                 return self.npm_eval(name, key, entries, path), dns, sig_to
             return (_res(path, "elders", "info", "elders_ip_onbekend", params={"ip": addr}, notes=note, undecided=True),
@@ -1016,6 +1084,8 @@ class _Analysis:
         if cfg is None or cfg.get("source") != "cloudflare":
             r = self.npm_eval(name, key, entries, "tunnel")
             r["notes"] = r["notes"] + [("tunnel_local", {}) if cfg is not None else ("tunnel_unread", {"name": t["name"]})]
+            if cfg is None and self.rights.get("tunnel_config") is not False:
+                r["undecided"] = True  # een fout bij Cloudflare (geen 403): de volgende ronde weet het wel
             r["tunnel"] = info
             return r
         rules = ingress_for(cfg, name)
@@ -1129,11 +1199,18 @@ class _Analysis:
                "why_key": worst["why_key"], "path": worst["path"],
                "paths": [{"path": r["path"], "state": r["state"], "login": r["login"]} for r in results if r["path"]],
                "dns": dns, "tunnel": tunnel, "npm": npm, "login": worst["login"],
-               "https_forced": worst.get("https"), "notes": notes, "undecided": any(r["undecided"] for r in results),
+               "https_forced": worst.get("https"), "notes": notes, "undecided": _undecided(results),
                "intended": None}
         row["sig"] = row_sig(row["base"], row["path"], sig_to, npm["target"] if npm else None,
                              tunnel["service"] if tunnel else None)
         return row
+
+
+def _undecided(results: list[dict]) -> bool | str:
+    """True: het oordeel kan de volgende ronde anders zijn (iets was niet te lezen). "ip": alleen het publieke IP is
+    niet gekend (een login of dicht geldt, een overname is niet na te gaan). False: zeker."""
+    found = [r["undecided"] for r in results if r["undecided"]]
+    return True if True in found else found[0] if found else False
 
 
 def _proxy_entry(h: dict, src: NpmData) -> dict:
@@ -1161,18 +1238,17 @@ def analyse(cfs: list[CfData], npms: list[NpmData], ctx: Ctx) -> dict:
     names = set(a.hosts) | {n for n, recs in a.by_name.items() if any(r["type"] in ADDR for r in recs)}
     rows = [a.row(n) for n in names]
     rows.sort(key=lambda r: (min(LEVELS.index(r["level"]), 2), r["name"]))
-    per_tunnel: Counter = Counter()
     paths: Counter = Counter()
     for r in rows:
         for kind in {("tunnel" if d["to"].startswith("tunnel ") else "proxied" if d["proxied"] else "dns-only")
                      for d in r["dns"]}:
             paths[kind] += 1
-        for name in {d["to"].split(" ")[1] for d in r["dns"] if d["to"].startswith("tunnel ")}:
-            per_tunnel[name] += 1
-    tunnels = [{"name": t["name"], "status": t["status"], "deleted": t["deleted"], "names": per_tunnel.get(t["name"], 0),
+    # Per tunnel-id: een verwijderde tunnel en een nieuwe met dezelfde naam zijn twee tunnels.
+    tunnels = [{"name": t["name"], "status": t["status"], "deleted": t["deleted"],
+                "names": len(a.tunnel_names.get(tid) or ()),
                 "managed": (a.configs.get(tid) or {}).get("source") if a.configs.get(tid) else None}
-               for tid, t in sorted(a.tunnels.items(), key=lambda x: x[1]["name"])
-               if not t["deleted"] or per_tunnel.get(t["name"])]
+               for tid, t in sorted(a.tunnels.items(), key=lambda x: (x[1]["name"], x[1]["deleted"]))
+               if not t["deleted"] or a.tunnel_names.get(tid)]
     inbound = {"public_ip": ctx.public_ip, "ip_known": ctx.ip_known, "ip_why": ctx.ip_why,
                "recent": [{"ip": ip, "until": until} for ip, until in sorted(ctx.recent.items())],
                "origin": a.origin, "forwards": ctx.forwards, "tunnels": tunnels,
@@ -1244,6 +1320,7 @@ def summary(value: dict, now: datetime) -> dict:
                     for r in rows if r["level"] == "err"][:60],
             "wees": [r["name"] for r in rows if r["state"] == "wees"][:20],
             "wees_n": sum(1 for r in rows if r["state"] == "wees"),
+            "verborgen": [r["name"] for r in rows if r["state"] == "verborgen"][:20],
             "verborgen_n": sum(1 for r in rows if r["state"] == "verborgen"),
             "wildcards": [{"name": r["name"], "why": r["why"], "sig": r["sig"]}
                           for r in rows if r["state"] == "wildcard" and r["level"] != "err"][:10],
@@ -1641,6 +1718,9 @@ def _notify(db: AsyncSession, prev: dict, marked: dict, new: dict[str, dict]) ->
     for k, a in old.items():
         r = rows.get(k.removeprefix("pub:"))
         if k not in new and r is not None and r.get("undecided"):
+            if (r["undecided"] == "ip" and a.get("kind") in ("open", "wildcard")
+                    and r["state"] in ("slot", "dicht", "doorverwijzing")):
+                continue  # er staat nu een login of het is dicht: dat geldt ook zonder publiek IP (herstel)
             # Deze ronde niet na te gaan (publiek IP onbekend, Access niet leesbaar, geen antwoord van 1.1.1.1): het
             # alarm blijft staan, zonder herstel en zonder nieuwe melding.
             alarm[k] = a

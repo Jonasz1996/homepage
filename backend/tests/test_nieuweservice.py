@@ -19,7 +19,7 @@ from app.db import get_db
 from app.integrations import cloudflare as cfm
 from app.integrations import npm as npmm
 from app.main import app
-from app.models import AppState, AuditLog, Notification, Service, Session, SshHost
+from app.models import ApiConnection, AppState, AuditLog, Notification, Service, Session, SshHost
 from app.monitoring import routes
 from app.monitoring.checks import HttpClients
 from app.routers import integrations as integrations_router
@@ -1060,3 +1060,161 @@ async def test_foutdetail_gemaskeerd(lab, authed):
     n = (await db.execute(select(Notification).where(Notification.source == "nieuweservice"))).scalar_one()
     assert "abc123secretvalue" not in n.body
     await agen.aclose()
+
+
+# --- review: tunnel, port-forward, CT/VM, runs ---------------------------------------------------------------------
+
+OTHER = "6f1c2d3e-0000-4000-8000-000000000002"
+
+
+async def _npm_names(lab, value: str) -> None:
+    agen, db = await _db()
+    await db.execute(update(ApiConnection).where(ApiConnection.id == lab.apis["npm"]).values(config={"npm_names": value}))
+    await db.commit()
+    await agen.aclose()
+
+
+async def test_lan_tunnel_vangnet_dat_npm_kan_zijn(lab, authed):
+    """*.zone via de tunnel: een vangnet naar een Docker-naam, een lokaal beheerde tunnel of een andere tunnel dan die
+    van het patroon is niet na te gaan, dus geen "alleen thuis"."""
+    lab.records.append({"id": "d" * 32, "type": "CNAME", "name": "*.jbogaert.be",
+                        "content": f"{TUNNEL}.cfargotunnel.com", "proxied": True})
+    plan = await _proef(authed, _body(lab, exposure="lan", access_list_id=1))
+    assert plan["kan"] is True, plan["waarom"]          # vangnet http_status:404: de naam blijft thuis
+    lab.tunnel["config"]["ingress"][-1] = {"service": "http://nginx-proxy-manager:80"}
+    plan = await _proef(authed, _body(lab, exposure="lan", access_list_id=1))
+    assert plan["kan"] is False and any("Via de tunnel is elke naam publiek" in w for w in plan["waarom"])
+    lab.tunnel["config"]["ingress"][-1] = {"service": "http_status:404"}
+    lab.tunnel["source"] = "local"
+    plan = await _proef(authed, _body(lab, exposure="lan", access_list_id=1))
+    assert plan["kan"] is False and any("lokaal beheerde tunnel" in (c["detail"] or "") for c in plan["checks"]
+                                        if c["what"].startswith("alleen thuis"))
+    lab.tunnel["source"] = "cloudflare"
+    lab.records[-1]["content"] = f"{OTHER}.cfargotunnel.com"
+    plan = await _proef(authed, _body(lab, exposure="lan", access_list_id=1))
+    assert plan["kan"] is False and any("Via de tunnel is elke naam publiek" in w for w in plan["waarom"])
+
+
+async def test_npm_names_telt_als_npm_in_de_tunnel(lab, authed):
+    lab.tunnel["config"]["ingress"][0] = {"hostname": "plex.jbogaert.be", "service": "http://nginx-proxy-manager:80"}
+    plan = await _proef(authed, _body(lab))
+    assert plan["kan"] is False and any("voorbeeldregel" in w for w in plan["waarom"])
+    await _npm_names(lab, "nginx-proxy-manager")
+    plan = await _proef(authed, _body(lab))
+    assert plan["kan"] is True, plan["waarom"]
+    step = next(s for s in plan["steps"] if "cfd_tunnel" in s["call"])
+    assert step["data"]["regel"] == {"hostname": FQDN, "service": "http://nginx-proxy-manager:80"}
+
+
+async def test_lan_tunnelpatroon_met_portforward_vraagt_een_lijst(lab, authed):
+    for i, name in enumerate(("a", "b", "c", "d"), 2):
+        lab.hosts.append({"id": i, "domain_names": [f"{name}.jbogaert.be"], "forward_scheme": "http",
+                          "forward_host": "192.168.0.20", "forward_port": 80, "certificate_id": 3, "access_list_id": 0,
+                          "advanced_config": "", "meta": {"nginx_online": True}})
+        lab.records.append({"id": str(i) * 32, "type": "CNAME", "name": f"{name}.jbogaert.be",
+                            "content": f"{TUNNEL}.cfargotunnel.com", "proxied": True})
+    plan = await _proef(authed, _body(lab, exposure="lan"))
+    assert plan["kan"] is True, plan["waarom"]
+    lab.hosts.append({"id": 9, "domain_names": ["game.jbogaert.be"], "forward_scheme": "http",
+                      "forward_host": "192.168.0.30", "forward_port": 80, "certificate_id": 3, "access_list_id": 0,
+                      "advanced_config": "", "meta": {"nginx_online": True}})
+    lab.records.append({"id": "9" * 32, "type": "A", "name": "game.jbogaert.be", "content": "81.82.83.84",
+                        "proxied": False})
+    plan = await _proef(authed, _body(lab, exposure="lan"))
+    assert "(tunnel)" in next(c["what"] for c in plan["checks"] if c["what"].startswith("patroon"))
+    assert plan["kan"] is False and any("toegangslijst" in w for w in plan["waarom"])
+    assert (await authed.get("/api/nieuweservice/opties")).json()["pattern"] == "gemengd"
+    plan = await _proef(authed, _body(lab, exposure="lan", poort_443_dicht=True))
+    assert plan["kan"] is True and any("Op jouw woord" in w for w in plan["warnings"])
+    # Een wildcard naar je thuis-IP net zo.
+    lab.records = [r for r in lab.records if r["name"] != "game.jbogaert.be"]
+    lab.records.append({"id": "e" * 32, "type": "A", "name": "*.jbogaert.be", "content": "81.82.83.84",
+                        "proxied": False})
+    plan = await _proef(authed, _body(lab, exposure="lan"))
+    assert plan["kan"] is False and any("toegangslijst" in w for w in plan["waarom"])
+
+
+async def test_portforward_kopieert_de_vorm_van_de_andere_namen(lab, authed):
+    lab.records = [{"id": "b" * 32, "type": "A", "name": "jbogaert.be", "content": "185.199.108.153", "proxied": True},
+                   {"id": "c" * 32, "type": "A", "name": "plex.jbogaert.be", "content": "81.82.83.84", "proxied": True}]
+    plan = await _proef(authed, _body(lab))
+    step = next(s for s in plan["steps"] if "dns_records" in s["call"])
+    assert (step["data"]["type"], step["data"]["content"]) == ("A", "81.82.83.84")
+    lab.records[0]["content"] = "81.82.83.84"
+    plan = await _proef(authed, _body(lab))
+    step = next(s for s in plan["steps"] if "dns_records" in s["call"])
+    assert (step["data"]["type"], step["data"]["content"]) == ("CNAME", "jbogaert.be")
+
+
+async def test_verouderde_ssh_host_telt_niet(lab, authed):
+    """De SSH-host zegt CT 123, maar die heeft intussen een ander IP: niet die CT in de back-up zetten."""
+    lab.guests[0]["ip"] = "192.168.0.99"
+    plan = await _proef(authed, _body(lab))
+    assert plan["guest"] is None and "geen CT/VM met dit IP" in _whats(plan)
+    assert not [s for s in plan["steps"] if s["via"] == "proxmox-api"]
+
+
+async def test_opruimen_gestopt_tot_een_volgende_lukt(lab, authed):
+    run = await _start(authed, _body(lab, backup=False))
+    assert run["status"] == "klaar"
+    lab.fail[("DELETE", "/api/nginx/proxy-hosts/57")] = httpx.Response(500, json={"error": {"message": "kapot"}})
+    _, done = await _cleanup(authed, {"fqdn": FQDN})
+    assert done["status"] == "gestopt" and done["removed"]
+    assert f"ns:{done['id']}" in await _attention(authed)
+    del lab.fail[("DELETE", "/api/nginx/proxy-hosts/57")]
+    _, again = await _cleanup(authed, {"fqdn": FQDN})
+    assert again["status"] == "klaar"
+    assert f"ns:{done['id']}" not in await _attention(authed)
+    old = (await authed.get(f"/api/nieuweservice/runs/{done['id']}")).json()
+    assert old["undone_by"] == again["id"] and old["status"] == "gestopt"
+
+
+async def test_trage_routes_na_de_tegel_is_geen_fout(lab, authed, monkeypatch):
+    async def slow(db, clients):
+        await asyncio.sleep(3600)
+    monkeypatch.setattr(routes, "refresh", slow)
+    monkeypatch.setattr(ns, "REFRESH_TIMEOUT", 0.05)
+    run = await _start(authed, _body(lab, backup=False))
+    assert run["status"] == "klaar", run
+    assert next(s for s in run["steps"] if s["key"] == "tile")["status"] == "ok"
+
+
+async def test_ongedaan_maken_vindt_een_tegel_met_onbekende_uitkomst(lab, authed):
+    run = await _start(authed, _body(lab, backup=False))
+    agen, db = await _db()
+    st = await db.get(AppState, ns.STATE_KEY)
+    value = copy.deepcopy(st.value)
+    r0 = value["runs"][0]
+    r0["status"] = "onderbroken"
+    r0["created"] = [c for c in r0["created"] if c["kind"] != "tile"]
+    next(s for s in r0["steps"] if s["key"] == "tile")["status"] = "onbekend"
+    st.value = value
+    await db.commit()
+    await agen.aclose()
+    r = await authed.post(f"/api/nieuweservice/runs/{run['id']}/ongedaan/proef")
+    step = next(s for s in r.json()["plan"]["steps"] if s["via"] == "dashboard")
+    assert step["note"].startswith("uitkomst van stap") and "Jellyfin" in step["call"]
+
+
+async def test_opruimen_laat_een_rewrite_naast_npm_staan(lab, authed):
+    lab.rewrites.append({"domain": "nas.jbogaert.be", "answer": "192.168.0.50", "enabled": True})
+    lab.records.append({"id": "f" * 32, "type": "A", "name": "nas.jbogaert.be", "content": "192.168.0.50"})
+    plan = (await authed.post("/api/nieuweservice/opruimen/proef", json={"fqdn": "nas.jbogaert.be"})).json()["plan"]
+    assert not [s for s in plan["steps"] if s["via"] == "adguard-api"]
+    assert "naar 192.168.0.50 blijft: wijst niet naar NPM" in _whats(plan)
+
+
+async def test_klaar_met_nog_zelf_te_doen(lab, authed):
+    lab.tunnel["source"] = "local"
+    run = await _start(authed, _body(lab, backup=False))
+    assert run["status"] == "klaar"
+    assert run["todo"] == [f"zet de hostname {FQDN} in config.yml van cloudflared"]
+    agen, db = await _db()
+    n = (await db.execute(select(Notification).where(Notification.title == f"Nieuwe service {FQDN} klaar"))).scalar_one()
+    assert "Nog zelf te doen: zet de hostname" in n.body
+    await agen.aclose()
+    run = await _start(authed, _body(lab, name="emby", port=8920, backup=False))
+    assert run["status"] == "klaar" and run["todo"]
+    lab.tunnel["source"] = "cloudflare"
+    run = await _start(authed, _body(lab, name="sonarr", port=8989, backup=False))
+    assert run["status"] == "klaar" and run["todo"] == []
