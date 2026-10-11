@@ -101,7 +101,7 @@ async def client(migrated):
             yield s
 
     app.dependency_overrides[get_db] = _db
-    limiter._fails.clear()
+    limiter.clear()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test", headers=H) as c:
         yield c
     app.dependency_overrides.clear()

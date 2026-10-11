@@ -15,11 +15,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..deps import audit, client_country, client_ip, current_user, notify, recent_auth, secure_cookie
+from ..deps import audit, client_ip, current_user, recent_auth, secure_cookie
 from ..models import AppState, User
 from ..oidc import OidcError, check_claims, discovery, has_mfa, jwks, pkce_pair, verify_signature
-from ..security import decrypt, encrypt
-from .auth import _start_session
+from ..security import DEVICE_COOKIE, decrypt, device_ok, encrypt, read_device
+from .auth import _start_session, new_ip_notice
 
 router = APIRouter(prefix="/api/auth/oidc", tags=["oidc"])
 
@@ -204,13 +204,10 @@ async def callback(request: Request, code: str | None = None, state: str | None 
         return await _fail(db, request, "Authentik meldt geen 2FA voor deze login (amr-claim). Zet 2FA aan in je "
                                         "Authentik-flow, of zet 'Authentik moet 2FA melden' uit.", user)
 
-    ip = client_ip(request) or "?"
-    if user.last_login_ip and user.last_login_ip != ip:
-        cc = client_country(request)
-        notify(db, "Login vanaf nieuw IP", f"{user.username} logde in via Authentik vanaf {ip}{f' ({cc})' if cc else ''}.",
-               level="warn", source="auth")
+    new_ip_notice(db, request, user, known=device_ok(read_device(request.cookies.get(DEVICE_COOKIE)), user),
+                  via=" via Authentik")
     user.last_login_at = datetime.now(timezone.utc)
-    user.last_login_ip = ip
+    user.last_login_ip = client_ip(request) or "?"
     resp = _done("/")
     await _start_session(db, request, resp, user, mfa_ok=True)
     await audit(db, request, user, "login", method="oidc", amr=claims.get("amr"))

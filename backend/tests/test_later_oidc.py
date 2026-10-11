@@ -105,6 +105,8 @@ async def test_oidc_login(authed, provider):
 
     r = await _login(authed, provider)
     assert r.status_code == 200 and 'content="0;url=/"' in r.text
+    # Een login via Authentik maakt dit een bekend toestel (zie test_beveiliging.py §4b).
+    assert "hp_device=" in r.headers.get("set-cookie", "")
     # PKCE: de verifier hoort bij de challenge.
     assert provider.form["code_verifier"] and provider.form["grant_type"] == ["authorization_code"]
     st = (await authed.get("/api/auth/state")).json()

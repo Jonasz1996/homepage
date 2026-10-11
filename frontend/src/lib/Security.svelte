@@ -106,7 +106,7 @@
     pwMsg = ''
     if (pw.new !== pw.again) { error = 'De nieuwe wachtwoorden zijn niet gelijk'; return }
     try {
-      await api('/auth/password', { method: 'POST', body: { current: pw.current, new: pw.new } })
+      await withReauth(() => api('/auth/password', { method: 'POST', body: { current: pw.current, new: pw.new } }))
       pw = { current: '', new: '', again: '' }
       pwMsg = 'Wachtwoord gewijzigd. Andere apparaten zijn afgemeld.'
       error = ''
