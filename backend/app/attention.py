@@ -14,7 +14,7 @@ from .health import domains as dom, scan as hw, security, selfcheck as sc, snaps
 from .integrations import REGISTRY
 from .integrations.zabbix import RED_FROM
 from .models import AppState, CronJob, Device, MaintenanceWindow, Service, ServiceState, UpdateRun
-from .monitoring import cluster, coverage, planned, restoretest, updates as upd, zabbix as zbx
+from .monitoring import cluster, coverage, devices, planned, restoretest, updates as upd, zabbix as zbx
 from .monitoring.engine import MASS_KEY, active
 
 ACK_KEY = "attention_ack"
@@ -383,10 +383,13 @@ async def network(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
     new = list((await db.execute(select(Device).where(Device.known.is_(False)).order_by(Device.first_seen))).scalars())
     if new:
         names = ", ".join(d.name or d.hostname or d.vendor or d.ip or d.mac for d in new[:5])
+        # Genegeerd komt het alleen terug als er een echt nieuw onbekend apparaat bijkomt, niet als je er een als
+        # gekend markeert of er een opgeruimd wordt (refresh houdt bij wanneer het laatste bijkwam).
+        last_new = (await _state(db, devices.STATE_KEY)).get("last_new")
         out.append(item("devices", "warn", "apparaten", f"{len(new)} nieuw{'e' if len(new) != 1 else ''} "
                         f"{'apparaten' if len(new) != 1 else 'apparaat'} op je netwerk", names + (" …" if len(new) > 5 else "")
                         + ". Ken je ze? Geef ze een naam of markeer ze als gekend.",
-                        {"window": "net", "tab": "apparaten"}, sig=",".join(sorted(d.mac for d in new))))
+                        {"window": "net", "tab": "apparaten"}, sig=f"nieuw sinds {last_new or '-'}"))
     return out
 
 
