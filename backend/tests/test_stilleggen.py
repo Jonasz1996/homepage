@@ -229,6 +229,46 @@ async def test_ouder_venster_verwijderen_stopt_ook_de_volle_dag(authed):
     assert await _until(nas) == hand
 
 
+async def test_ouder_venster_stoppen_laat_verlengd_onderhoud_binnen_de_volle_dag_staan(authed):
+    """Een venster zet precies het einde van een keer, en een ouder venster zette vroeger precies de volle dag. Onderhoud
+    dat met de hand (met 2FA) verlengd is en daartussen eindigt, blijft staan als het venster stopt."""
+    g = await _group(authed)
+    plex = await _svc(authed, g, "plex", {"type": "http"})
+    nas = await _svc(authed, g, "nas", {"type": "http"})
+    wiki = await _svc(authed, g, "wiki", {"type": "http"})
+    wid, begin, end = await _old_window(group_id=g)
+    agen, db = await _db()
+    (await db.get(Service, plex)).maintenance_until = end
+    (await db.get(Service, nas)).maintenance_until = begin + timedelta(days=1)
+    (await db.get(Service, wiki)).maintenance_until = hand = end + timedelta(hours=3)
+    await db.commit()
+    await agen.aclose()
+    await _stale()
+    assert (await authed.delete(f"/api/maintenance/windows/{wid}")).status_code == 204
+    assert await _until(plex) <= datetime.now(timezone.utc)
+    assert await _until(nas) <= datetime.now(timezone.utc)
+    assert await _until(wiki) == hand
+
+
+async def test_ouder_weekvenster_van_meer_dan_twee_dagen_stopt_ook_op_zondag(authed):
+    """Een ouder weekvenster van vrijdag 18 u voor 60 uur zette het onderhoud tot maandagochtend. Op zondag uitzetten
+    of verwijderen stopt dat nog: stop() kijkt zo ver terug als het venster bewaard is."""
+    g = await _group(authed)
+    plex = await _svc(authed, g, "plex", {"type": "http"})
+    friday = datetime(2026, 10, 9, 18, 0).astimezone()
+    assert friday.weekday() == 4
+    agen, db = await _db()
+    w = MaintenanceWindow(name="weekend", service_id=plex, repeat="weekly", start=friday, minutes=60 * 60,
+                          weekdays=[4], enabled=True)
+    db.add(w)
+    (await db.get(Service, plex)).maintenance_until = friday + timedelta(hours=60)
+    await db.commit()
+    sunday = friday + timedelta(days=1, hours=18)
+    await planned.stop(db, w, sunday)
+    assert _aware((await db.get(Service, plex)).maintenance_until) == sunday
+    await agen.aclose()
+
+
 async def test_onderhoud_met_de_hand_valt_op_in_aandacht(authed):
     g = await _group(authed)
     ids = [await _svc(authed, g, f"s{i}", {"type": "http"}) for i in range(13)]
