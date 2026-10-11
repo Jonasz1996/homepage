@@ -18,22 +18,39 @@ case "$(systemctl is-active homepage-backuptest 2>/dev/null)" in
 esac
 
 set -- --exclude-table-data=public.log_entries
-# Met TimescaleDB staat de inhoud van log_entries in de chunks van de hypertable, en na compressie in de chunks van
-# de gecomprimeerde hypertable. Die ook overslaan; de catalogus van TimescaleDB zegt welke ids ze hebben.
+# Met TimescaleDB staan de rijen van log_entries in de chunks, en na compressie in een aparte relatie per chunk. Die
+# allemaal overslaan, elk met zijn exacte naam. Waar TimescaleDB de gecomprimeerde relatie bijhoudt, verschilt per
+# versie: tot 2.28 in chunk.compressed_chunk_id (namen als compress_hyper_2_9_chunk), vanaf 2.19 ook en vanaf 2.29
+# alleen in compression_settings.compress_relid (nieuwe heten _hyper_1_1_chunk_compressed; die van voor een update
+# van de extensie houden hun oude naam, zonder gecomprimeerde hypertable in de catalogus). to_jsonb leest alleen de
+# kolommen die deze versie heeft.
 if [ "$(psql -XAtq -c "SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'")" = 1 ]; then
-  pats=$(psql -XAtq -c "
-    SELECT format('%s._hyper_%s_*_chunk', h.associated_schema_name, h.id)
-      FROM _timescaledb_catalog.hypertable h WHERE h.schema_name = 'public' AND h.table_name = 'log_entries'
-    UNION ALL
-    SELECT format('%s.compress_hyper_%s_*_chunk', c.associated_schema_name, c.id)
-      FROM _timescaledb_catalog.hypertable h JOIN _timescaledb_catalog.hypertable c ON c.id = h.compressed_hypertable_id
-     WHERE h.schema_name = 'public' AND h.table_name = 'log_entries'")
+  rels=$(psql -XAtq -c "
+    WITH ch AS (
+      SELECT show_chunks(format('%I.%I', hypertable_schema, hypertable_name)::regclass) AS rel
+        FROM timescaledb_information.hypertables
+       WHERE hypertable_schema = 'public' AND hypertable_name = 'log_entries'
+    ), cat AS (
+      SELECT to_jsonb(x) AS j FROM _timescaledb_catalog.chunk x
+    ), rels AS (
+      SELECT rel FROM ch
+      UNION
+      SELECT to_regclass(s.j ->> 'compress_relid')
+        FROM (SELECT to_jsonb(x) AS j FROM _timescaledb_catalog.compression_settings x) s
+        JOIN ch ON to_regclass(s.j ->> 'relid') = ch.rel
+      UNION
+      SELECT to_regclass(quote_ident(cc.j ->> 'schema_name') || '.' || quote_ident(cc.j ->> 'table_name'))
+        FROM cat c JOIN cat cc ON cc.j -> 'id' = c.j -> 'compressed_chunk_id'
+        JOIN ch ON to_regclass(quote_ident(c.j ->> 'schema_name') || '.' || quote_ident(c.j ->> 'table_name')) = ch.rel
+    )
+    SELECT format('%I.%I', n.nspname, r.relname)
+      FROM rels JOIN pg_class r ON r.oid = rels.rel JOIN pg_namespace n ON n.oid = r.relnamespace")
   while read -r p; do
     if [ -n "$p" ]; then
       set -- "$@" "--exclude-table-data=$p"
     fi
   done <<EOF
-$pats
+$rels
 EOF
 fi
 

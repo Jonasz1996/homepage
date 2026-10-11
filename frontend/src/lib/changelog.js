@@ -17,6 +17,7 @@ export const CHANGELOG = [
       'Elke 1e van de maand zet de homepage de nieuwste nachtelijke back-up echt terug in een testdatabase en toont het resultaat met de tabellen onder Gezondheid › homepage. Mislukt het, dan staat het onder ! en krijg je een melding. Blijft de testdatabase staan omdat de container uitviel, dan ruimt de back-up van de nacht erna hem op.',
       'Staat de back-up van het dashboard alleen in de container, dan stelt ! een kopie erbuiten voor. Verandert secret.key nadat je de wachtzin instelde, dan zegt de zelfcontrole dat de sleutel in die kopie verouderd is. LEESMIJ.txt bij de kopie noemt de versies van PostgreSQL en TimescaleDB om terug te zetten.',
       'homepage-terugzetten keurt een terugzetting af als de gegevens van een tabel niet terug konden, en "De laatste back-up is onleesbaar" onder ! zegt nu waarom.',
+      'Met TimescaleDB 2.29 of nieuwer liet de nachtelijke back-up de gecomprimeerde logregels niet weg (TimescaleDB noemt die delen sinds 2.29 anders). Nu zoekt hij ze op hun exacte naam op, ook de delen met een oude naam van voor een update van TimescaleDB, dus de back-up wordt weer klein.',
       'Een fout van een proxy zonder uitleg toont nu bv. "Mislukt (fout 504)" in plaats van niets. Alle acties in het auditlog hebben nu een leesbare naam.',
     ],
     instellen: [
