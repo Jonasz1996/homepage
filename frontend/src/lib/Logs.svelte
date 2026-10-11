@@ -11,6 +11,7 @@
   const RANGES = ['1h', '24h', '7d', '30d']
 
   let hosts = $state([])
+  let hostsError = $state('')
   let host = $state(null)
   let q = $state('')
   let qLive = $state('')
@@ -78,8 +79,11 @@
     }
   }
 
-  // De lijst met machines links: bij het openen en elke 30 s (onMount), niet bij elke filter.
-  const loadHosts = () => api('/logs/hosts').then((h) => (hosts = h)).catch(() => {})
+  // De lijst met machines links: bij het openen en elke 30 s (onMount), niet bij elke filter. Mislukt het (de server
+  // stopt na 5 s), dan blijft de vorige lijst staan, maar niet stil: zonder lijst stond er anders "nog geen logs".
+  const loadHosts = () => api('/logs/hosts')
+    .then((h) => { hosts = h; hostsError = '' })
+    .catch((e) => { hostsError = e.status === 503 ? 'te traag' : `niet geladen: ${e.message}` })
 
   async function loadMore() {
     const my = gen
@@ -168,7 +172,7 @@
     <div class="cols">
       <aside>
         <button class="hb" class:on={!host} onclick={() => (host = null)}>
-          <b>alle machines</b><small>{hosts.reduce((a, h) => a + h.count, 0).toLocaleString('nl-BE')} regels / 24 u</small>
+          <b>alle machines</b><small>{hostsError && !hosts.length ? 'aantal onbekend' : `${hosts.reduce((a, h) => a + h.count, 0).toLocaleString('nl-BE')} regels / 24 u`}</small>
         </button>
         {#each hosts as h (h.host)}
           <button class="hb" class:on={host === h.host} onclick={() => (host = host === h.host ? null : h.host)}>
@@ -176,8 +180,9 @@
             <small>{h.count.toLocaleString('nl-BE')}{#if h.errors}&nbsp;·&nbsp;<span class="e">{h.errors} fouten</span>{/if}</small>
           </button>
         {:else}
-          <p class="hint">Nog geen logs ontvangen. Kies <b>machines toevoegen</b>.</p>
+          {#if !hostsError}<p class="hint">Nog geen logs ontvangen. Kies <b>machines toevoegen</b>.</p>{/if}
         {/each}
+        {#if hostsError}<p class="hint">Lijst met machines {hostsError}{hosts.length ? '; de aantallen zijn van daarnet' : ''}. Nieuwe poging over 30 s.</p>{/if}
       </aside>
       <section>
         <div class="filters">
