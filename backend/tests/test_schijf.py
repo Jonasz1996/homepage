@@ -300,7 +300,7 @@ def test_containerlogs_alleen_als_ze_aan_staan():
                            api=ApiConnection(kind="portainer", url="https://portainer", config=None)))
 
 
-def test_klok_van_de_bron_meer_dan_een_uur_verkeerd():
+def test_klok_van_de_bron_meer_dan_een_uur_voor_of_een_dag_achter():
     now = datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc)
 
     def at(stamp: str) -> datetime:
@@ -308,6 +308,13 @@ def test_klok_van_de_bron_meer_dan_een_uur_verkeerd():
 
     assert at("2026-10-11T11:30:00Z") == now - timedelta(minutes=30)  # binnen het uur: tijd van de bron
     assert at("2026-10-11T12:50:00Z") == now + timedelta(minutes=50)
-    assert at("2026-10-11T10:30:00Z") == now  # anderhalf uur te vroeg
-    assert at("2026-10-11T14:00:00Z") == now  # twee uur te laat
-    assert at("2026-10-08T12:00:00Z") == now  # dagen oud: niet in een gecomprimeerde chunk
+    assert at("2026-10-11T14:00:00Z") == now  # twee uur in de toekomst: klok van de bron verkeerd
+    # Uren oud: rsyslog hield de regel vast terwijl de ontvanger niet las (wachtrij vol). Vroeger: de ontvangsttijd.
+    assert at("2026-10-11T10:30:00Z") == now - timedelta(hours=1, minutes=30)
+    assert at("2026-10-10T12:30:00Z") == now - timedelta(hours=23, minutes=30)
+    # Met de tijdzone van de machine, zoals rsyslog hem meestuurt: in UTC, zoals de ontvangsttijd.
+    local = at("2026-10-11T09:00:00.123456+02:00")
+    assert local == now - timedelta(hours=5, microseconds=-123456) and local.utcoffset() == timedelta(0)
+    assert at("2026-10-10T11:30:00Z") == now  # meer dan een dag oud: niet in een gecomprimeerde chunk
+    assert at("2026-10-08T12:00:00Z") == now
+    assert at("0001-01-01T00:00:00+05:00") == at("9999-12-31T23:59:59-05:00") == now  # niet in UTC te zetten

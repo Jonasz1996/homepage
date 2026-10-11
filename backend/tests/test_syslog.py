@@ -15,7 +15,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.main import app
 from app.models import AppState, Base, LogEntry, LogRule, Notification
-from app.syslog import server
+from app.syslog import rollout, server
 from app.syslog.parse import parse
 from app.syslog.server import Receiver, handle_tcp
 
@@ -190,6 +190,31 @@ async def test_receive_time_is_kept_until_written(receiver):
     async with rx.maker() as s:
         ts = (await s.execute(select(LogEntry.ts))).scalar()
     assert abs(ts.replace(tzinfo=ts.tzinfo or timezone.utc).timestamp() - (at - 600)) < 1
+
+
+async def test_held_back_tcp_lines_keep_their_own_time(receiver):
+    """rsyslog houdt regels zelf vast zolang de ontvanger niet leest (wachtrij vol na een storing) en stuurt ze uren
+    later. Zoals het dashboard rsyslog uitrolt (RFC 5424, met tijdzone) houden ze hun eigen tijd; vroeger kregen ze
+    het moment waarop ze eindelijk gelezen werden."""
+    rx, _ = receiver
+    assert 'template="RSYSLOG_SyslogProtocol23Format"' in rollout.CLIENT
+    sent = datetime.now(timezone(timedelta(hours=2))) - timedelta(hours=3)
+    # Precies zoals rsyslog 8 het met die template over TCP stuurt (nagekeken met rsyslogd 8.2312).
+    line = f"<78>1 {sent.isoformat()} pve50 CRON 20082 - -  (root) CMD (run-parts /etc/cron.hourly)\n".encode()
+    srv = await asyncio.start_server(lambda r, w: handle_tcp(rx, r, w), "127.0.0.1", 0)
+    _, w = await asyncio.open_connection("127.0.0.1", srv.sockets[0].getsockname()[1])
+    w.write(line)
+    await w.drain()
+    await _until(lambda: rx.queue.qsize() == 1)
+    await rx.flush([rx.queue.get_nowait()])
+    w.close()
+    srv.close()
+    async with rx.maker() as s:
+        row = (await s.execute(select(LogEntry))).scalar_one()
+    assert (row.host, row.app, row.facility, row.severity) == ("pve50", "CRON", 9, 6)
+    assert row.msg == "(root) CMD (run-parts /etc/cron.hourly)"
+    ts = row.ts.replace(tzinfo=row.ts.tzinfo or timezone.utc)
+    assert abs(ts.timestamp() - sent.timestamp()) < 0.01
 
 
 async def test_long_host_and_rule_name_cut_to_the_title_column(receiver):
