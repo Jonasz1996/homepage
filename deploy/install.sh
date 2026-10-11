@@ -128,14 +128,12 @@ bij_fout() {
 # Een installatie van voor HOMEPAGE_LAN_OPEN (homepage.env zonder die regel): het vorige script schreef altijd een
 # HOMEPAGE_NPM_IP weg, ook de standaard als er geen opgegeven was. Dat IP is dus niet nagekeken en het LAN blijft open
 # (HOMEPAGE_LAN_OPEN=1), anders sloot een verkeerd IP je bij deze update buiten. Dichtzetten (0) doe je zelf, als het
-# dashboard via NPM werkt. Pas in de stap nginx: mislukt de update daarvoor, dan ziet de volgende poging nog altijd
-# een installatie van daarvoor. Zet BIJGEWERKT.
+# dashboard via NPM werkt. Zet BIJGEWERKT; de regel komt pas in homepage.env als de uitleg in $CONF_DIR/nginx staat
+# (op het einde van de stap nginx): mislukt de update daarvoor, dan ziet de volgende poging nog altijd een installatie
+# van daarvoor.
 lan_bijgewerkt() {
   BIJGEWERKT=""
-  if ! grep -q '^HOMEPAGE_LAN_OPEN=' "$CONF_DIR/homepage.env"; then
-    BIJGEWERKT=1
-    echo "HOMEPAGE_LAN_OPEN=1" >> "$CONF_DIR/homepage.env"
-  fi
+  grep -q '^HOMEPAGE_LAN_OPEN=' "$CONF_DIR/homepage.env" || BIJGEWERKT=1
 }
 
 # Wat nginx het LAN toelaat (__LAN_DICHT__ in deploy/nginx-map.conf), met HOMEPAGE_LAN_OPEN uit homepage.env (al
@@ -425,6 +423,7 @@ systemctl reload nginx || systemctl restart nginx
 printf 'lan=%s\nreden=%s\nnpm=%s\nnetten=%s\ndatum=%s\n' "$LAN_STAAT" "$LAN_REDEN" "$NPM_IP" "$LAN_NETS" \
   "$(date -Iseconds)" > "$CONF_DIR/nginx"
 chgrp homepage "$CONF_DIR/nginx" && chmod 640 "$CONF_DIR/nginx"
+[ -z "$BIJGEWERKT" ] || echo "HOMEPAGE_LAN_OPEN=1" >> "$CONF_DIR/homepage.env"
 
 say "Services"
 # Een update terugdraaien: vorige versie plus de kopie van de database van vlak voor die update.

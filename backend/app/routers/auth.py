@@ -31,6 +31,7 @@ from ..security import (
     new_token,
     password_slot,
     read_device,
+    from_session,
     session_device,
     token_id,
     verify_password_async,
@@ -123,12 +124,17 @@ def _busy() -> HTTPException:
     return HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Even te druk, probeer zo opnieuw")
 
 
-def _set_device(request: Request, response: Response, user: User, fallback: str | None = None) -> None:
+def _set_device(request: Request, response: Response, user: User, fallback: str | None = None,
+                login: bool = False) -> None:
     """Dit toestel onthouden, een jaar lang (bij elke login opnieuw): hier geldt de limiet per gebruikersnaam niet.
     Lax: ook de terugkeer van Authentik (een navigatie van een ander domein) stuurt het mee. fallback: het toestel-ID
-    als er nog geen geldig cookie is (anders een nieuw)."""
+    als er nog geen geldig cookie is (anders een nieuw). login: net met 2FA ingelogd (of 2FA aangezet); een ID dat van
+    de sessie kwam, wordt dan een eigen: wie die sessie stal, kreeg hetzelfde ID en kon zo de teller van dit toestel
+    vullen."""
     dev = read_device(request.cookies.get(DEVICE_COOKIE))
     keep = dev["d"] if device_ok(dev, user) else fallback
+    if login and from_session(keep):
+        keep = None
     response.set_cookie(
         DEVICE_COOKIE, device_token(user.id, user.username, user.password_hash, keep), max_age=DEVICE_DAYS * 86400,
         httponly=True, secure=secure_cookie(request), samesite="lax", path="/api/auth",
@@ -160,7 +166,7 @@ async def _start_session(db: AsyncSession, request: Request, response: Response,
         secure=secure_cookie(request), samesite="strict", path="/",
     )
     if mfa_ok:
-        _set_device(request, response, user)
+        _set_device(request, response, user, login=True)
 
 
 async def _user_count(db: AsyncSession) -> int:
@@ -221,7 +227,7 @@ async def totp_enroll(sess: Session = Depends(current_session), db: AsyncSession
 
 
 @router.post("/totp/enable")
-async def totp_enable(data: CodeIn, request: Request, sess: Session = Depends(current_session),
+async def totp_enable(data: CodeIn, request: Request, response: Response, sess: Session = Depends(current_session),
                       db: AsyncSession = Depends(get_db)):
     user = sess.user
     if user.totp_enabled:
@@ -234,6 +240,8 @@ async def totp_enable(data: CodeIn, request: Request, sess: Session = Depends(cu
     await audit(db, request, user, "totp_enabled")
     notify(db, "2FA ingeschakeld", f"Voor gebruiker {user.username}.", level="ok", source="auth")
     await db.commit()
+    # Het toestel waarop je 2FA aanzette, is meteen bekend, met een eigen ID (niet dat van de sessie, via /state).
+    _set_device(request, response, user, login=True)
     return {"ok": True}
 
 

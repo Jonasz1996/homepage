@@ -59,6 +59,7 @@ STUKKEN = "\n".join([
     'set -a\n. "$CONF_DIR/homepage.env"\nset +a',
     NGINX_STAP,
     _regels("printf 'lan=%s", '> "$CONF_DIR/nginx"'),
+    _regels('[ -z "$BIJGEWERKT" ] ||', '"$CONF_DIR/homepage.env"'),
 ])
 
 
@@ -133,6 +134,27 @@ def test_update_van_voor_de_regel_laat_het_lan_open(tmp_path, etc):
     v = _install(tmp_path)
     assert (v["LAN_DICHT"], v["LAN_REDEN"]) == ("0", "lan-open")
     assert lan_row()["todo"][0].startswith("HOMEPAGE_LAN_OPEN=1 staat in")
+
+
+def test_update_die_mislukt_in_de_stap_nginx(tmp_path, etc):
+    """Mislukt de update in de stap nginx (nginx -t, een herstart, Ctrl+C) nadat het script al wist dat het een
+    installatie van voor de regel is, dan zegt de volgende poging dat nog altijd: HOMEPAGE_LAN_OPEN=1 komt pas in
+    homepage.env na de uitleg in /etc/homepage/nginx."""
+    text = "\n".join(SCRIPT)
+    assert text.index('[ -z "$BIJGEWERKT" ] ||') > text.index("printf 'lan=%s")
+    (etc / "homepage.env").write_text(OUD)
+    (tmp_path / "fout.sh").write_text(f"set -euo pipefail\nCONF_DIR='{etc}'\n"
+                                      + STUKKEN.replace(NGINX_STAP, NGINX_STAP + "\nfalse"))
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    (bin_ / "ip").write_text("#!/bin/sh\nexit 0\n")
+    (bin_ / "ip").chmod(0o755)
+    r = subprocess.run(["bash", str(tmp_path / "fout.sh")], capture_output=True, text=True,
+                       env={"PATH": f"{bin_}:{os.environ['PATH']}", "NPM_IP": "", "LC_ALL": "C.UTF-8"})
+    assert r.returncode != 0 and _env(etc) == [] and not (etc / "nginx").exists()
+    v = _install(tmp_path)
+    assert (v["BIJGEWERKT"], v["LAN_DICHT"], v["LAN_REDEN"]) == ("1", "0", "bijgewerkt")
+    assert _env(etc) == ["HOMEPAGE_LAN_OPEN=1"] and _staat(etc)["reden"] == "bijgewerkt"
 
 
 def test_nieuwe_installatie(tmp_path, etc):

@@ -55,6 +55,15 @@ async def _settings(db: AsyncSession) -> dict:
     return dict(st.value) if st else {}
 
 
+async def _seen_issuer(db: AsyncSession, iss: str) -> None:
+    """De issuer die Authentik nu meldt (net nagekeken tegen de discovery) onthouden als hij veranderde sinds het
+    opslaan: anders bleef een koppeling bij die issuer in ⚿ → authentik en de checklist "verouderd" tot je de
+    instellingen opnieuw opsloeg, ook al werkt inloggen."""
+    st = await db.get(AppState, KEY)
+    if st is not None and st.value.get("iss") != iss:
+        st.value = {**st.value, "iss": iss}
+
+
 def _redirect_uri(request: Request, cfg: dict) -> str:
     base = (cfg.get("redirect_base") or str(request.base_url)).rstrip("/")
     return base + "/api/auth/oidc/callback"
@@ -313,6 +322,7 @@ async def callback(request: Request, code: str | None = None, state: str | None 
         return await _fail(db, request, saved, NO_MFA, user)
 
     user.oidc_name = name or user.oidc_name
+    await _seen_issuer(db, iss)
     new_ip_notice(db, request, user, known=device_ok(read_device(request.cookies.get(DEVICE_COOKIE)), user),
                   via=" via Authentik")
     user.last_login_at = datetime.now(timezone.utc)
@@ -345,6 +355,7 @@ async def _link(db: AsyncSession, request: Request, cfg: dict, saved: dict, clai
         return await _fail(db, request, saved, f"Dit Authentik-account is al gekoppeld aan {other.username}", user)
     uid = user.id
     user.oidc_issuer, user.oidc_sub, user.oidc_name = iss, sub, name or None
+    await _seen_issuer(db, iss)
     await audit(db, request, user, "oidc_linked", name=name, sub=sub[:64], issuer=iss)
     notify(db, "Authentik-account gekoppeld",
            f"{user.username} kan nu ook inloggen via Authentik, als {name or 'een account zonder naam'}. Was jij dit "

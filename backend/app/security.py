@@ -120,8 +120,14 @@ def _device_bind(password_hash: str) -> str:
 
 def session_device(session_id: str) -> str:
     """Een vast toestel-ID voor een sessie zonder (geldig) toestelcookie: wie een sessie steelt en het cookie telkens
-    wist, krijgt zo steeds hetzelfde toestel, met één strenge teller, en niet eindeloos nieuwe."""
-    return "s" + hashlib.sha256(b"hp_device-sessie\0" + session_id.encode()).hexdigest()[:16]
+    wist, krijgt zo steeds hetzelfde toestel, met één strenge teller, en niet eindeloos nieuwe. Met "s:" ervoor (geen
+    teken van token_urlsafe): bij de volgende echte login krijgt het toestel een eigen ID (from_session)."""
+    return "s:" + hashlib.sha256(b"hp_device-sessie\0" + session_id.encode()).hexdigest()[:16]
+
+
+def from_session(device: str | None) -> bool:
+    """Komt dit toestel-ID van session_device? Wie dezelfde sessie heeft (ook wie ze stal), kan het ook krijgen."""
+    return bool(device) and device.startswith("s:")
 
 
 def device_token(user_id: int, username: str, password_hash: str, device: str | None = None) -> str:

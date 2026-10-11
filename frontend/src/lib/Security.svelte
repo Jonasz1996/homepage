@@ -123,7 +123,7 @@
     ssoMsg = ''
     try {
       const r = await withReauth(() => api('/auth/oidc/link', { method: 'DELETE' }))
-      sso = { ...sso, linked: r.linked, linked_name: r.linked_name, linked_issuer: r.linked_issuer }
+      sso = { ...sso, linked: r.linked, linked_name: r.linked_name, linked_issuer: r.linked_issuer, link_stale: r.link_stale }
       ssoMsg = 'Ontkoppeld.'
     } catch (e) { ssoErr = e.message }
   }

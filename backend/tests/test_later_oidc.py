@@ -293,6 +293,18 @@ async def test_oidc_issuer_veranderd(authed, provider):
     await _login(authed, provider)
     assert (await authed.get("/api/auth/state")).json()["mfa_ok"]
 
+    # Authentik meldt een andere issuer zonder dat de instellingen opnieuw opgeslagen worden (bv. Issuer mode op
+    # global): na opnieuw koppelen staat het weer goed, zoals het inloggen.
+    provider.issuer = "https://auth.jbogaert.be/"
+    oidc._cache.clear()
+    await _link(authed, provider)
+    s = (await authed.get("/api/auth/oidc/settings")).json()
+    assert (s["linked"], s["link_stale"]) == (True, False)
+    assert (await _authentik_row(authed))["state"] == "ok"
+    await authed.post("/api/auth/logout")
+    await _login(authed, provider)
+    assert (await authed.get("/api/auth/state")).json()["mfa_ok"]
+
 
 async def test_oidc_naam_uit_claim_sub(authed, provider):
     """Staat "naam tonen uit claim" op sub, dan is een sub met de hashed ID nog altijd geen naam: koppelen lukt."""
