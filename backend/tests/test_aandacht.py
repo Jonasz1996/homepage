@@ -9,8 +9,9 @@ from app import attention
 from app.db import get_db
 from app.health import selfcheck as sc
 from app.main import app
-from app.models import (AppState, CronJob, Device, HealRule, MaintenanceWindow, Service, ServiceState, SshHost,
-                        UpdateRun, WebhookSource)
+from app.models import (AppState, CheckResult, CronJob, Device, HealRule, MaintenanceWindow, Service, ServiceState,
+                        SshHost, UpdateRun, WebhookSource)
+from app.monitoring import rollup
 from app.monitoring.checks import HttpClients
 from app.routers import integrations as integrations_router
 
@@ -97,6 +98,42 @@ async def _seed(authed) -> dict[str, int]:
     await db.commit()
     await agen.aclose()
     return ids
+
+
+async def test_uurtotalen_die_achterlopen(authed):
+    """Telt de worker de checks niet meer per uur op, dan zegt ! het (met TimescaleDB gaan losse checks na 90 dagen
+    toch weg, ook als ze nog niet opgeteld zijn)."""
+    ids = await _tiles(authed, ("nas", "link", {"check": {"type": "http"}}))
+    agen, db = await _db()
+    _state(db, sc.HEARTBEAT_KEY, {"at": NOW.isoformat(), "started": NOW.isoformat()})
+    _state(db, rollup.KEY, {"until": (rollup.floor_hour(NOW) - timedelta(hours=1)).isoformat()})
+    await db.commit()
+
+    async def items() -> dict:
+        return {i["key"]: i for i in (await authed.get("/api/attention")).json()["items"]}
+
+    assert "uurtotalen" not in await items()  # gewoon bij
+    st = await db.get(AppState, rollup.KEY)
+    st.value = {"until": (rollup.floor_hour(NOW) - timedelta(days=3)).isoformat()}
+    await db.commit()
+    it = (await items())["uurtotalen"]
+    assert it["level"] == "warn" and it["title"] == "De worker telt de checks al 3 dagen niet meer per uur op"
+    assert "verdwijnen over 87 dagen de eerste checks voor goed" in it["text"]
+    assert it["fix"] == {"window": "health", "tab": "homepage"}
+
+    # Nog nooit opgeteld, terwijl er al dagen checks zijn: ook.
+    await db.delete(st)
+    db.add(CheckResult(service_id=ids["nas"], ts=NOW - timedelta(days=2), ok=True, maintenance=False))
+    await db.commit()
+    assert (await items())["uurtotalen"]["title"] == "De worker telt de checks niet per uur op"
+
+    # Draait de worker niet, dan zegt dat punt genoeg.
+    hb = await db.get(AppState, sc.HEARTBEAT_KEY)
+    hb.value = {"at": (NOW - timedelta(hours=1)).isoformat(), "started": NOW.isoformat()}
+    await db.commit()
+    got = await items()
+    assert "worker" in got and "uurtotalen" not in got
+    await agen.aclose()
 
 
 async def test_alles_wat_mis_is(authed, monkeypatch):

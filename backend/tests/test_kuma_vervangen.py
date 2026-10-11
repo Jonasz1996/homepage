@@ -339,7 +339,8 @@ async def test_uptime_per_periode_en_twijfel(authed):
     await _record(db, sid, [OK] * 3 + [FAIL], NOW - timedelta(minutes=5))
     st = (await authed.get("/api/status")).json()[str(sid)]
     assert st["status"] == "up" and st["fail_count"] == 1 and st["down_after"] == 4
-    h = (await authed.get(f"/api/services/{sid}/history?hours=24")).json()
+    h = (await authed.get(f"/api/services/{sid}/history?range=24h")).json()
+    assert h["range"] == "24h" and h["checks"] == 4
     assert set(h["uptime_all"]) == {"24h", "7d", "30d", "1y"} and h["uptime_all"]["24h"] == pytest.approx(0.75)
     await agen.aclose()
 

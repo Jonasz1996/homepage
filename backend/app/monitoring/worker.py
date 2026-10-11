@@ -27,7 +27,7 @@ from .network import NETWORK_EVERY, PUBLIC_IP_EVERY, sample_power, watch_gateway
 from .report import weekly_notification
 from .updates import UPDATES_EVERY, run_updates
 from .upgrade import auto_updates, cleanup_snapshots, mark_interrupted
-from . import cluster, configs, containerlogs, coverage, devices, healing, planned, restoretest, routes, zabbix
+from . import cluster, configs, containerlogs, coverage, devices, healing, planned, restoretest, rollup, routes, zabbix
 from .watchers import watch_npm, watch_pbs
 
 log = logging.getLogger("homepage.worker")
@@ -334,6 +334,9 @@ class Worker:
         last_zabbix = start - zabbix.EVERY + 10
         # Meteen bij de start: daarna gaan de checks rechtstreeks (zonder DNS) naar wat NPM erachter heeft.
         last_routes = start - routes.REFRESH_EVERY + 5
+        # Uurtotalen pas na 2 minuten: eerst de push-signalen die tijdens de stilstand binnenkwamen (die krijgen het
+        # tijdstip van toen), dan pas die uren optellen.
+        last_rollup = start - rollup.ROLLUP_EVERY + 120
         while True:
             try:
                 for sid, check, url in await self.due_services():
@@ -391,6 +394,9 @@ class Worker:
                     self.job("restoretest", self.restoretest)
                     self.job("config_copy", self.config_copy)
                     self.job("auto_updates", self.auto_updates)
+                if time.monotonic() - last_rollup > rollup.ROLLUP_EVERY:
+                    last_rollup = time.monotonic()
+                    self.job("rollup", lambda: self.step("uurtotalen", rollup.roll_up))
                 if time.monotonic() - last_cleanup > 3600:
                     last_cleanup = time.monotonic()
                     self.job("cleanup", self.tidy)

@@ -1,5 +1,6 @@
 """De homepage bewaakt zichzelf: leeft de worker, is er een recente en leesbare back-up van de database, hoe groot
-is de database, hoe vol de schijf, en staat er een kopie van back-up én sleutel buiten de container.
+is de database, hoe vol de schijf, telt de worker de checks nog per uur op, en staat er een kopie van back-up én
+sleutel buiten de container.
 
 De kopie van secret.key wordt versleuteld met een wachtzin die alleen jij kent (scrypt + AES-GCM); de wachtzin
 zelf wordt nergens bewaard. Terugzetten: python -m app.health.selfcheck decrypt secret.key.enc > secret.key
@@ -24,6 +25,7 @@ from ..config import get_settings
 from ..db import ensure_state
 from ..deps import event, notify
 from ..models import AppState
+from ..monitoring import rollup
 from ..monitoring.checks import kill
 
 log = logging.getLogger("homepage.health")
@@ -261,6 +263,7 @@ async def run_selfcheck(db: AsyncSession, offsite_on: bool) -> dict:
     prev = state.value if state else {}
     ks = await db.get(AppState, KEY_STATE) if offsite_on else None
     guard = await db.get(AppState, GUARD_KEY)
+    hourly = await rollup.lag(db, now)
     # Alles gelezen: geen transactie open tijdens het nakijken en kopiëren van de dumps (kan minuten duren). Tot de
     # kopie hieronder dus niets meer lezen: dat opent een nieuwe transactie die tijdens de kopie blijft openstaan.
     await db.commit()
@@ -316,7 +319,7 @@ async def run_selfcheck(db: AsyncSession, offsite_on: bool) -> dict:
 
     value = {"checked_at": now.isoformat(), "backups": dumps[:14], "backup_dir": str(s.backup_dir),
              "verified": verified, "stale": stale, "db": await db_size(db), "disks": disks, "offsite": offsite,
-             "alerts": alerts}
+             "rollup": hourly, "alerts": alerts}
     if state:
         state.value = value
     else:

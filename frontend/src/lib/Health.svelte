@@ -60,6 +60,7 @@
   const LEVEL = { ok: 'in orde', warn: 'opletten', err: 'probleem', unknown: 'onbekend' }
   const age = (h) => h == null ? '—' : h >= 8760 ? `${(h / 8760).toFixed(1)} jaar` : h >= 720 ? `${Math.round(h / 720)} maanden` : `${Math.round(h / 24)} dagen`
   const day = (s) => s ? new Date(s).toLocaleDateString('nl-BE', { day: 'numeric', month: 'short', year: 'numeric' }) : '—'
+  const behind = (h) => h < 48 ? `${h} u` : `${Math.floor(h / 24)} dagen`
   let running = $derived(new Set(data?.running || []))
   let hosts = $derived(data?.hardware?.hosts || [])
   let snaps = $derived(data?.snapshots?.items || [])
@@ -345,10 +346,15 @@
           {#each (sc.backups || []).slice(0, 5) as b}<p class="dim small">{b.name} · {bytes(b.size)} · {ago(b.at)}</p>{/each}
           {#if sc.checked_at && !(sc.backups || []).length}<p class="small e">Geen dumps gevonden. Elke nacht om 03:30 maakt homepage-backup.timer er één.</p>{/if}
         </div>
-        <div class="host lv-ok">
+        <div class="host lv-{sc.rollup?.late ? 'warn' : 'ok'}">
           <div class="hh"><b>database</b><span class="right">{bytes(sc.db?.total)}</span></div>
           {#each sc.db?.tables || [] as t}<p class="dim small row2"><span>{t.name}</span><span>{bytes(t.size)}</span></p>{/each}
           {#each sc.disks || [] as d}<p class="small row2" class:w={d.pct >= 75 && d.pct < 90} class:e={d.pct >= 90}><span>schijf {d.path}</span><span>{d.pct}% · {bytes(d.free)} vrij</span></p>{/each}
+          {#if sc.rollup}
+            <!-- De worker telt de checks per uur op; de grafiek en de uptime over 7 dagen tot een jaar lezen die uren. -->
+            <p class="small row2" class:w={sc.rollup.late}><span>uurtotalen van de checks</span><span>{sc.rollup.late ? `${behind(sc.rollup.behind_h)} achter` : sc.rollup.until ? `opgeteld tot ${ago(sc.rollup.until)}` : 'nog niets op te tellen'}</span></p>
+            {#if sc.rollup.late}<p class="small w">Het optellen lukt niet meer. Met TimescaleDB worden losse checks na 90 dagen gewist, ook als ze nog niet opgeteld zijn: dan krijgt de jaargrafiek een gat. Kijk in de log: <code>journalctl -u homepage-worker | grep uurtotalen</code></p>{/if}
+          {/if}
         </div>
         <div class="host wide lv-{!data?.settings?.offsite ? 'unknown' : sc.offsite?.error ? 'warn' : 'ok'}">
           <div class="hh"><b>kopie buiten de container</b><small>{data?.offsite_dir}</small></div>

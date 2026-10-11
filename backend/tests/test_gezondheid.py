@@ -325,6 +325,35 @@ async def test_selfcheck_backup_offsite_and_worker(authed, tmp_path, monkeypatch
     assert titles.count("De worker van de homepage draait niet") == 1
 
 
+async def test_selfcheck_uurtotalen(authed, tmp_path, monkeypatch):
+    """Gezondheid › homepage zegt tot waar de worker de checks per uur optelde, en telt het als waarschuwing als
+    dat meer dan een dag achterloopt."""
+    from app.config import get_settings
+    from app.monitoring import rollup
+    monkeypatch.setattr(get_settings(), "backup_dir", tmp_path)
+    monkeypatch.setattr(sc, "disk", lambda p: {"path": str(p), "total": 100, "used": 10, "free": 90, "pct": 10.0})
+    agen, db = await _db()
+    now = datetime.now(timezone.utc)
+    db.add(AppState(key=rollup.KEY, value={"until": (rollup.floor_hour(now) - timedelta(days=2)).isoformat()}))
+    await db.commit()
+    warn = lambda: authed.get("/api/health/summary")  # noqa: E731
+    before = (await warn()).json()["warn"]
+    v = await sc.run_selfcheck(db, offsite_on=False)
+    await db.commit()
+    assert v["rollup"]["late"] and v["rollup"]["behind_h"] >= 48
+    assert (await warn()).json()["warn"] == before + 1
+    assert (await authed.get("/api/health")).json()["selfcheck"]["rollup"]["late"] is True
+
+    st = await db.get(AppState, rollup.KEY)
+    st.value = {"until": rollup.floor_hour(now).isoformat()}
+    await db.commit()
+    v = await sc.run_selfcheck(db, offsite_on=False)
+    await db.commit()
+    assert v["rollup"] == {"until": rollup.floor_hour(now).isoformat(), "behind_h": 0, "late": False}
+    assert (await warn()).json()["warn"] == before
+    await agen.aclose()
+
+
 async def test_settings_and_scan_endpoints(authed):
     r = await authed.get("/api/health")
     assert r.status_code == 200

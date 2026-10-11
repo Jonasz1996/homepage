@@ -58,14 +58,14 @@ PACKAGES = ("fastapi", "starlette", "uvicorn", "pydantic", "sqlalchemy", "alembi
 # megabytes aan hosts of pakketten.
 BACKGROUND = ("containerlogs", "zabbix", "npm_routes", "cluster", "coverage", "config_last", "devices", "health",
               "snapshots", "domains", "selfcheck", "diskguard", "updates", "cron", "restoretest", "massastoring",
-              "update_auto_last")
+              "update_auto_last", "check_hourly")
 BACKGROUND_PREFIX = ("net_gw:", "net_tunnel:", "pbs_problems:")
 # Nooit mee, ook niet verkort: daar staan geheimen in (of wie wanneer van waar keek).
 DENY = ("offsite_key", "webpush", "oidc", "ssh_defaults", "ssh_snippets", "ssh_pin", "attention_ack", "outside_seen")
 
 # Wat van een AppState-waarde overblijft.
 SCALARS = {"at", "checked_at", "scanned_at", "last_at", "since", "date", "started", "count", "items", "lines", "seen",
-           "new", "changed", "failing", "total", "pct", "stale", "ok", "enabled", "down", "step"}
+           "new", "changed", "failing", "total", "pct", "stale", "ok", "enabled", "down", "step", "until"}
 ERRORS = {"error", "errors", "cleanup_error"}
 NAMES = ("key", "name", "service", "service_id", "vmid", "node")
 
@@ -315,7 +315,8 @@ def _selfcheck(v: dict) -> dict:
     return {"checked_at": v.get("checked_at"), "stale": v.get("stale"), "backup_dir": v.get("backup_dir"),
             "backups": (v.get("backups") or [])[:3], "verified": v.get("verified"), "disks": v.get("disks"),
             "db": {"total": size.get("total"), "tables": (size.get("tables") or [])[:5]},
-            "offsite": {k: off.get(k) for k in ("enabled", "dir", "at", "count", "error")}, "alerts": v.get("alerts")}
+            "offsite": {k: off.get(k) for k in ("enabled", "dir", "at", "count", "error")}, "rollup": v.get("rollup"),
+            "alerts": v.get("alerts")}
 
 
 def _restoretest(v: dict) -> dict:
