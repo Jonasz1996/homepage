@@ -845,10 +845,11 @@ def pattern_of(records: list[dict], names: set[str], zone: str) -> Pattern:
     top = Counter(p for p in pairs if _kind_of(*p, zone, apex) == lead).most_common(1)[0][0]
     kind = lead if n / len(pairs) >= 0.8 and lead != "anders" else "gemengd"
     shown = f"{top[0]} → {top[1][:8]}….cfargotunnel.com" if lead == "tunnel" else f"{top[0]} → {top[1]}"
+    names_n = f"{len(pairs)} {'naam' if len(pairs) == 1 else 'namen'} van NPM"
     if kind == "tunnel":
-        text = f"{len(pairs)} namen van NPM: {shown} (tunnel)"
+        text = f"{names_n}: {shown} (tunnel)"
     elif kind == "portforward":
-        text = f"{len(pairs)} namen van NPM: {shown} (port-forward)"
+        text = f"{names_n}: {shown} (port-forward)"
     else:
         text = f"gemengd: {n} van {len(pairs)} namen van NPM als {shown}"
     return Pattern(kind, lead, top, len(pairs), text)
@@ -988,8 +989,7 @@ async def plan_create(db: AsyncSession, clients, body, *, at_run: bool = False, 
                   + (f", nog {days:.0f} dagen)" if days is not None else ")"), True)
 
     ok, why = npmm.can_write(me_w, need_cert=le)
-    acc.check(f"NPM-schrijfgebruiker ({n.user(True)}) mag proxy hosts beheren en ziet alle hosts", ok, why,
-              None if ok else f"NPM-schrijfgebruiker: {why}")
+    acc.check(f"NPM-schrijfgebruiker {n.user(True)}", ok, why, None if ok else f"NPM-schrijfgebruiker: {why}")
     if (me_r.get("permissions") or {}).get("visibility", "all") != "all" and "admin" not in (me_r.get("roles") or []):
         acc.check("NPM-leesgebruiker ziet alle hosts", False, "ziet alleen zijn eigen hosts")
         acc.warnings.append("De leesgebruiker van NPM ziet alleen zijn eigen hosts: hw → routes en de melding voor "
