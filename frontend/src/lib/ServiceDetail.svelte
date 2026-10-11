@@ -76,10 +76,16 @@
 
   let maintUntil = $state(untrack(() => service.maintenance_until))
   let maintActive = $derived(maintUntil && new Date(maintUntil) > new Date())
+  // Onderhoud zet de meldingen (ook van wat ervan afhangt) en zelfherstel uit: beginnen of verlengen vraagt je 2FA,
+  // stoppen niet.
+  let maintMsg = $state('')
   async function maintenance(minutes) {
-    const r = await api(`/services/${service.id}/maintenance`, { method: 'POST', body: { minutes } })
-    maintUntil = r.maintenance_until
-    onchanged?.()
+    try {
+      const r = await withReauth(() => api(`/services/${service.id}/maintenance`, { method: 'POST', body: { minutes } }))
+      maintUntil = r.maintenance_until
+      maintMsg = ''
+      onchanged?.()
+    } catch (e) { maintMsg = '✕ ' + e.message }
   }
   // Pauzeren: de check loopt niet en meldt niets. Stilzetten vraagt je 2FA (wie je sessie steelt, zet zo niets stil).
   let paused = $state(untrack(() => !!service.check?.paused))
@@ -131,6 +137,7 @@
       {/each}
     {/if}
   </div>
+  {#if maintMsg}<p class="wol e">{maintMsg}</p>{/if}
 
   <Maintenance {service} />
   {#if service.check?.type}<Incidents {service} down={data?.state?.status === 'down'} />{/if}

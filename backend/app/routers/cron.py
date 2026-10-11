@@ -19,8 +19,8 @@ from ..cron.probe import wid_for
 from ..cron.scan import STATE_KEY, run_scan, spec_of
 from ..cron.schedule import occurrences, tz_of
 from ..db import get_db
-from ..deps import audit, current_user, recent_auth
-from ..models import AppState, AuditLog, CronJob, CronRun, SshHost, User
+from ..deps import SILENCE_HINT, audit, confirm_silence, current_session, current_user, notify, recent_auth
+from ..models import AppState, AuditLog, CronJob, CronRun, Session, SshHost, User
 from ..ssh_exec import SshFail, command as ssh_command, connect, run
 from ..ssh_login import login_for
 from .ssh import _send, _ws_user, watch_session
@@ -158,15 +158,22 @@ class JobPatch(BaseModel):
 
 
 @router.patch("/jobs/{job_id}")
-async def patch_job(job_id: int, body: JobPatch, request: Request, user: User = Depends(current_user),
-                    db: AsyncSession = Depends(get_db)):
+async def patch_job(job_id: int, body: JobPatch, request: Request, sess: Session = Depends(current_session),
+                    user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     job = await _job(db, job_id)
+    # Dempen = geen melding meer als hij faalt of niet loopt: vraagt een recente 2FA en geeft een melding.
+    muting = bool(body.muted) and not job.muted
     if "alias" in body.model_fields_set:
         job.alias = (body.alias or "").strip() or None
+    detail = {"job": job.name, "target": job.target_name, "alias": job.alias,
+              "muted": job.muted if body.muted is None else body.muted}
+    if muting:
+        await confirm_silence(db, request, sess, user, f"Cronjob gedempt: {job.alias or job.name} op {job.target_name}",
+                              "cron_job_changed", **detail)
+    else:
+        await audit(db, request, user, "cron_job_changed", **detail)
     if body.muted is not None:
         job.muted = body.muted
-    await audit(db, request, user, "cron_job_changed", job=job.name, target=job.target_name,
-                alias=job.alias, muted=job.muted)
     await db.commit()
     return views.job_out(job)
 
@@ -188,6 +195,7 @@ async def monitor(job_id: int, body: MonitorIn, request: Request, user: User = D
     job = await _job(db, job_id)
     if job.kind != "cron" or job.removed_at:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Alleen cronregels kunnen bewaakt worden")
+    was = bool(job.monitored)
     h = await _host(db, job)
     login = await login_for(db, h)
     # Geen transactie open tijdens SSH (drie stappen tot een minuut): de verbinding gaat terug naar de pool.
@@ -218,6 +226,10 @@ async def monitor(job_id: int, body: MonitorIn, request: Request, user: User = D
     job.raw = new_cmd
     job.monitored, job.wid = body.on, wid
     await audit(db, request, user, "cron_monitor", job=job.name, target=job.target_name, on=body.on)
+    if was and not body.on:
+        # Zonder bewaking geen exitcodes meer, dus ook geen melding als hij faalt (alleen "gemist" uit de logs).
+        notify(db, f"Cronjob niet meer bewaakt: {job.alias or job.name} op {job.target_name}", SILENCE_HINT,
+               level="warn", source="auth")
     await db.commit()
     return views.job_out(job)
 

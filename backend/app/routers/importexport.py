@@ -8,10 +8,12 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import outside
 from ..db import get_db
-from ..deps import audit, current_user
+from ..deps import audit, current_session, current_user
+from ..integrations import REGISTRY
 from ..layout import load_pages, record_revision
-from ..models import Group, Page, Service, User
+from ..models import Group, Page, Service, Session, User
 from ..schemas import ImportIn, clean_check
 from ..security import encrypt_json
 
@@ -110,9 +112,12 @@ def parse_import(text: str) -> list[tuple[str, list[tuple[str, list[dict]]]]]:
 
 
 @router.post("/import")
-async def import_yaml(data: ImportIn, request: Request, user: User = Depends(current_user),
-                      db: AsyncSession = Depends(get_db)):
+async def import_yaml(data: ImportIn, request: Request, sess: Session = Depends(current_session),
+                      user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     parsed = parse_import(data.yaml)
+    # Tegels met een integratie halen zelf iets op bij hun adres: van buitenaf is dat een actie (zie layout.py).
+    if any(str(s.get("type") or "link") in REGISTRY for _, groups in parsed for _, svcs in groups for s in svcs):
+        await outside.require(request, db, "acties", sess, user)
     page_pos = (await db.execute(select(func.coalesce(func.max(Page.position), -1)))).scalar_one() + 1
     target = await db.get(Page, data.page_id) if data.page_id else None
     n_groups = n_services = 0

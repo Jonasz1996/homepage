@@ -14,8 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .. import outside
 from ..config import get_settings
 from ..db import get_db, timed_out
-from ..deps import audit, current_user, recent_auth
-from ..models import LogEntry, LogRule, SshHost, User
+from ..deps import audit, confirm_silence, current_session, current_user, recent_auth
+from ..models import LogEntry, LogRule, Session, SshHost, User
+from ..monitoring.webpush import LEVELS
 from ..ssh_login import login_for
 from ..syslog import rollout
 from .monitoring import _aware
@@ -165,27 +166,40 @@ async def create_rule(data: RuleIn, request: Request, user: User = Depends(curre
     return _rule_out(r)
 
 
+# Een regel die aan staat uitzetten, verwijderen of een lager niveau geven (dan komt hij misschien niet meer op je
+# gsm) legt meldingen stil: dat vraagt een recente 2FA en geeft een melding, zoals een check pauzeren.
 @router.patch("/rules/{rule_id}")
-async def update_rule(rule_id: int, data: RuleIn, request: Request, user: User = Depends(current_user),
-                      db: AsyncSession = Depends(get_db)):
+async def update_rule(rule_id: int, data: RuleIn, request: Request, sess: Session = Depends(current_session),
+                      user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     r = await db.get(LogRule, rule_id)
     if r is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Regel niet gevonden")
+    if r.enabled and not data.enabled:
+        await confirm_silence(db, request, sess, user, f"Logregel uitgezet: {r.name}", "log_rule_changed",
+                              name=data.name, enabled=False)
+    elif r.enabled and LEVELS.get(data.level, 0) < LEVELS.get(r.level, 0):
+        await confirm_silence(db, request, sess, user, f"Logregel lager gezet: {r.name} ({r.level} → {data.level})",
+                              "log_rule_changed", name=data.name, level=data.level)
+    else:
+        await audit(db, request, user, "log_rule_changed", name=data.name)
     for k, v in data.model_dump().items():
         setattr(r, k, v)
-    await audit(db, request, user, "log_rule_changed", name=r.name)
     await db.commit()
     return _rule_out(r)
 
 
 @router.delete("/rules/{rule_id}")
-async def delete_rule(rule_id: int, request: Request, user: User = Depends(current_user),
-                      db: AsyncSession = Depends(get_db)):
+async def delete_rule(rule_id: int, request: Request, sess: Session = Depends(current_session),
+                      user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     r = await db.get(LogRule, rule_id)
     if r is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Regel niet gevonden")
+    if r.enabled:
+        await confirm_silence(db, request, sess, user, f"Logregel verwijderd: {r.name}", "log_rule_deleted",
+                              name=r.name)
+    else:
+        await audit(db, request, user, "log_rule_deleted", name=r.name)
     await db.delete(r)
-    await audit(db, request, user, "log_rule_deleted", name=r.name)
     await db.commit()
     return {"ok": True}
 

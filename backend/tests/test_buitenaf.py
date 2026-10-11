@@ -24,6 +24,7 @@ from app.routers import integrations as integrations_router
 from app.routers import push as pushroute
 
 from .conftest import PASSWORD
+from .test_beveiliging import _reauth
 from .test_ssh import WS, _cookie
 
 CF = {"X-Homepage-Via-Cf": "1"}
@@ -69,11 +70,17 @@ def test_welke_routes_van_buitenaf_uit_staan():
         "PUT /api/updates/settings": "updates",
         "POST /api/services/{service_id}/integration/action": "acties", "POST /api/services/{service_id}/wol": "acties",
         "POST /api/heal": "acties", "PUT /api/heal/{rule_id}": "acties", "POST /api/heal/{rule_id}/test": "acties",
+        "DELETE /api/heal/{rule_id}": "acties",
         # De proef van zelfherstel kijkt met de bewaarde login via SSH op de machine.
         "POST /api/heal/proef": "acties", "POST /api/heal/{rule_id}/proef": "acties",
         "POST /api/health/snapshots/delete": "acties",
         "PUT /api/restoretest/settings": "acties", "POST /api/restoretest/run": "acties",
         "POST /api/devices/{mac}/scan": "acties",
+        # API-beheer: alles waarmee de server een nieuw adres of pad ophaalt (van buitenaf ook met een verse 2FA). Een
+        # tegel met integratie die een ander adres krijgt (layout, import) controleert dat zelf: outside.require.
+        "POST /api/apis": "acties", "PATCH /api/apis/{api_id}": "acties", "POST /api/apis/{api_id}/calls": "acties",
+        "PATCH /api/apis/calls/{call_id}": "acties", "POST /api/apis/{api_id}/try": "acties",
+        "POST /api/apis/bulk": "acties",
         "GET /api/configs/versions/{vid}/download": "downloads", "GET /api/diagnose": "downloads",
         "POST /api/cron/jobs/{job_id}/monitor": "terminal", "POST /api/logs/rollout": "terminal",
         "GET /api/ssh/ready": "terminal", "POST /api/ssh/pin/check": "terminal", "POST /api/ssh/pin": "terminal",
@@ -330,12 +337,67 @@ async def test_terminal_websocket_van_buitenaf(authed, monkeypatch):
     await ws.close()
 
 
-async def test_api_proberen_van_buitenaf(authed):
+async def test_api_proberen_van_buitenaf(authed, monkeypatch):
+    seen = []
+
+    def handler(req: httpx.Request):
+        seen.append(str(req.url))
+        return httpx.Response(200, json={"version": "5.0"})
+    monkeypatch.setattr(integrations_router, "clients", HttpClients(httpx.MockTransport(handler)))
     r = await authed.post("/api/apis", json={"name": "Radarr", "kind": "rest", "url": "http://radarr.lan"})
     aid = r.json()["id"]
-    r = await authed.post(f"/api/apis/{aid}/try", json={"call": {"name": "x", "method": "POST", "path": "/api/x"}},
-                          headers=CF)
-    assert r.status_code == 403 and r.json()["detail"] == "buiten:acties"
+    get = {"call": {"name": "x", "path": "/api/v3/system/status"}}
+    post = {"call": {"name": "x", "method": "POST", "path": "/api/x"}}
+    cid = (await authed.post(f"/api/apis/{aid}/calls", json=get["call"])).json()["id"]
+    page = (await authed.post("/api/pages", json={"name": "P"})).json()["id"]
+    g = (await authed.post("/api/groups", json={"page_id": page, "name": "G"})).json()["id"]
+    tile = {"group_id": g, "name": "Intern", "type": "json", "url": "http://intern.lan",
+            "config": {"url": "http://10.0.0.1:8080/status"}}
+    imp = ("pages:\n- name: P2\n  groups:\n  - name: G\n    services:\n"
+           "    - name: pve\n      type: proxmox\n      url: https://10.0.0.2:8006\n")
+
+    # Van buitenaf, zonder acties: niets dat de server een nieuw adres of pad laat ophalen, ook geen GET.
+    for method, path, body in (("post", f"/api/apis/{aid}/try", get), ("post", f"/api/apis/{aid}/try", post),
+                               ("post", "/api/apis", {"name": "x", "kind": "rest", "url": "http://10.0.0.1"}),
+                               ("patch", f"/api/apis/{aid}", {"name": "Radarr", "kind": "rest", "url": "http://10.0.0.1"}),
+                               ("post", f"/api/apis/{aid}/calls", get["call"]),
+                               ("patch", f"/api/apis/calls/{cid}", {**get["call"], "path": "/admin"}),
+                               ("post", "/api/apis/bulk", {"items": [{"service_id": 1, "template": "rest"}]}),
+                               ("post", "/api/services", tile), ("post", "/api/import", {"yaml": imp})):
+        r = await getattr(authed, method)(path, json=body, headers=CF)
+        assert r.status_code == 403 and r.json()["detail"] == "buiten:acties", (path, r.text)
+    assert not seen
+    # Een gewone snelkoppeling en kijken gaan wel; een integratie bewerken zonder ander adres ook.
+    r = await authed.post("/api/services", json={**tile, "type": "link", "config": {}}, headers=CF)
+    assert r.status_code == 201, r.text
+    sid = (await authed.post("/api/services", json=tile)).json()["id"]  # thuis
+    r = await authed.patch(f"/api/services/{sid}", json={**tile, "name": "Intern 2"}, headers=CF)
+    assert r.status_code == 200, r.text
+    r = await authed.patch(f"/api/services/{sid}", json={**tile, "config": {"url": "http://10.0.0.9/"}}, headers=CF)
+    assert r.json()["detail"] == "buiten:acties"
+    assert (await authed.get("/api/apis", headers=CF)).status_code == 200
+
+    # Een uur aanzetten (dat vraagt zelf al de 2FA-code); met een oude bevestiging vraagt elke stap opnieuw 2FA.
+    assert (await authed.put("/api/outside/features/acties", json={"mode": "uur"}, headers=CF)).status_code == 200
+    await _stale(authed)
+    new = {"name": "x", "kind": "rest", "url": "http://10.0.0.1"}
+    for method, path, body in (("post", f"/api/apis/{aid}/try", get), ("post", "/api/apis", new),
+                               ("post", "/api/services", tile), ("post", "/api/import", {"yaml": imp})):
+        r = await getattr(authed, method)(path, json=body, headers=CF)
+        assert r.status_code == 403 and r.json()["detail"] == "reauth_required", (path, r.text)
+    await _reauth(authed)
+    r = await authed.post(f"/api/apis/{aid}/try", json=get, headers=CF)
+    assert r.status_code == 200 and r.json()["ok"] and r.json()["data"] == {"version": "5.0"}
+    assert (await authed.post("/api/services", json=tile, headers=CF)).status_code == 201
+    assert (await authed.post("/api/import", json={"yaml": imp}, headers=CF)).status_code == 200
+
+    # Thuis zoals vroeger: een GET proberen zonder 2FA, iets dat verandert met.
+    await _stale(authed)
+    r = await authed.post(f"/api/apis/{aid}/try", json=get)
+    assert r.status_code == 200 and r.json()["ok"]
+    r = await authed.post(f"/api/apis/{aid}/try", json=post)
+    assert r.status_code == 403 and r.json()["detail"] == "reauth_required"
+    assert (await authed.post("/api/apis", json=new)).status_code == 201
 
 
 # --- twee Proxmox-tokens -------------------------------------------------------------------------------------

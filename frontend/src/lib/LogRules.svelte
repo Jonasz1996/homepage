@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte'
-  import { api } from './api.js'
+  import { api, withReauth } from './api.js'
   import Modal from './Modal.svelte'
 
   // Meldingsregels: een logregel die overeenkomt, verschijnt in het meldingencentrum.
@@ -23,7 +23,8 @@
     error = ''
     const body = { ...form, pattern: form.pattern || null, host: form.host || null, cooldown_minutes: Number(form.cooldown_minutes) || 0 }
     try {
-      if (form.id) await api(`/logs/rules/${form.id}`, { method: 'PATCH', body })
+      // Uitzetten of een lager niveau (dan misschien niet meer op je gsm) vraagt je 2FA.
+      if (form.id) await withReauth(() => api(`/logs/rules/${form.id}`, { method: 'PATCH', body }))
       else await api('/logs/rules', { method: 'POST', body })
       form = null
       await load()
@@ -33,14 +34,20 @@
   }
 
   async function toggle(r) {
-    await api(`/logs/rules/${r.id}`, { method: 'PATCH', body: { ...r, enabled: !r.enabled } })
-    await load()
+    error = ''
+    try {
+      await withReauth(() => api(`/logs/rules/${r.id}`, { method: 'PATCH', body: { ...r, enabled: !r.enabled } }))
+      await load()
+    } catch (e) { error = e.message }
   }
 
   async function del(r) {
     if (!confirm(`Regel '${r.name}' verwijderen?`)) return
-    await api(`/logs/rules/${r.id}`, { method: 'DELETE' })
-    await load()
+    error = ''
+    try {
+      await withReauth(() => api(`/logs/rules/${r.id}`, { method: 'DELETE' }))
+      await load()
+    } catch (e) { error = e.message }
   }
 </script>
 
@@ -107,6 +114,7 @@
       </div>
     </form>
   {:else}
+    {#if error}<p class="err">{error}</p>{/if}
     <button class="mini add" onclick={() => (form = blank())}>+ regel</button>
   {/if}
 </Modal>
