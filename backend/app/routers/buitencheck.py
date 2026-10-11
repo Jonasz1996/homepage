@@ -477,10 +477,30 @@ async def deploy_proef(body: DeployIn, request: Request, user: User = Depends(cu
     return {"plan": plan}
 
 
+def _masked(err, account: str, name: str | None) -> str:
+    """Een fout van Cloudflare zonder het volledige account-id en zonder de naam van de Worker: de auditlog gaat mee in
+    de diagnose, en wie het workers.dev-adres kent, kan de dagelijkse limiet opgebruiken."""
+    text = str(err)
+    if account:
+        text = text.replace(account, f"{account[:6]}…")
+    if name:
+        text = text.replace(name, f"{bc.NAME_PREFIX}…")
+    return text
+
+
+def _refused(err) -> bool:
+    """Weigerde Cloudflare zeker (4xx, doorgestuurd, success false)? Bij een time-out, een netwerkfout of een 5xx kan
+    de upload toch aangekomen zijn."""
+    text = str(err)
+    return text.startswith(("Geweigerd", "Doorgestuurd", "Cloudflare weigerde")) or bool(re.match(r"HTTP 4\d\d ", text))
+
+
 @router.post("/deploy", dependencies=[ACTIES_VERS])
-async def deploy(body: DeployIn, request: Request, user: User = Depends(recent_auth), db: AsyncSession = Depends(get_db)):
-    """De Worker in Cloudflare zetten. Een nieuw geheim (rotate, of de eerste keer) wacht eerst als token_next en komt
-    pas in gebruik als Cloudflare de upload aanvaardde; mislukt die, dan blijft alles bij het oude."""
+async def deploy(body: DeployIn, request: Request, sess: Session = Depends(current_session),
+                 user: User = Depends(recent_auth), db: AsyncSession = Depends(get_db)):
+    """De Worker in Cloudflare zetten. Een nieuw geheim (rotate, de eerste keer, of een ander adres) wacht eerst als
+    token_next en komt pas in gebruik als Cloudflare de upload aanvaardde; weigert Cloudflare, dan blijft alles bij het
+    oude."""
     async with job_lock(db, bc.LOCK) as ok:
         if not ok:
             raise HTTPException(status.HTTP_409_CONFLICT, BUSY)
@@ -499,22 +519,9 @@ async def deploy(body: DeployIn, request: Request, user: User = Depends(recent_a
         except IntegrationError as e:
             raise HTTPException(422, str(e)) from e
         conn_id, conn_name = conn.id, conn.name
-        # 1. Het geheim kiezen (een nieuw wacht apart), dan de rij vrijgeven: het slot blijft.
-        st = await bc.config_for_update(db)
-        v = {**bc.CONFIG, **st.value}
-        name = v["name"]
-        rotated = body.rotate or not v["token"]
-        if rotated:
-            secret = secrets.token_urlsafe(32)
-            v.update(token_next=encrypt(secret), token_next_at=bc.iso(_now()))
-        else:
-            secret = bc._decrypt(v["token"])
-            if not secret:
-                raise HTTPException(422, "Het bewaarde geheim is onleesbaar: kies nieuw geheim")
-        st.value = v
+        # 1. Wie en welke workers.dev-naam (alleen lezen), zonder open transactie.
         await db.commit()
-        # 2. Cloudflare, zonder open transactie.
-        err, done, token_id, sub = None, {}, None, None
+        err, done, token_id, sub, secret, rotated, moved = None, {}, None, None, None, False, False
         try:
             token_id = await integ.token_id()
             sub = await integ.workers_subdomain()
@@ -522,12 +529,37 @@ async def deploy(body: DeployIn, request: Request, user: User = Depends(recent_a
                 raise IntegrationError("Nog geen workers.dev-naam: open in Cloudflare één keer Workers & Pages")
         except IntegrationError as e:
             err = e
+        st = await bc.config_for_update(db)
+        v = {**bc.CONFIG, **st.value}
+        name = v["name"]
         if err is None:
+            # 2. Het geheim kiezen (een nieuw wacht apart), dan de rij vrijgeven: het slot blijft. Een ander adres (bv.
+            # een ander Cloudflare-account) legt de bewaking stil zoals onder instellingen, en het geheim dat in gebruik
+            # is, gaat nooit naar een andere Worker.
+            moved = bool(v["worker_url"]) and v["worker_url"] != f"https://{name}.{sub}.workers.dev"
+            if moved:
+                await confirm_silence(db, request, sess, user, "Check van buitenaf: Worker-adres gewijzigd",
+                                      "buitencheck_url", via="in Cloudflare zetten", api=conn_name)
+            rotated = body.rotate or not v["token"] or moved
+            if rotated:
+                secret = secrets.token_urlsafe(32)
+                v.update(token_next=encrypt(secret), token_next_at=bc.iso(_now()))
+            else:
+                secret = bc._decrypt(v["token"])
+                if not secret:
+                    raise HTTPException(422, "Het bewaarde geheim is onleesbaar: kies nieuw geheim")
+            st.value = v
+            await db.commit()
+            # 3. Cloudflare, zonder open transactie.
             done, err = await integ.run_worker_calls(bc.worker_calls(account, name, suffixes), secret, bc.SCRIPT)
-        # 3. Opnieuw gelezen en vergrendeld: de worker kan het nieuwe geheim intussen al in gebruik genomen hebben.
+        # 4. Opnieuw gelezen en vergrendeld: de worker kan het nieuwe geheim intussen al in gebruik genomen hebben.
         now = _now()
         st = await bc.config_for_update(db)
         v = {**bc.CONFIG, **st.value}
+        # Zonder antwoord (time-out, 5xx) kan Cloudflare het nieuwe geheim toch hebben: bij dezelfde Worker blijft het
+        # dan wachten, en neemt de worker het in gebruik zodra de Worker het oude weigert (PASTE_GRACE).
+        unsure = "upload" not in done and secret is not None and not _refused(err)
+        keep = unsure and rotated and bool(v["token"]) and not moved
         if "upload" in done:
             if bc._decrypt(v["token_next"]) == secret:
                 v.update(token=v["token_next"], token_at=bc.iso(now), token_next=None, token_next_at=None)
@@ -540,15 +572,22 @@ async def deploy(body: DeployIn, request: Request, user: User = Depends(recent_a
             # Zonder de naam van de Worker: de tijdlijn gaat mee in de diagnose.
             event(db, "wijziging", "Check van buitenaf in Cloudflare gezet", f"Versie {bc.SCRIPT_VERSION} van het script.")
         else:
-            if bc._decrypt(v["token_next"]) == secret:
+            if rotated and not keep and bc._decrypt(v["token_next"]) == secret:
                 v.update(token_next=None, token_next_at=None)
-            await audit(db, request, user, "buitencheck_deploy_failed", api=conn_name, fout=str(err)[:200])
+            await audit(db, request, user, "buitencheck_deploy_failed", api=conn_name,
+                        fout=_masked(err, account, name)[:200])
         st.value = v
         await db.commit()
         if err is not None:
+            fout = _masked(err, account, name)
             if "upload" in done:
-                raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"De Worker staat er, maar workers.dev staat niet aan: {err}")
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"{err}. Er veranderde niets in Cloudflare; de check "
+                raise HTTPException(status.HTTP_502_BAD_GATEWAY,
+                                    f"De Worker staat er, maar workers.dev staat niet aan: {fout}")
+            if unsure:
+                raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"{fout}. Niet zeker of Cloudflare de Worker aanvaardde"
+                                    + ("; heeft Cloudflare het nieuwe geheim, dan neemt de check het vanzelf in gebruik."
+                                       if keep else ": zet hem opnieuw."))
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"{fout}. Er veranderde niets in Cloudflare; de check "
                                 "gebruikt nog het vorige geheim.")
         cfg = await bc.config(db)
         test_result = await _test(db, cfg, secret, None)

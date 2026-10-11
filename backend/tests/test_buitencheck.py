@@ -63,7 +63,8 @@ class World:
         self.reply: tuple[int, str] | None = None
         self.hook = None
         self.cf: list[httpx.Request] = []
-        self.fail_upload = False
+        self.fail_upload = 0             # statuscode van een mislukte upload
+        self.upload_timeout = False     # Cloudflare bewaart de upload, maar het antwoord komt te laat
         self.scripts: list[dict] = []
         self.uploads: list[bytes] = []
         self.hosts: list[str] = []
@@ -101,9 +102,11 @@ class World:
         if re.search(r"/workers/scripts/[a-z0-9-]+$", p) and req.method == "PUT":
             self.uploads.append(req.content)
             if self.fail_upload:
-                return httpx.Response(500, json={"success": False})
+                return httpx.Response(self.fail_upload, json={"success": False})
             m = re.search(rb'"name": ?"HOMEPAGE_TOKEN", ?"text": ?"([^"]+)"', req.content)
             self.secret = m.group(1).decode()
+            if self.upload_timeout:
+                raise httpx.ReadTimeout("te laat", request=req)
             return httpx.Response(200, json={"success": True, "result": {"etag": "e2"}})
         if p.endswith("/subdomain") and req.method == "POST":
             return httpx.Response(200, json={"success": True, "result": {"enabled": True}})
@@ -246,6 +249,10 @@ def test_judge():
     for c in (401, 403):
         v = j({"c": c}, tile)
         assert v.ok and v.note == f"NPM bereikt; de app vraagt een login ({c})"
+    # Een andere foutcode van Cloudflare op een 403 (land of ASN geblokkeerd): NPM is niet bereikt.
+    for npm in (False, True):
+        v = j({"c": 403, "cfe": 1009}, tile, npm)
+        assert v == (False, "Cloudflare houdt de check tegen (1009)", None, "cfe:1009")
     v = j({"e": "niet toegelaten"})
     assert not v.ok and "ALLOWED_SUFFIXES" in v.why and v.cause == "suffix"
 
@@ -435,6 +442,18 @@ async def test_reden_voorbij_in_de_ronde_van_het_resultaat(authed, world):
     assert _outside(await _notes()) == []
 
 
+async def test_reden_voorbij_in_dezelfde_seconde(authed, world):
+    """Zoals hierboven, met de klok van de worker (microseconden): reset_at staat op hele seconden."""
+    ids = await _five(authed, world)
+    x = ids[0]
+    await _inside(x, "down")
+    await _rounds(world, 0, 10)
+    await _inside(x, "up")
+    await bc.run_round(_maker(), world.http, T0 + timedelta(minutes=10, milliseconds=500))
+    e = (await _tiles_state())[str(x)]
+    assert e["fail"] == 0 and e["status"] is None and e["reset_at"] == bc.iso(T0 + timedelta(minutes=10))
+
+
 @pytest.mark.parametrize("reason", ["onderhoud", "pauze", "massa"])
 async def test_einde_onderhoud_pauze_massa(authed, world, reason):
     ids = await _five(authed, world)
@@ -513,7 +532,7 @@ async def test_twee_tegels_is_geen_groep(authed, world):
 async def test_tunnel_al_gemeld(authed, world):
     ids = await _tiles(authed, 100)
     await _config(ids)
-    await _set("net_tunnel:1", {"items": [{"name": "thuis", "status": "down"}]})
+    await _set("net_tunnel:1", {"items": [{"name": "thuis", "status": "down"}], "reported": ["thuis"]})
     for i in range(100):
         if i % 10 in (0, 3, 6):
             world.results[_url("t", i)] = TUNNEL
@@ -521,6 +540,26 @@ async def test_tunnel_al_gemeld(authed, world):
     assert _outside(await _notes()) == []
     tiles = await _tiles_state()
     assert tiles[str(ids[0])]["quiet"] == "tunnel"
+
+
+async def test_oude_tunnel_nooit_gemeld(authed, world):
+    """Een tunnel die nooit draaide of niet meer gebruikt wordt (inactive, nooit gemeld) houdt niets stil."""
+    ids = await _tiles(authed, 10)
+    await _config(ids)
+    await _set("net_tunnel:1", {"items": [{"name": "oud", "status": "inactive"}, {"name": "thuis", "status": "healthy"}],
+                                "reported": []})
+    world.results[_url("t", 0)] = world.results[_url("t", 1)] = TUNNEL
+    await _rounds(world, 0, 6)
+    notes = _outside(await _notes())
+    assert sorted(n.title for n in notes) == ["t0: van buitenaf onbereikbaar", "t1: van buitenaf onbereikbaar"]
+    tiles = await _tiles_state()
+    assert tiles[str(ids[0])]["quiet"] is None and tiles[str(ids[0])]["notified"]
+    # Bij een massastoring: ook naar de gsm, en geen "al gemeld" over de oude tunnel.
+    for i in range(10):
+        world.results[_url("t", i)] = TUNNEL
+    await _rounds(world, 6, 6)
+    [n] = [n for n in _outside(await _notes()) if n.push_key == "buiten-massa"]
+    assert n.pushed_at is None and "Tunnel oud" not in n.body
 
 
 async def test_massastoring(authed, world):
@@ -547,7 +586,7 @@ async def test_massastoring(authed, world):
 async def test_massastoring_met_tunnel_alleen_hier(authed, world):
     ids = await _tiles(authed, 10)
     await _config(ids)
-    await _set("net_tunnel:1", {"items": [{"name": "thuis", "status": "down"}]})
+    await _set("net_tunnel:1", {"items": [{"name": "thuis", "status": "down"}], "reported": ["thuis"]})
     for i in range(10):
         world.results[_url("t", i)] = TUNNEL
     await _rounds(world, 0, 6)
@@ -722,8 +761,8 @@ async def test_geheim_wisselen_api(authed, world, monkeypatch):
     ids = await _tiles(authed, 2)
     await _config(ids)
     await _api()
-    # De upload mislukt: niets verandert, de rondes gebruiken het oude geheim (dat de Worker nog heeft).
-    world.fail_upload = True
+    # Cloudflare weigert de upload: niets verandert, de rondes gebruiken het oude geheim (dat de Worker nog heeft).
+    world.fail_upload = 400
     r = await authed.post("/api/buitencheck/deploy", json={"rotate": True})
     assert r.status_code == 502 and "Er veranderde niets in Cloudflare" in r.json()["detail"]
     v = await _value(bc.CONFIG_KEY)
@@ -731,9 +770,32 @@ async def test_geheim_wisselen_api(authed, world, monkeypatch):
     await _rounds(world, 0, 1)
     assert world.checks[-1][0] == f"Bearer {SECRET_A}"
     assert (await _value(bc.STATE_KEY))["worker"]["fail"] == 0
-    assert "buitencheck_deploy_failed" in [a.action for a in await _audits()]
+    # In de auditlog (en de melding) zonder account-id en zonder de naam van de Worker.
+    a = [a for a in await _audits() if a.action == "buitencheck_deploy_failed"][-1]
+    assert a.detail["fout"] == f"HTTP 400 op /accounts/0123ab…/workers/scripts/{bc.NAME_PREFIX}…"
+    assert ACCOUNT not in r.text and NAME not in r.text
+    # Een 5xx: niet zeker. Het nieuwe geheim blijft wachten; zolang de Worker het oude kent, blijft dat gelden.
+    world.fail_upload = 500
+    r = await authed.post("/api/buitencheck/deploy", json={"rotate": True})
+    assert r.status_code == 502 and "Niet zeker of Cloudflare de Worker aanvaardde" in r.json()["detail"]
+    v = await _value(bc.CONFIG_KEY)
+    assert bc._decrypt(v["token"]) == SECRET_A and v["token_next"]
+    await _rounds(world, 1, 1)
+    assert world.checks[-1][0] == f"Bearer {SECRET_A}"
+    # Een time-out, maar Cloudflare bewaarde het wel: de volgende ronde neemt het nieuwe geheim in gebruik.
+    world.fail_upload, world.upload_timeout = 0, True
+    r = await authed.post("/api/buitencheck/deploy", json={"rotate": True})
+    assert r.status_code == 502 and "neemt de check het vanzelf in gebruik" in r.json()["detail"]
+    v = await _value(bc.CONFIG_KEY)
+    assert bc._decrypt(v["token"]) == SECRET_A and bc._decrypt(v["token_next"]) == world.secret != SECRET_A
+    await _rounds(world, 2, 1)
+    v = await _value(bc.CONFIG_KEY)
+    assert bc._decrypt(v["token"]) == world.secret and v["token_next"] is None
+    assert (await _value(bc.STATE_KEY))["worker"]["fail"] == 0
+    r = await authed.get("/api/diagnose")
+    assert r.status_code == 200 and NAME not in r.text and ACCOUNT not in r.text
     # Zonder fout: het geüploade geheim is het bewaarde.
-    world.fail_upload = False
+    world.upload_timeout = False
     r = await authed.post("/api/buitencheck/deploy", json={"rotate": True})
     assert r.status_code == 200, r.text
     v = await _value(bc.CONFIG_KEY)
@@ -888,6 +950,18 @@ async def test_deploy(authed, world):
     assert plan["checks"][3]["detail"] == "bestaat al: wordt vervangen"
     assert (await authed.post("/api/buitencheck/deploy", json={})).status_code == 200
     assert world.secret == secret == bc._decrypt((await _value(bc.CONFIG_KEY))["token"])
+    assert not any(n.title == "Check van buitenaf: Worker-adres gewijzigd" for n in await _notes())
+    # Draaide de check met een Worker op een ander adres (bv. een ander account): zoals een ander adres onder
+    # instellingen een melding, en een nieuw geheim (het geheim in gebruik gaat niet naar een andere Worker).
+    await _config(ids[:1], worker_url=f"https://{name}.ander.workers.dev", name=name)
+    r = await authed.post("/api/buitencheck/deploy", json={})
+    assert r.status_code == 200, r.text
+    assert world.secret not in (secret, SECRET_A) and world.secret == bc._decrypt((await _value(bc.CONFIG_KEY))["token"])
+    assert (await _value(bc.CONFIG_KEY))["worker_url"] == f"https://{name}.jonas.workers.dev"
+    n = [n for n in await _notes() if n.source == "auth"][-1]
+    assert n.title == "Check van buitenaf: Worker-adres gewijzigd" and n.level == "warn"
+    a = next(a for a in await _audits() if a.action == "buitencheck_url")
+    assert name not in json.dumps(a.detail)
 
 
 async def test_worker_url_en_domeinen(authed, world):
@@ -974,6 +1048,24 @@ async def test_tegels_toevoegen_en_weghalen(authed, world):
     assert (await authed.put("/api/buitencheck/tiles", json={"add": many[:223]})).json() == {"count": 225}
 
 
+async def test_tegel_met_alleen_check_van_buitenaf_verwijderen(authed, world):
+    """Zoals een tegel met een lopende check van binnenuit: 2FA en een melding."""
+    ids = await _tiles(authed, 3)
+    await _config(ids[:2])
+    await _auth(hours=1)
+    r = await authed.delete(f"/api/services/{ids[0]}")
+    assert r.status_code == 403 and r.json()["detail"] == "reauth_required"
+    assert (await authed.delete(f"/api/services/{ids[2]}")).status_code == 200  # niet in de lijst
+    await _config(ids[:2], enabled=False)
+    assert (await authed.delete(f"/api/services/{ids[1]}")).status_code == 200  # de check draait niet
+    await _config(ids[:1])
+    await _auth()
+    assert (await authed.delete(f"/api/services/{ids[0]}")).status_code == 200
+    a = [a for a in await _audits() if a.action == "check_silenced"]
+    assert [x.detail["services"] for x in a] == [["t0"]]
+    assert [n.title for n in await _notes() if n.title.startswith("Check verwijderd")] == ["Check verwijderd: t0"]
+
+
 async def test_geheim_nooit_terug(authed, world):
     await _tiles(authed, 1)
     r = await authed.post("/api/buitencheck/token", json={"token": "kort"})
@@ -1009,6 +1101,14 @@ async def test_workers_token_niet_naar_een_ander_adres(authed, world):
             assert str(e) == f"Zet het adres van deze API op {API}"
         else:
             raise AssertionError(res)
+    # Ook niet zonder gecontroleerd certificaat (zelfondertekend toestaan).
+    bad = await _api()
+    agen, db = await _db()
+    a = await db.get(ApiConnection, bad)
+    a.config = {"account": ACCOUNT, "insecure": True}
+    with pytest.raises(IntegrationError, match="zelfondertekend certificaat toestaan"):
+        from_api(a, None, world.http)._workers()
+    await agen.aclose()
     ids = await _tiles(authed, 1)
     await _config(ids, api_id=aid)
     plan = (await authed.post("/api/buitencheck/deploy/proef", json={})).json()["plan"]

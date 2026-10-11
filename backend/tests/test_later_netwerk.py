@@ -143,6 +143,7 @@ async def test_watchers_notify(authed, net):
     assert set(notes) == {"WAN_DHCP: down", "Tunnel thuis: down", "Publiek IP gewijzigd"}
     assert notes["WAN_DHCP: down"].level == "err" and "100% verlies" in notes["WAN_DHCP: down"].body
     assert notes["Publiek IP gewijzigd"].body.startswith("81.82.83.84 → 81.82.83.99")
+    assert (await db.get(AppState, f"net_tunnel:{cf}")).value["reported"] == ["thuis"]
     net.gw = {"status": "none", "status_translated": "Online", "loss": "0 %", "delay": "5 ms"}
     await rnd()
     await rnd()
@@ -153,6 +154,27 @@ async def test_watchers_notify(authed, net):
     assert data["public_ip"]["ip"] == "81.82.83.99" and data["public_ip"]["history"][0]["ip"] == "81.82.83.84"
     assert data["gateways"][0]["items"][0]["level"] == "ok" and data["tunnels"][0]["items"][0]["status"] == "down"
     assert (await authed.post("/api/network/refresh")).json()["public_ip"]["ip"] == "81.82.83.99"
+    await agen.aclose()
+
+
+async def test_tunnel_al_inactief_nooit_gemeld(authed, net):
+    """Een tunnel die al inactive is als de wachter hem voor het eerst ziet, meldt hij niet: dan staat hij ook niet bij
+    wat gemeld is (de check van buitenaf zwijgt alleen over wat gemeld is)."""
+    _, _, cf, _ = await _setup(authed)
+    agen, db = await _db()
+
+    async def rnd(status):
+        net.tunnel = status
+        for _ in range(2):
+            await watch_tunnels(db, net.clients)
+            await db.commit()
+        return (await db.get(AppState, f"net_tunnel:{cf}")).value["reported"]
+
+    assert await rnd("inactive") == []
+    assert (await db.execute(select(Notification).where(Notification.source == "netwerk"))).scalars().all() == []
+    assert await rnd("healthy") == []
+    assert await rnd("down") == ["thuis"]
+    assert await rnd("healthy") == []
     await agen.aclose()
 
 

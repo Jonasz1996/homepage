@@ -337,6 +337,9 @@ def judge(r: dict, t: Target, npm_access: bool) -> Verdict:
                 return Verdict(False, f"Doorverwezen naar {to} (loginpagina?)", None, f"redirect:{to}")
             return Verdict(True, None, f"verwijst door naar {to}", None)
         return Verdict(True, None, None, None)
+    if cfe and c in (401, 403):
+        # Een andere foutcode van Cloudflare (bv. 1009 land geblokkeerd, 1005 ASN geblokkeerd): NPM is niet bereikt.
+        return Verdict(False, f"Cloudflare houdt de check tegen ({cfe})", None, f"cfe:{cfe}")
     if c in (401, 403) and npm_access:
         return Verdict(True, None, "achter toegangslijst in NPM: alleen tot NPM getest", None)
     if c in (401, 403) and t.login_ok:
@@ -363,15 +366,23 @@ def tile_view(entry: dict | None, now: datetime | None = None) -> dict:
             "colo": e.get("colo"), "ms": e.get("ms"), "code": e.get("code"), "quiet": e.get("quiet")}
 
 
-async def tile_views(db: AsyncSession, now: datetime, existing) -> dict[int, dict]:
-    """Voor /api/status: wat elke tegel uit de lijst van buitenaf ziet, alleen als de check draait (zoals run_round).
-    existing: de ids van de tegels die nog bestaan."""
+async def running(db: AsyncSession) -> list[int]:
+    """De tegels in de lijst, alleen als de check draait (zoals run_round), anders []."""
     st = await db.get(AppState, CONFIG_KEY)
     cfg = {**CONFIG, **(st.value if st and isinstance(st.value, dict) else {})}
     if not cfg["enabled"] or not cfg["worker_url"] or not cfg["token"]:
+        return []
+    return [int(sid) for sid in cfg["services"] or []]
+
+
+async def tile_views(db: AsyncSession, now: datetime, existing) -> dict[int, dict]:
+    """Voor /api/status: wat elke tegel uit de lijst van buitenaf ziet, alleen als de check draait. existing: de ids
+    van de tegels die nog bestaan."""
+    ids = await running(db)
+    if not ids:
         return {}
     tiles = (await state(db))["tiles"]
-    return {int(sid): tile_view(tiles.get(str(sid)), now) for sid in cfg["services"] or [] if int(sid) in existing}
+    return {sid: tile_view(tiles.get(str(sid)), now) for sid in ids if sid in existing}
 
 
 def worker_calls(account: str, name: str, suffixes: list[str]) -> list[dict]:
@@ -480,8 +491,12 @@ async def inside(db: AsyncSession, now: datetime) -> Inside:
             ctx.npm_down = True
     ctx.dashboard = await engine.in_mass_outage(db)
     for st in (await db.execute(select(AppState).where(AppState.key.like("net_tunnel:%")))).scalars():
-        for t in (st.value or {}).get("items") or []:
-            if isinstance(t, dict) and t.get("status") in ("down", "inactive"):
+        v = st.value if isinstance(st.value, dict) else {}
+        # Alleen wat de tunnelwachter echt meldde: een oude tunnel die al inactive of down stond toen hij hem voor het
+        # eerst zag, meldt hij nooit, en mag de tegels dus niet stil houden.
+        told = set(v.get("reported") or [])
+        for t in v.get("items") or []:
+            if isinstance(t, dict) and t.get("status") in ("down", "inactive") and t.get("name") in told:
                 ctx.tdown.append((str(t.get("name") or "?"), t["status"]))
     ip = await db.get(AppState, "public_ip")
     v = ip.value if ip and isinstance(ip.value, dict) else {}
@@ -649,7 +664,8 @@ async def apply_round(db: AsyncSession, sent: list[dict], at: datetime, reply: R
         e.update(name=svc.name, at=iso(at), code=r.get("c"), ms=r.get("ms"), colo=colo, why=v.why, note=v.note,
                  cause=v.cause)
         reset = _dt(e.get("reset_at"))
-        if reset and at <= reset:
+        # reset_at staat op hele seconden (iso): at ook, anders telt een ronde uit dezelfde seconde toch mee.
+        if reset and at.replace(microsecond=0) <= reset:
             continue  # gevraagd voor de stille reden voorbij was: wel tonen, niet meetellen
         e["reset_at"] = None
         if v.ok:
