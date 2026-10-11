@@ -546,7 +546,8 @@ async def _snapshot(db: AsyncSession) -> dict:
         "selfcheck": await _value(db, selfcheck.STATE_KEY),
         "offsite_key_at": (await _value(db, selfcheck.KEY_STATE)).get("at"),
         "secret_saved_at": (await _value(db, SECRET_SAVED)).get("at"),
-        "restore_test": {k: last_test.get(k) for k in ("at", "ok", "name", "source_vmid")} if last_test else None,
+        "restore_test": {k: last_test.get(k) for k in ("at", "ok", "name", "source_vmid", "step")} if last_test
+        else None,
         "config_last": await _value(db, configs.LAST_KEY), "config_settings": await configs.settings(db),
         "oidc": {"enabled": bool(oidc.get("enabled")), "issuer": oidc.get("issuer") or None},
         "tunnels": tunnels, "by_mac": by_mac, "by_ip": by_ip, "ssh": ssh,

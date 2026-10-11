@@ -590,7 +590,11 @@ def _restore(value: dict, d: dict) -> list[tuple]:
     if rows:
         out.append(("table", ["node", "ID", "naam", "commando", "let op"], rows, "restore"))
     rt = d.get("restore_test")
-    if rt and rt.get("at"):
+    if rt and rt.get("at") and not rt.get("source_vmid"):
+        # Mislukt voor er een CT gekozen was (bv. geen back-up gevonden).
+        out.append(("p", f"De maandelijkse hersteltest liep laatst op {day(rt['at'])}: "
+                    + ("gelukt." if rt.get("ok") else f"mislukt bij {rt.get('step') or 'de eerste stap'}.")))
+    elif rt and rt.get("at"):
         out.append(("p", f"De maandelijkse hersteltest zette laatst CT {rt.get('source_vmid')}"
                     + (f" ({rt['name']})" if rt.get("name") else "")
                     + f" terug op {day(rt['at'])}: {'gelukt' if rt.get('ok') else 'mislukt'}."))

@@ -88,6 +88,16 @@ def test_sleutel_verouderd():
     assert "secret.key.enc (wachtzin ingesteld 3/9)" in fine and "secret.key.enc ✓" in fine and "verouderd" not in fine
 
 
+def test_hersteltest_zonder_ct():
+    # De hersteltest mislukte voor hij een CT koos (geen back-up gevonden): geen "CT None".
+    md = doc.to_md(doc.blocks(_value(restore_test={"at": "2026-10-01T05:00:00+00:00", "ok": False, "name": None,
+                                                   "source_vmid": None, "step": "back-up zoeken"})))
+    assert "De maandelijkse hersteltest liep laatst op 1/10: mislukt bij back-up zoeken." in md and "CT None" not in md
+    md = doc.to_md(doc.blocks(_value(restore_test={"at": "2026-10-01T05:00:00+00:00", "ok": True, "name": "dns",
+                                                   "source_vmid": 105, "step": "klaar"})))
+    assert "De maandelijkse hersteltest zette laatst CT 105 (dns) terug op 1/10: gelukt." in md
+
+
 def test_escape():
     bad = {"name": "<script>alert(1)</script>", "url": "javascript:alert(1)"}
     v = _value()
