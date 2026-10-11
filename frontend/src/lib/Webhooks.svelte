@@ -79,7 +79,17 @@
   }
   async function copy(text, key) {
     try { await navigator.clipboard.writeText(text); copied = key; setTimeout(() => (copied = null), 1500) }
-    catch { await askText('Kopieer:', { value: text, ok: 'Klaar' }) }
+    catch {
+      // Zoals prompt(): de tekst staat meteen geselecteerd zodra het venster het veld focust, klaar om te kopiëren.
+      const pick = (e) => {
+        if (!(e.target instanceof HTMLInputElement) || e.target.value !== text) return
+        e.target.select()
+        document.removeEventListener('focusin', pick)
+      }
+      document.addEventListener('focusin', pick)
+      await askText('Kopieer:', { value: text, ok: 'Klaar' })
+      document.removeEventListener('focusin', pick)
+    }
   }
   const ago = (ts) => (ts ? new Date(ts).toLocaleString('nl-BE', { dateStyle: 'short', timeStyle: 'short' }) : 'nog nooit')
 </script>

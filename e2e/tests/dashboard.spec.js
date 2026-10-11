@@ -113,8 +113,8 @@ for (const name of WINDOWS) {
 test('aandacht: wat nu mis is en de instellingen-checklist', async () => {
   await page.locator('button.mini[title^="Aandacht"]').click()
   const win = page.getByRole('dialog')
-  await expect(win.getByRole('button', { name: /^nu/ })).toBeVisible()
-  await win.getByRole('button', { name: /^instellingen/ }).click()
+  await expect(win.getByRole('tab', { name: /^nu/ })).toBeVisible()
+  await win.getByRole('tab', { name: /^instellingen/ }).click()
   await expect(win.locator('.row', { hasText: 'SSH-standaardlogin' })).toBeVisible({ timeout: 20000 })
   await win.getByRole('button', { name: 'Sluiten' }).click()
   await expect(win).toHaveCount(0)
@@ -139,7 +139,7 @@ test('diagnose: één bestand onder !, zonder wachtwoord', async () => {
 test('proef: wat de nachtelijke updates zouden doen', async () => {
   await page.locator('button.mini[title^="Openstaande updates"]').click()
   const win = page.getByRole('dialog')
-  await win.getByRole('button', { name: /^'s nachts/ }).click()
+  await win.getByRole('tab', { name: /^'s nachts/ }).click()
   await win.getByRole('button', { name: 'proef van vannacht' }).click()
   await expect(win.getByText('er is niets uitgevoerd')).toBeVisible()
   await expect(win.getByText('Er zou niets gebeuren.')).toBeVisible()
