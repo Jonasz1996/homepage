@@ -30,15 +30,19 @@
   .ov.hidden { display: none }
   .win { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden }
   .bar .x { flex: none }
-  /* Te veel knoppen voor de breedte: dan schuiven ze, en blijft ✕ staan. */
-  .acts { min-width: 0; overflow-x: auto; scrollbar-width: none }
+  /* Te veel knoppen voor de breedte: dan krimpt de rij en schuiven ze, en blijft ✕ staan. .bar .acts wint van de
+     globale .bar .right { flex: none }, die de rij anders op volle breedte houdt en ✕ uit beeld duwt. */
+  .bar .acts { flex: 0 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none }
   .acts::-webkit-scrollbar { display: none }
+  /* De knoppen zelf houden hun breedte (.mini heeft overflow: hidden en zou anders afgekapt worden). */
+  .acts > :global(*) { flex-shrink: 0 }
   /* Op de gsm schermvullend, met ✕ onder de statusbalk en boven de navigatiebalk. */
   @media (max-width: 600px) {
     .ov { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left) }
     .win { border-radius: 0 }
     .bar { border-radius: 0 }
     .bar .title { display: none }
-    .acts { margin-left: auto }
+    /* Zonder titel duwt niets meer naar rechts: dat doen de knoppen, of zonder knoppen ✕ zelf. */
+    .acts, .title + .x { margin-left: auto }
   }
 </style>
