@@ -26,7 +26,15 @@ warn() { printf '\033[1;33m!! %s\033[0m\n' "$*"; }
 
 # Hoe ver de update is: dat bepaalt wat er bij een fout teruggezet wordt (zie bij_fout).
 TERUG_NAAR="" GESTOPT="" GEWISSELD="" KLAAR="" REDEN="" VENV_NIEUW="" VENV_OUD="" VERSIE="" DUMP=""
+ONDERBROKEN="" UITSTEL=""
 afbreken() { REDEN=$1; exit 1; }
+
+# Onderbroken (Ctrl+C, de SSH-verbinding valt weg, kill): net als een fout, zodat bij_fout terugzet en de diensten weer
+# start. Zonder dit stopt bash meteen en ziet de EXIT-trap $? = 0: dan bleven de diensten stilstaan.
+# Tijdens het overschakelen en het bijwerken van de database (UITSTEL) pas als dat af is: lukt de migratie toch nog,
+# dan moet de nieuwe versie blijven, en niet de vorige code op de nieuwe database.
+# shellcheck disable=SC2317  # loopt via trap, dat ziet shellcheck niet
+onderbroken() { REDEN="Onderbroken."; ONDERBROKEN=$1; [ -n "$UITSTEL" ] || exit "$1"; }
 
 # Eén venv per requirements.lock en Python-versie (.venv-<hash>), .venv wijst naar de actieve. Bouwen kan dus terwijl
 # alles draait, en een oudere versie vindt bij terugzetten haar eigen bibliotheken terug. Het merkteken .klaar komt er
@@ -90,6 +98,8 @@ wissel_terug() {
 # shellcheck disable=SC2317  # loopt via trap, dat ziet shellcheck niet
 bij_fout() {
   local rc=$?
+  # Het terugzetten zelf niet onderbreken: nog een Ctrl+C, of een pipe (| tee) die al weg is.
+  trap '' INT HUP TERM PIPE
   trap - EXIT
   set +e
   [ "$rc" -ne 0 ] || exit 0
@@ -100,7 +110,7 @@ bij_fout() {
     [ -z "$TERUG_NAAR" ] || git -C "$APP_DIR" checkout -q -f --detach "$TERUG_NAAR" \
       || warn "De code kon niet terug naar ${TERUG_NAAR:0:7}."
     # Er is niets bijgewerkt, dus ook niets terug te zetten: homepage-terugzetten blijft bij de vorige update.
-    [ -z "$DUMP" ] || rm -f "$DUMP" "$DUMP.versie"
+    [ -z "$DUMP" ] || rm -f "$DUMP" "$DUMP.tmp" "$DUMP.versie"
   fi
   [ -z "$GESTOPT" ] || systemctl start homepage-api homepage-worker homepage-syslog
   if [ -n "$KLAAR" ]; then
@@ -135,6 +145,9 @@ if [ -z "${HOMEPAGE_TERUGZETTEN:-}" ] && [ -n "$PREV_COMMIT" ] && [ "$PREV_COMMI
   TERUG_NAAR=$PREV_COMMIT
 fi
 trap bij_fout EXIT
+trap 'onderbroken 129' HUP
+trap 'onderbroken 130' INT
+trap 'onderbroken 143' TERM
 
 say "Pakketten installeren"
 export DEBIAN_FRONTEND=noninteractive
@@ -253,6 +266,9 @@ elif runuser -u postgres -- psql -d homepage -tAc "SELECT 1 FROM alembic_version
     printf 'commit=%s\nversie=%s\n' "$PREV_COMMIT" "${PREV_VERSIE:-${PREV_COMMIT:0:7}}" > "$DUMP.versie"
   fi
 fi
+# Onderbreken pas na het onthouden van de versie (zie onderbroken). De migratie zelf stopt wel bij Ctrl+C: dan is de
+# database niet veranderd en zet bij_fout alles terug.
+UITSTEL=1
 wissel
 if ! (cd "$APP_DIR/backend" && runuser -u homepage -- env HOMEPAGE_DATABASE_URL="$HOMEPAGE_DATABASE_URL" \
   "$APP_DIR/.venv/bin/alembic" upgrade head); then
@@ -267,6 +283,8 @@ KANAAL="${HOMEPAGE_KANAAL:-$(sed -n 's/^kanaal=//p' "$CONF_DIR/versie" 2>/dev/nu
 printf 'versie=%s\ncommit=%s\nkanaal=%s\ndatum=%s\n' "$VERSIE" "$NOW_COMMIT" "${KANAAL:-nieuwste}" "$(date -Iseconds)" \
   > "$CONF_DIR/versie"
 chgrp homepage "$CONF_DIR/versie" && chmod 640 "$CONF_DIR/versie"
+UITSTEL=""
+[ -z "$ONDERBROKEN" ] || exit "$ONDERBROKEN"
 # Alleen de actieve venv en die van daarvoor blijven staan (om terug te zetten).
 for d in "$APP_DIR"/.venv-*; do
   [ -d "$d" ] || continue

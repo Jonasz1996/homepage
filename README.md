@@ -637,6 +637,8 @@ Mislukt de kopie of het bijwerken van de database (of al iets daarvoor), dan wor
 vorige versie van de code, de bibliotheken en de frontend komt terug, de database is niet veranderd (alle migraties
 lopen samen in één transactie) en de diensten draaien weer. Het script zegt wat er misliep: los dat op en voer de
 update opnieuw uit. Pas als de database bijgewerkt is, onthoudt het de nieuwe versie (in `/etc/homepage/versie`).
+Een onderbroken update (Ctrl+C, de SSH-verbinding valt weg) wordt net zo afgebroken; was de database op dat moment
+al bijgewerkt, dan blijft de nieuwe versie staan en starten de diensten (voer de update dan nog eens uit).
 
 Na de update toont het dashboard één keer wat er nieuw is en wat je zelf moet instellen (later: `Ctrl+K` →
 "wat is er nieuw").
