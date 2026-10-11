@@ -13,10 +13,16 @@ Een deel dat misloopt, breekt de rest niet: het komt met een korte reden in fout
 log), en de sessie wordt teruggedraaid zodat de volgende delen verder kunnen (na een databasefout weigert PostgreSQL
 anders alles tot het einde van de transactie, en half werk van het mislukte deel mag niet met een later deel mee
 bewaard worden: op zijn eigen endpoint ging het ook verloren).
+
+De tegels (widgets) rekenen in een eigen sessie naast de rest, en het overzicht wacht er hoogstens WIDGETS_BUDGET op.
+Zijn ze dan niet klaar, dan rekenen ze op de achtergrond verder, en geeft het overzicht de vorige stand: wat de laatste
+berekening die afliep gaf (zoals /api/widgets toen), met fouten.widgets = "te traag, vorige stand". widgets staat dan
+in delen én in fouten. Is er geen (recente) vorige stand, dan komt het zonder tegels: "te traag, volgende keer".
 """
 
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -32,11 +38,17 @@ from . import attention, cron, health, integrations, monitoring, network, notifi
 router = APIRouter(prefix="/api", tags=["overzicht"])
 log = logging.getLogger("homepage.api")
 
-# Zo lang wacht het overzicht op de tegels (de API's van de integraties). Daarna antwoordt het zonder, en rekent de
-# berekening op de achtergrond verder: zo staat het resultaat in de cache van de tegels (SUMMARY_TTL) bij de volgende
-# vraag.
+# Zo lang wacht het overzicht op de tegels (de API's van de integraties). Daarna antwoordt het zonder (of met de vorige
+# stand, zie hieronder), en rekent de berekening op de achtergrond verder: zo staat het resultaat in de cache van de
+# tegels (SUMMARY_TTL) bij de volgende vraag.
 WIDGETS_BUDGET = 8
 TRAAG = "te traag, volgende keer"
+# Maar een tegel die pas na het budget een fout geeft (een host die niet antwoordt: de time-out van een integratie is
+# even lang als het budget), blijft maar 10 s in de cache, en het hoofdscherm vraagt elke 60 s: dan mist elke
+# berekening het budget, ook als alle andere tegels in de cache staan. Daarom dan de vorige stand: wat de laatste
+# berekening die afliep gaf (op de achtergrond, na de vorige vraag), hoogstens VORIGE_MAX seconden oud.
+VORIGE = "te traag, vorige stand"
+VORIGE_MAX = 300
 
 DELEN = ("status", "widgets", "zabbix", "updates", "net", "cron", "health", "aandacht", "meldingen", "buiten")
 
@@ -61,6 +73,8 @@ assert set(_OP_SESSIE) | {"widgets"} == set(DELEN)
 
 # De berekening van de tegels die nu loopt (hoogstens één tegelijk, ook als het verzoek dat ze startte al antwoordde).
 _tegels_taak: asyncio.Task | None = None
+# Wat de laatste berekening die afliep gaf: (wanneer, tegels). Dezelfde voor iedereen, zoals /api/widgets.
+_tegels_vorige: tuple[float, dict] | None = None
 
 
 def _gevraagd(delen: str | None) -> set[str]:
@@ -116,9 +130,12 @@ async def _eigen_sessie(factory):
 
 
 async def _tegels_berekenen(factory, user: User) -> dict:
+    global _tegels_vorige
     async with _eigen_sessie(factory) as db:
         # Sluit de sessie zelf vóór de (soms trage) API's van de integraties.
-        return await integrations.widgets(user=user, db=db)
+        tegels = await integrations.widgets(user=user, db=db)
+    _tegels_vorige = (time.monotonic(), tegels)
+    return tegels
 
 
 def _tegels_klaar(t: asyncio.Task) -> None:
@@ -148,8 +165,32 @@ async def _wacht_op_tegels(taak: asyncio.Task, tot: float, uit: dict, fouten: di
             raise  # dit verzoek zelf wordt afgebroken
         fouten["widgets"] = "afgebroken"
     except Exception as e:
-        # De fout zelf staat al in de log (_tegels_klaar).
-        fouten["widgets"] = TRAAG if isinstance(e, TimeoutError) and not taak.done() else _reden(e)
+        if not isinstance(e, TimeoutError) or taak.done():
+            fouten["widgets"] = _reden(e)  # de fout zelf staat al in de log (_tegels_klaar)
+            return
+        vorige = _tegels_vorige
+        if vorige is not None and time.monotonic() - vorige[0] <= VORIGE_MAX:
+            uit["widgets"] = vorige[1]
+            fouten["widgets"] = VORIGE
+        else:
+            fouten["widgets"] = TRAAG
+
+
+async def _verbinding_teruggeven(db: AsyncSession) -> None:
+    """De transactie van het verzoek afsluiten vóór het wachten op de tegels, zodat het verzoek intussen geen
+    verbinding uit de pool vasthoudt (idle in transaction), zoals /api/widgets zelf zijn sessie sluit. Een commit
+    bewaart hier niets nieuws: elk deel ervoor commit zelf wat het bewaart, en na een mislukt deel is teruggedraaid.
+    Met expire_on_commit=False blijft het geladene bruikbaar; aandacht neemt daarna een nieuwe verbinding."""
+    if not db.in_transaction():
+        return
+    try:
+        await db.commit()
+    except Exception:
+        log.exception("overzicht: transactie afsluiten vóór de tegels mislukt")
+        try:
+            await db.rollback()
+        except Exception:
+            log.exception("overzicht: terugdraaien vóór de tegels mislukt")
 
 
 @router.get("/overzicht")
@@ -166,6 +207,8 @@ async def overzicht(request: Request, delen: str | None = None, user: User = Dep
         if naam in gevraagd and naam != "aandacht":
             await _deel(naam, request, user, db, uit, fouten)
     if taak is not None:
+        if not taak.done():
+            await _verbinding_teruggeven(db)
         await _wacht_op_tegels(taak, tot, uit, fouten)
     if "aandacht" in gevraagd:
         await _deel("aandacht", request, user, db, uit, fouten)

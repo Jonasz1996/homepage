@@ -1,7 +1,9 @@
 """Overzicht: alles wat het hoofdscherm geregeld opvraagt in één verzoek (GET /api/overzicht)."""
 
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -11,6 +13,7 @@ from sqlalchemy import delete, select, text
 from app.attention import ACK_KEY
 from app.db import get_db
 from app.health import scan as hw, selfcheck as sc
+from app.integrations import IntegrationError
 from app.main import app
 from app.models import AppState, CheckResult, CronJob, Notification, Service, ServiceState
 from app.monitoring import zabbix as zmon
@@ -40,6 +43,7 @@ def nep(monkeypatch):
     monkeypatch.setattr(integrations_router, "clients", HttpClients(httpx.MockTransport(f)))
     integrations_router._cache.clear()
     monkeypatch.setattr(overzicht, "_tegels_taak", None)
+    monkeypatch.setattr(overzicht, "_tegels_vorige", None)
     return f
 
 
@@ -313,3 +317,119 @@ async def test_trage_tegels(authed, nep, monkeypatch):
     assert started == [1]  # uit de cache: de API niet opnieuw gevraagd
     assert w == (await authed.get("/api/widgets")).json() and started == [1]
     assert overzicht._tegels_taak.done()
+
+
+async def test_trage_kapotte_tegel_geeft_de_vorige_stand(authed, nep, monkeypatch):
+    """Een tegel die pas na het budget een fout geeft (een host die niet antwoordt: de time-out van een integratie is
+    even lang als het budget). Die fout blijft maar 10 s in de cache en het scherm vraagt elke 60 s, dus elke
+    berekening mist het budget. Het overzicht antwoordt dan met de vorige stand (de berekening van de vraag ervoor, die
+    op de achtergrond afliep), ook met de gezonde tegels erin, in plaats van nooit meer tegels te geven."""
+    g = await _group(authed)
+    goed = await _svc(authed, g, "adguard", "https://adguard.jbogaert.be", secrets={"username": "a", "password": "b"})
+    dood = await _svc(authed, g, "adguard", "https://dood.jbogaert.be", secrets={"username": "a", "password": "b"})
+    monkeypatch.setattr(overzicht, "WIDGETS_BUDGET", 0.3)
+    # De klok van de cache van de tegels: zo ligt er een minuut tussen twee vragen, zonder te wachten.
+    klok = [0.0]
+    monkeypatch.setattr(integrations_router, "time", SimpleNamespace(monotonic=lambda: time.monotonic() + klok[0]))
+    echt = integrations_router._fields
+    gevraagd = []
+
+    async def velden(i):
+        gevraagd.append("dood" if "dood" in i.base else "goed")
+        if "dood" in i.base:
+            await asyncio.sleep(0.5)
+            raise IntegrationError("Time-out")
+        return await echt(i)
+
+    monkeypatch.setattr(integrations_router, "_fields", velden)
+
+    async def vraag() -> dict:
+        r = await authed.get("/api/overzicht", params={"delen": "widgets,cron"})
+        assert r.status_code == 200, r.text
+        # De berekening rekent op de achtergrond verder: laten aflopen, zoals vóór de volgende vraag.
+        await asyncio.wait_for(asyncio.shield(overzicht._tegels_taak), 5)
+        return r.json()
+
+    # Nog geen vorige stand: zonder tegels.
+    r = await vraag()
+    assert r["fouten"] == {"widgets": overzicht.TRAAG} and list(r["delen"]) == ["cron"]
+    assert sorted(gevraagd) == ["dood", "goed"]
+    eerste = overzicht._tegels_vorige[1]
+    assert eerste[str(dood)] == {"error": "Time-out"} and eerste[str(goed)]["fields"]
+
+    # Een minuut later: de fout van de dode tegel is verlopen (de goede tegel staat nog in de cache), dus weer te
+    # traag. Nu met de vorige stand, en die is wat /api/widgets gaf.
+    klok[0] += 60
+    r = await vraag()
+    assert r["fouten"] == {"widgets": overzicht.VORIGE}
+    assert list(r["delen"]) == ["widgets", "cron"] and r["delen"]["widgets"] == eerste
+    assert sorted(gevraagd) == ["dood", "dood", "goed"]  # één berekening per vraag
+    assert r["delen"]["widgets"] == (await authed.get("/api/widgets")).json()
+
+    # Nog een minuut later (ook de goede tegel is verlopen): de stand van de berekening van de vorige vraag.
+    klok[0] += 60
+    tweede = overzicht._tegels_vorige
+    r = await vraag()
+    assert r["fouten"] == {"widgets": overzicht.VORIGE} and r["delen"]["widgets"] == tweede[1]
+    assert sorted(gevraagd) == ["dood", "dood", "dood", "goed", "goed"]
+    assert overzicht._tegels_vorige[0] > tweede[0]
+
+    # Een vorige stand die te oud is (niemand vroeg nog tegels): dan toch zonder.
+    t, w = overzicht._tegels_vorige
+    monkeypatch.setattr(overzicht, "_tegels_vorige", (t - overzicht.VORIGE_MAX - 1, w))
+    klok[0] += 60
+    r = await vraag()
+    assert r["fouten"] == {"widgets": overzicht.TRAAG} and list(r["delen"]) == ["cron"]
+
+
+async def test_geen_open_transactie_tijdens_het_wachten_op_de_tegels(authed, nep, monkeypatch):
+    """Terwijl het overzicht op trage tegels wacht, houdt het verzoek geen databaseverbinding vast (een open
+    transactie), zoals /api/widgets zelf: de delen ervoor zijn afgesloten. aandacht daarna werkt gewoon."""
+    await _seed(authed)
+    monkeypatch.setattr(overzicht, "WIDGETS_BUDGET", 0.3)
+    los = asyncio.Event()
+    echt = integrations_router._fields
+
+    async def traag(i):
+        await los.wait()
+        return await echt(i)
+
+    monkeypatch.setattr(integrations_router, "_fields", traag)
+    # De sessies die het verzoek krijgt: de eerste is die van het verzoek zelf, daarna die van de tegels.
+    sessies = []
+    maak = app.dependency_overrides[get_db]
+
+    async def _sessie():
+        agen = maak()
+        s = await agen.__anext__()
+        sessies.append(s)
+        try:
+            yield s
+        finally:
+            await agen.aclose()
+
+    monkeypatch.setitem(app.dependency_overrides, get_db, _sessie)
+    tijdens = []
+    wacht = overzicht._wacht_op_tegels
+
+    async def wacht_en_kijk(taak, *a):
+        tijdens.append({"transactie": sessies[0].in_transaction(), "tegels klaar": taak.done()})
+        return await wacht(taak, *a)
+
+    monkeypatch.setattr(overzicht, "_wacht_op_tegels", wacht_en_kijk)
+    r = await authed.get("/api/overzicht")
+    assert r.status_code == 200, r.text
+    assert tijdens == [{"transactie": False, "tegels klaar": False}]
+    body = r.json()
+    assert body["fouten"] == {"widgets": overzicht.TRAAG}
+    assert list(body["delen"]) == [d for d in overzicht.DELEN if d != "widgets"]
+    los.set()
+    await asyncio.wait_for(asyncio.shield(overzicht._tegels_taak), 5)
+    # Wat de delen bewaarden, is bewaard (gezondheid voor het wachten, aandacht erna).
+    agen = maak()
+    db = await agen.__anext__()
+    assert (await db.get(AppState, "worker_alert")).value == {"down": True}
+    assert (await db.get(AppState, ACK_KEY)).value["items"] == {}
+    await agen.aclose()
+    # aandacht rekende vóór de tegels klaar waren (zonder hun fouten): het eigen endpoint ziet die nu wel.
+    await _zelfde_als_eigen_endpoints(authed, {k: v for k, v in body["delen"].items() if k != "aandacht"})
