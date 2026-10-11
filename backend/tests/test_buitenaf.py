@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import asyncssh
 import httpx
 import pytest
-from sqlalchemy import update
+from sqlalchemy import select, update
 from starlette.routing import Route, WebSocketRoute
 
 from app import outside, ssh_pin
@@ -16,8 +16,8 @@ from app.db import get_db
 from app.integrations import calls as callmod
 from app.integrations.proxmox import Proxmox
 from app.main import app
-from app.models import AppState, Notification, Session, SshHost
-from app.monitoring import ports
+from app.models import AppState, Event, Notification, Session, SshHost
+from app.monitoring import ports, watchdog
 from app.monitoring.checks import HttpClients
 from app.routers import integrations as integrations_router
 
@@ -162,6 +162,72 @@ async def test_waar_komt_een_bezoek_vandaan(authed):
     assert (await w("94.224.1.7", {"x-homepage-via-cf": "1"}))["outside"] is True
     assert (await w("2a02:1810:1::5", {"x-homepage-via-cf": "1"}))["outside"] is False
     await agen.aclose()
+
+
+FORGED = {"x-homepage-cf-forged": "1"}
+
+
+async def _forged_notes(db) -> list[Notification]:
+    q = select(Notification).where(Notification.push_key.like(f"{outside.FORGED_KEY}%")).order_by(Notification.id)
+    return list((await db.execute(q)).scalars())
+
+
+async def test_vervalste_cloudflare_header(authed, monkeypatch):
+    """Wie NPM rechtstreeks bereikt en zelf CF-Connecting-IP meestuurt (nginx zet dan X-Homepage-Cf-Forged), is nooit
+    thuis: ook niet met het eigen publieke IP of een IP uit een thuisnetwerk. Eén melding per uur per adres."""
+    agen, db = await _db()
+    db.add(AppState(key="public_ip", value={"ip": "94.224.1.7"}))
+    db.add(AppState(key=outside.STATE_KEY, value={"home_ip": True, "networks": ["10.8.0.0/24"]}))
+    await db.commit()
+    w = lambda ip, h=None: outside.where(_Conn(ip, h), db)  # noqa: E731
+    assert (await w("94.224.1.7"))["outside"] is False
+    r = await w("94.224.1.7", FORGED)
+    assert r == {"outside": True, "via_cf": False, "ip": "94.224.1.7", "why": outside.FORGED_WHY}
+    assert (await w("94.224.1.7", {**FORGED, "x-homepage-via-cf": "1"}))["why"] == outside.FORGED_WHY
+    assert (await w("10.8.0.5", FORGED))["outside"] is True
+    assert (await w("192.168.0.20", FORGED))["outside"] is True
+    assert (await w("192.168.0.20", {"x-homepage-cf-forged": ""}))["outside"] is False
+
+    # Eén melding per adres (IPv6: per /64), in het meldingencentrum en op de tijdlijn.
+    for ip in ("94.224.1.7", "192.168.0.20", "2a02:1810:1:2::5", "2a02:1810:1:2::6", "2a02:1810:1:3::5"):
+        await w(ip, FORGED)
+    notes = await _forged_notes(db)
+    assert [n.push_key.split(":", 1)[1] for n in notes] == [
+        "94.224.1.7", "10.8.0.5", "192.168.0.20", "2a02:1810:1:2::/64", "2a02:1810:1:3::/64"]
+    n = notes[0]
+    assert n.title == "Vervalste Cloudflare-header" and n.level == "warn" and n.source == "auth"
+    assert "94.224.1.7" in n.body and "nginx-map.conf" in n.body
+    events = (await db.execute(select(Event).where(Event.title == "Vervalste Cloudflare-header"))).scalars().all()
+    assert len(events) == 5 and {e.kind for e in events} == {"toegang"}
+
+    # Hoogstens tien per uur in totaal (hier: zes), ook als het adres telkens anders is.
+    monkeypatch.setattr(outside, "FORGED_MAX", 6)
+    for ip in ("203.0.113.1", "203.0.113.2", "203.0.113.3"):
+        assert (await w(ip, FORGED))["outside"] is True
+    assert len(await _forged_notes(db)) == 6
+    # Een uur later opnieuw.
+    later = datetime.now(timezone.utc) + timedelta(minutes=61)
+    monkeypatch.setattr(outside, "_now", lambda: later)
+    await w("94.224.1.7", FORGED)
+    assert len(await _forged_notes(db)) == 7
+    await agen.aclose()
+
+
+async def test_vervalste_cloudflare_header_via_de_api(authed):
+    """De vlag van nginx: buiten. Ook als een bewaakte route het verzoek weigert, is de melding bewaard."""
+    r = await authed.get("/api/ssh/ready", headers=FORGED)
+    assert r.status_code == 403 and r.json()["detail"] == "buiten:terminal"
+    agen, db = await _db()
+    assert [n.body.split(" had ")[0] for n in await _forged_notes(db)] == ["Een verzoek van 127.0.0.1"]
+    r = (await authed.get("/api/outside", headers=FORGED)).json()
+    assert r["outside"] is True and r["why"] == outside.FORGED_WHY and r["via_cf"] is False
+    r = await authed.put("/api/outside/settings", json={"home_ip": True, "networks": []}, headers=FORGED)
+    assert r.status_code == 403
+    assert len(await _forged_notes(db)) == 1  # één keer per uur
+    await agen.aclose()
+    # healthz (zonder database) telt het ook als van buitenaf.
+    assert watchdog.is_outside(_Conn("192.168.0.20", FORGED)) is True
+    assert watchdog.is_outside(_Conn("192.168.0.20")) is False
 
 
 async def test_terminal_websocket_van_buitenaf(authed, monkeypatch):

@@ -358,13 +358,15 @@ Later, deel 3 (Authentik en gsm):
   (Gebruikers → API-tokens, voor een gebruiker die alle hosts mag lezen, bv. een eigen gebruiker in een groep met
   leesrechten op alle hostgroepen) en als adres de webinterface (`https://zabbix.jbogaert.be`, zonder
   `/api_jsonrpc.php`). Gebruikt alleen lezen: host.get, trigger.get, item.get en trend.get
-- **van buitenaf** (⚿ → van buitenaf): komt een bezoek via Cloudflare (NPM gaf een `CF-Connecting-IP` door) of
-  vanaf een publiek IP, dan staan de terminal (ook cronjobs starten of bewaken, rsyslog uitrollen, sleutels
-  vastzetten), updates installeren, acties (aan/uit, Wake-on-LAN, zelfherstel, snapshots verwijderen, hersteltest,
-  API-calls die iets veranderen, poortscan) en configuraties downloaden standaard uit. Kijken kan altijd; bovenaan
-  staat dan "buiten". Per functie: uit, één uur aan (ook onderweg, met je 2FA-code) of altijd aan (alleen thuis).
-  Aanzetten geeft een melding. Je LAN, VPN en Tailscale tellen als thuis, net als je eigen publieke IP (wie thuis via
-  Cloudflare surft); extra thuisnetwerken (bv. je IPv6-voorvoegsel) stel je daar ook in, alleen thuis
+- **van buitenaf** (⚿ → van buitenaf): komt een bezoek via Cloudflare (NPM kreeg het met een `CF-Connecting-IP` van
+  Cloudflare of een tunnel), met een vervalste header van Cloudflare of vanaf een publiek IP, dan staan de terminal
+  (ook cronjobs starten of bewaken, rsyslog uitrollen, sleutels vastzetten), updates installeren, acties (aan/uit,
+  Wake-on-LAN, zelfherstel, snapshots verwijderen, hersteltest, API-calls die iets veranderen, poortscan) en
+  configuraties downloaden standaard uit. Kijken kan altijd; bovenaan staat dan "buiten". Per functie: uit, één uur
+  aan (ook onderweg, met je 2FA-code) of altijd aan (alleen thuis). Aanzetten geeft een melding. Je LAN, VPN en
+  Tailscale tellen als thuis, net als je eigen publieke IP (wie thuis via Cloudflare surft); extra thuisnetwerken (bv.
+  je IPv6-voorvoegsel) stel je daar ook in, alleen thuis. Een vervalste header van Cloudflare telt altijd als van
+  buitenaf en geeft een melding (zie Installeren → Cloudflare)
 - **net → firewall**: welke IP's en poorten het dashboard echt gebruikt (uit de tegels, API-beheer, de SSH-hosts en
   de DNS-server), wat er binnenkomt, en een voorstel voor aliassen en regels in OPNsense voor de firewall tussen de
   VLAN's. Bovenaan staat of er een slot voor het dashboard stond bij het laatste bezoek van buitenaf: Cloudflare
@@ -406,7 +408,8 @@ Optimalisaties:
 
 - je blijft ingelogd zolang je het dashboard gebruikt (sessie verlengt zich, na 14 dagen niets doen moet je opnieuw inloggen)
 - geen verzoeken naar de server zolang het tabblad verborgen is, bij terugkeren meteen verse status
-- achter Cloudflare zien login-limiet, audit-log en meldingen het echte IP van de bezoeker
+- achter Cloudflare zien login-limiet, audit-log en meldingen het echte IP van de bezoeker (alleen als NPM het
+  verzoek van Cloudflare of een tunnel kreeg)
 - gzip, beveiligingsheaders op elke response, installeerbaar als app (manifest)
 - de worker hergebruikt HTTP-verbindingen en ruimt verlopen sessies, oude audit-regels (1 jaar) en gelezen meldingen (30 dagen) op
 
@@ -558,8 +561,27 @@ Testen kan meteen op `http://<IP>`. Via NPM met HTTPS is de sessiecookie automat
 (`HOMEPAGE_COOKIE_SECURE=auto`).
 
 Zet in Proxmox de firewall van de container aan en laat poort 80 alleen toe vanaf NPM (192.168.0.245).
-nginx gelooft de `X-Forwarded-For`- en `CF-Connecting-IP`-headers enkel van dat adres, maar zo kan
-niemand op het LAN NPM en Cloudflare omzeilen. Laat daarnaast poort 514 (udp en tcp) toe vanaf je LAN voor de logs.
+nginx gelooft de `X-Forwarded-For`-header enkel van dat adres, maar zo kan niemand op het LAN NPM en Cloudflare
+omzeilen. Laat daarnaast poort 514 (udp en tcp) toe vanaf je LAN voor de logs.
+
+**Cloudflare.** De headers van Cloudflare (`CF-Connecting-IP` met het echte IP, `CF-IPCountry` met het land,
+`Cf-Access-Jwt-Assertion` van Cloudflare Access) gelooft nginx alleen als het verzoek van NPM komt én NPM het zelf
+van Cloudflare of een tunnel kreeg. Dat werkt voor allebei:
+
+- een poortdoorverwijzing naar NPM via de proxy van Cloudflare (oranje wolk): NPM krijgt het verzoek van een adres
+  van Cloudflare. Die adresblokken staan in `deploy/nginx-map.conf` (bron: https://www.cloudflare.com/ips)
+- een Cloudflare Tunnel: cloudflared (in een CT of op de host van NPM) komt van een privé-adres bij NPM. Laat de
+  tunnel naar NPM wijzen, niet rechtstreeks naar de container
+
+Wie NPM rechtstreeks bereikt (poort 443 zonder Cloudflare, of vanaf het LAN) en zelf zo'n header meestuurt, bv. met
+je eigen publieke IP om als thuis te tellen, krijgt zijn echte IP, telt als van buitenaf en geeft een melding
+"Vervalste Cloudflare-header" (hoogstens één per uur per adres, tien per uur in totaal). Krijg je die melding voor
+je eigen bezoek via Cloudflare, dan heeft Cloudflare een nieuw adresblok: vul het aan in `deploy/nginx-map.conf`
+(bij een update zet install.sh het in `/etc/nginx/conf.d/homepage-map.conf`). Een toestel op je LAN kan NPM een
+adres van Cloudflare voorwenden (NPM gelooft `X-Real-IP` van het LAN), maar dat geeft niets: wie op het LAN zit, is
+toch thuis. `X-authentik-username` (de forward-auth van Authentik in NPM) telt alleen van NPM en niet samen met een
+vervalste header. NPM geeft hem op een host zonder forward-auth ook van de bezoeker door, dus het dashboard gebruikt
+hem alleen voor de veiligheidscheck "slot voor het dashboard".
 
 **Bewaar een kopie van `/etc/homepage/secret.key`.** Zonder die sleutel zijn de opgeslagen
 wachtwoorden, API-sleutels en 2FA-geheimen onleesbaar.

@@ -1,28 +1,39 @@
 """Buitenmodus: wat mag er als het dashboard van buitenaf gebruikt wordt.
 
-Van buitenaf = het verzoek kwam via Cloudflare (nginx zet X-Homepage-Via-Cf als NPM een CF-Connecting-IP doorgaf),
-of vanaf een publiek IP. Thuis (LAN, VPN, Tailscale) en het eigen publieke IP (wie thuis via Cloudflare surft)
-tellen als thuis. Van buitenaf staan de gevaarlijke functies standaard uit; kijken kan altijd. Per functie kan
-Jonas ze aanzetten: één uur (ook onderweg, met een verse 2FA-code) of altijd (alleen thuis).
+Van buitenaf = het verzoek kwam via Cloudflare (nginx zet X-Homepage-Via-Cf als NPM een CF-Connecting-IP doorgaf dat
+het van Cloudflare of een tunnel kreeg), met een vervalste header van Cloudflare, of vanaf een publiek IP. Thuis (LAN,
+VPN, Tailscale) en het eigen publieke IP (wie thuis via Cloudflare surft) tellen als thuis. Van buitenaf staan de
+gevaarlijke functies standaard uit; kijken kan altijd. Per functie kan Jonas ze aanzetten: één uur (ook onderweg, met
+een verse 2FA-code) of altijd (alleen thuis).
 
-nginx overschrijft X-Homepage-Via-Cf en X-Homepage-Access bij elk verzoek, en uvicorn luistert alleen op
-127.0.0.1, dus een bezoeker kan ze niet zelf meesturen.
+nginx overschrijft X-Homepage-Via-Cf, X-Homepage-Access en X-Homepage-Cf-Forged bij elk verzoek, en uvicorn luistert
+alleen op 127.0.0.1, dus een bezoeker kan ze niet zelf meesturen. De headers van Cloudflare gelooft nginx alleen als NPM
+het verzoek van Cloudflare of een tunnel kreeg (deploy/nginx-map.conf). Stuurt iemand anders ze mee (wie NPM
+rechtstreeks bereikt en zo een ander IP voorwendt, bv. het eigen publieke IP), dan zet nginx X-Homepage-Cf-Forged: zo
+iemand telt altijd als van buitenaf, en het dashboard meldt het.
 """
 
 import ipaddress
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import HTTPConnection
 
 from .db import get_db
-from .models import AppState
+from .deps import notify
+from .models import AppState, Notification
 
 STATE_KEY = "outside"
 SEEN_KEY = "outside_seen"
 TEMP = timedelta(hours=1)
 MODES = ("uit", "uur", "aan")
+FORGED_WHY = "vervalste Cloudflare-header van een adres dat geen Cloudflare is"
+# Een melding over vervalste headers: hoogstens één per uur per adres (IPv6: per /64), en tien per uur in totaal.
+FORGED_KEY = "cf-vervalst:"
+FORGED_EVERY = timedelta(hours=1)
+FORGED_MAX = 10
 
 # Volgorde = volgorde in het scherm.
 FEATURES = {
@@ -60,12 +71,39 @@ async def _home_public_ip(db: AsyncSession) -> str | None:
     return (st.value or {}).get("ip") if st else None
 
 
+def forged(conn: HTTPConnection) -> bool:
+    """Had het verzoek een header van Cloudflare die niet van Cloudflare kwam? (nginx zet dit, zie hierboven.)"""
+    return conn.headers.get("x-homepage-cf-forged") == "1"
+
+
+async def _report_forged(db: AsyncSession, ip: ipaddress.IPv4Address | ipaddress.IPv6Address | None) -> None:
+    """Melding (en tijdlijn) over een vervalste header. Bewaart meteen: een geweigerd verzoek bewaart zelf niets.
+    De aanroepers van where() hebben op dat moment nog niets gewijzigd."""
+    who = "?" if ip is None else str(ip) if ip.version == 4 else str(ipaddress.ip_network(f"{ip}/64", strict=False))
+    key = f"{FORGED_KEY}{who}"
+    recent = set((await db.execute(select(Notification.push_key).where(
+        Notification.push_key.like(f"{FORGED_KEY}%"), Notification.ts >= _now() - FORGED_EVERY))).scalars())
+    if key in recent or len(recent) >= FORGED_MAX:
+        return
+    notify(db, "Vervalste Cloudflare-header",
+           f"Een verzoek van {who} had een header van Cloudflare (CF-Connecting-IP, CF-IPCountry of "
+           "Cf-Access-Jwt-Assertion), maar NPM kreeg het niet van Cloudflare of een tunnel. Zo kan wie NPM "
+           "rechtstreeks bereikt een ander IP voorwenden. Het dashboard nam het echte adres en telt het bezoek als "
+           "van buitenaf. Kwam je zelf via Cloudflare binnen? Dan mist deploy/nginx-map.conf misschien een nieuw "
+           "blok van Cloudflare.", level="warn", source="auth", key=key, data={"ip": who})
+    await db.commit()
+
+
 async def where(conn: HTTPConnection, db: AsyncSession, cfg: dict | None = None) -> dict:
     """{outside, via_cf, ip, why}: van waar dit verzoek komt."""
     cfg = cfg or await settings(db)
     via_cf = conn.headers.get("x-homepage-via-cf") == "1"
     ip = _ip(conn)
     out = {"outside": False, "via_cf": via_cf, "ip": str(ip) if ip else None, "why": "thuisnetwerk"}
+    # Eerst: wie headers van Cloudflare vervalst, is nooit thuis (ook niet met het IP van een thuisnetwerk).
+    if forged(conn):
+        await _report_forged(db, ip)
+        return {**out, "outside": True, "via_cf": False, "why": FORGED_WHY}
     if ip is not None:
         for net in cfg.get("networks") or []:
             try:
