@@ -311,3 +311,78 @@ async def test_eigen_timeout_en_foutdetail():
             await i.request("GET", "/stuk")
         with pytest.raises(IntegrationError, match="eigen: kapot"):
             await Eigen("https://x.jbogaert.be", {}, {}, c).request("GET", "/stuk")
+
+
+async def test_npm_schrijfgebruiker_alleen_voor_send():
+    from app.integrations import npm as npm_mod
+    from app.integrations.base import IntegrationError
+
+    npm_mod._tokens.clear()
+    logins, auths = [], []
+
+    def handler(req):
+        if req.url.path == "/api/tokens":
+            who = json.loads(req.content)["identity"]
+            logins.append(who)
+            return httpx.Response(200, json={"token": f"jwt-{who}"})
+        auths.append((req.method, req.url.path, req.headers["authorization"], req.extensions["timeout"]["read"]))
+        if req.url.path == "/api/nginx/proxy-hosts" and req.method == "POST":
+            return httpx.Response(400, json={"error": {"code": 400, "message": "kapot password=hunter22geheim"}})
+        return httpx.Response(200, json=[])
+
+    secrets = {"username": "lees@jbogaert.be", "password": "a", "action_username": "acties@jbogaert.be",
+               "action_password": "b"}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+        n = npm_mod.NginxProxyManager("http://192.168.0.245:81", {}, secrets, c)
+        assert n.split and n.user() == "lees@jbogaert.be" and n.user(True) == "acties@jbogaert.be"
+        # Eigen calls en "uitproberen" in API-beheer blijven op de leesgebruiker.
+        assert (await n.call_auth())["headers"]["Authorization"] == "Bearer jwt-lees@jbogaert.be"
+        assert (await n.write_auth())["headers"]["Authorization"] == "Bearer jwt-lees@jbogaert.be"
+        await n.proxy_hosts()
+        await n.proxy_hosts(write=True)
+        with pytest.raises(IntegrationError) as e:
+            await n.send("POST", "/nginx/proxy-hosts", {"x": 1}, timeout=120)
+        assert str(e.value).startswith("NPM: kapot") and "hunter22geheim" not in str(e.value)
+        assert logins == ["lees@jbogaert.be", "acties@jbogaert.be"]
+        assert auths[0][2] == "Bearer jwt-lees@jbogaert.be" and auths[1][2] == "Bearer jwt-acties@jbogaert.be"
+        assert auths[2][:3] == ("POST", "/api/nginx/proxy-hosts", "Bearer jwt-acties@jbogaert.be") and auths[2][3] == 120
+        # Zonder tweede gebruiker doet de ene alles, zoals vroeger.
+        one = npm_mod.NginxProxyManager("http://192.168.0.245:81", {}, {"username": "lees@jbogaert.be", "password": "a"}, c)
+        assert not one.split and one.user(True) == "lees@jbogaert.be"
+
+
+def test_npm_bouwstenen():
+    from app.integrations import npm as npm_mod
+    from app.integrations.base import IntegrationError
+
+    new = npm_mod.cert_create_request("x.jbogaert.be", (2, 13, 0), "a@b.be")
+    assert new == ("POST", "/nginx/certificates", {"provider": "letsencrypt", "domain_names": ["x.jbogaert.be"],
+                                                   "meta": {"dns_challenge": False}})
+    old = npm_mod.cert_create_request("x.jbogaert.be", (2, 12, 6), "a@b.be")[2]
+    assert old["meta"] == {"dns_challenge": False, "letsencrypt_email": "a@b.be", "letsencrypt_agree": True}
+    with pytest.raises(IntegrationError, match="NPM-versie onbekend"):
+        npm_mod.cert_create_request("x.jbogaert.be", None, "a@b.be")
+    assert npm_mod.host_delete_request("57") == ("DELETE", "/nginx/proxy-hosts/57", None)
+    with pytest.raises(ValueError):
+        npm_mod.host_get_request("../1")
+    assert npm_mod.nginx_failed({"meta": {"nginx_online": True}}) is None
+    assert npm_mod.nginx_failed({"meta": {}}) is None
+    err = npm_mod.nginx_failed({"meta": {"nginx_online": False, "nginx_err": "unknown directive token=abcdef123456"}})
+    assert err.startswith("NPM: nginx weigerde de configuratie: unknown directive") and "abcdef123456" not in err
+    lan = lambda *addrs, **kw: npm_mod.lan_only({"clients": [{"address": a, "directive": "allow"} for a in addrs], **kw})  # noqa: E731
+    assert lan("192.168.0.0/16")[0] and lan("10.0.0.0/8", "100.64.0.0/10")[0] and lan("100.100.1.2")[0]
+    assert lan("192.168.0.0/16", "0.0.0.0/0") == (False, "laat 0.0.0.0/0 toe")
+    assert lan("all") == (False, "laat all toe")
+    assert not lan("8.8.8.8")[0]
+    assert lan("192.168.0.0/16", satisfy_any=1, items=[{"username": "x"}]) == (
+        False, "wachtwoord volstaat van overal (satisfy any)")
+    assert not npm_mod.lan_only({"clients": []})[0]
+    me = {"roles": [], "permissions": {"visibility": "all", "proxy_hosts": "manage", "certificates": "view",
+                                       "access_lists": "view", "redirection_hosts": "view", "dead_hosts": "view"}}
+    assert npm_mod.can_write(me, need_cert=False)[0]
+    assert not npm_mod.can_write(me, need_cert=True)[0]
+    assert not npm_mod.can_write({"permissions": {**me["permissions"], "visibility": "user"}}, False)[0]
+    assert npm_mod.can_write({"roles": ["admin"]}, True)[0]
+    c = {"id": 3, "nice_name": "*.x", "domain_names": ["*.x"], "provider": "other", "expires_on": "2027-01-01",
+         "meta": {"dns_provider_credentials": "geheim"}}
+    assert "meta" not in npm_mod.public_cert(c)
