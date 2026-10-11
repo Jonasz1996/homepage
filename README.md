@@ -203,9 +203,10 @@ Later, deel 1 (tijdlijn, weekrapport en updates):
 - **zelfherstel** (in het mini dashboard van een service): "als Plex 3 checks na elkaar down is, herstart CT 105".
   Acties: de knoppen van de integraties (Proxmox herstart of start een VM/CT, Portainer herstart een container) of
   via SSH `systemctl restart` / `docker restart`. Hoogstens 2 keer per uur (instelbaar tot 5), minstens 10 minuten
-  ertussen, niet als iets waar de service van afhangt plat ligt. Elke poging komt in het meldingencentrum en op de
-  tijdlijn; naar je gsm gaat per storing alleen de eerste poging, een herstart die eerst lukte en daarna mislukt, en
-  de eerste keer dat de limiet de regel pauzeert. De meldingen volgen *Melden* van de tegel. *Nu testen* voert de
+  ertussen, niet als iets waar de service van afhangt plat ligt. Elke poging komt op de tijdlijn en, tenzij *Melden*
+  van de tegel op *niet* staat, in het meldingencentrum; naar je gsm gaat per storing alleen de eerste poging, een
+  herstart die eerst lukte en daarna mislukt, en de eerste keer dat de limiet de regel pauzeert (ook als je de
+  meldingen in 🔔 tussendoor wist). *Nu testen* voert de
   actie één keer uit
 
 Later, deel 2 (internet, Wake-on-LAN en stroom):
@@ -366,10 +367,12 @@ Later, deel 3 (Authentik en gsm):
   hostnaam en interface. Wat er bij de eerste keer al is, geldt als gekend; een nieuw MAC-adres daarna geeft een
   melding. Geef apparaten een naam of zet ze op "ken ik". Met **volgen** wordt een apparaat elke 6 uur gescand op
   ongeveer 60 gebruikelijke poorten (ssh, http, smb, rdp, docker, databanken, ...) en komt er een melding als er een
-  nieuwe poort openstaat. Een privé-adres (willekeurig MAC van een gsm of laptop) heet zo; neemt een gekend toestel
-  een nieuw privé-adres met dezelfde hostnaam op dezelfde interface, dan houdt het zijn naam (melding alleen in 🔔).
-  Meerdere nieuwe apparaten in één ronde geven één melding. Onbekende apparaten en privé-adressen zonder naam die
-  30 dagen niet gezien zijn, verdwijnen; met **vergeten** haal je er zelf een weg. Rechten voor de API-key:
+  nieuwe poort openstaat. Een privé-adres (willekeurig MAC van een gsm of laptop) heet zo; neemt een toestel met een
+  naam een nieuw privé-adres met dezelfde hostnaam op dezelfde interface, en staat het oude adres niet meer in de
+  ARP-tabel, dan houdt het zijn naam (melding alleen in 🔔); anders is het een nieuw apparaat, met die naam als hint.
+  Meerdere nieuwe apparaten in één ronde geven één melding. Onbekende apparaten en de oude adressen van zo'n toestel
+  die 30 dagen niet gezien zijn, verdwijnen, tenzij ze een naam, notitie of *volgen* hebben; met **vergeten** haal je
+  er zelf een weg. Rechten voor de API-key:
   *Diagnostics: ARP Table* en *Services: DHCP: Leases* (of *Services: Kea DHCP*)
 - **net → kaart**: een netwerkkaart van internet → OPNsense → NPM en de Proxmox-nodes met hun CT's en VM's, met de
   services erop, in live kleuren. Klik op een node, CT/VM, OPNsense of NPM en je ziet meteen wat er mee uitvalt (ook
