@@ -236,6 +236,21 @@ def test_pool_sizes_leave_room():
     assert (e.pool.size(), e.pool._max_overflow) == (20, 20)
 
 
+async def test_databasefout_in_de_logs_zonder_de_waarden():
+    """Een databasefout komt in de logs, en die gaan mee in de diagnose: zonder de waarden (een cronregel, een header
+    of syslogtekst kan een wachtwoord bevatten)."""
+    e = make_engine("postgresql+asyncpg://u:p@localhost/x")
+    assert e.sync_engine.hide_parameters is True
+    e = make_engine(TEST_DB)
+    try:
+        async with e.connect() as c:
+            with pytest.raises(Exception) as err:
+                await c.execute(text("SELECT :pw FROM bestaat_niet"), {"pw": "geheim-in-een-cronregel"})
+    finally:
+        await e.dispose()
+    assert "bestaat_niet" in str(err.value) and "geheim-in-een-cronregel" not in str(err.value)
+
+
 @needs_pg
 async def test_statement_timeout_on_app_connections(monkeypatch):
     e = make_engine(TEST_DB, "worker")

@@ -3,7 +3,7 @@ zonder iets te veranderen, met dezelfde calls als het echte werk."""
 
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs
 
 import httpx
@@ -200,6 +200,57 @@ async def test_proef_met_een_onderbroken_test(authed, monkeypatch):
     assert [(m, p) for m, p, _ in world.writes(n)] == [c[:2] for c in _calls(plan)]
 
 
+async def test_id_van_de_oude_test_ct_geldt_niet_als_bezet(authed, monkeypatch):
+    """De oude test-CT gaat eerst weg en de kopie krijgt zijn ID: Proxmox zou nu "bestaat al" zeggen, maar dat telt
+    niet. De proef vraagt het dus niet na (geen ✕), en zegt waarom het onzeker is."""
+    world, http, sid = await _setup(authed, monkeypatch)
+    make = _maker()
+    world.guests[9901] = {"type": "lxc", "vmid": 9901, "name": "hersteltest-110", "node": "pve50", "status": "stopped"}
+    world.conf[9901] = {"description": f"{restoretest.MARKER}: kopie van CT 110"}
+    old = (datetime.now(timezone.utc) - restoretest.STALE - timedelta(minutes=5)).isoformat()
+    await _put_state(make, running={"at": old, "vmid": 9901, "node": "pve50", "step": "opstarten"})
+
+    plan = (await authed.post("/api/restoretest/proef")).json()
+    assert ("DELETE", "/nodes/pve50/lxc/9901?purge=1&destroy-unreferenced-disks=1", None) in _calls(plan)
+    assert ("POST", "/nodes/pve50/lxc") in [c[:2] for c in _calls(plan)]
+    assert plan["title"].startswith("Hersteltest zou plex (105) terugzetten als CT 9901 op pve50")
+    assert not any("/cluster/nextid" in path for _, path, _, _ in world.full)
+    checks = {c["what"]: c for c in plan["checks"]}
+    free = checks["ID 9901 vrij in de hele cluster"]
+    assert free["ok"] is None and "oude test-CT" in free["detail"]
+    assert not any(c["ok"] is False for c in plan["checks"])
+
+    # Een ander vrij ID wordt wel in de hele cluster nagekeken.
+    await _put_state(make, running=None)
+    del world.guests[9901]
+    plan = (await authed.post("/api/restoretest/proef")).json()
+    assert any(path.endswith("/cluster/nextid?vmid=9901") for _, path, _, _ in world.full)
+    assert next(c for c in plan["checks"] if c["what"] == "ID 9901 vrij in de hele cluster")["ok"] is True
+
+
+async def test_onderbroken_test_blokkeert_de_knoppen_niet(authed, monkeypatch):
+    """Een "bezig" van meer dan 2 uur oud is een onderbroken test (de worker herstartte): de pagina toont hem als
+    onderbroken, niet als lopend, en de knoppen werken."""
+    world, http, sid = await _setup(authed, monkeypatch)
+    make = _maker()
+    old = (datetime.now(timezone.utc) - restoretest.STALE - timedelta(minutes=5)).isoformat()
+    stale = {"at": old, "vmid": 9901, "node": "pve50", "step": "opstarten"}
+    await _put_state(make, running=stale)
+    data = (await authed.get("/api/restoretest")).json()
+    assert data["running"] is None and data["interrupted"] == stale
+    assert (await authed.post("/api/restoretest/proef")).status_code == 200
+
+    fresh = {"at": datetime.now(timezone.utc).isoformat(), "step": "terugzetten"}
+    await _put_state(make, running=fresh)
+    data = (await authed.get("/api/restoretest")).json()
+    assert data["running"] == fresh and data["interrupted"] is None
+    assert (await authed.post("/api/restoretest/proef")).status_code == 409
+
+    await _put_state(make, running=None)
+    data = (await authed.get("/api/restoretest")).json()
+    assert data["running"] is None and data["interrupted"] is None
+
+
 async def test_automatisch_alleen_proef(authed, monkeypatch):
     world, http, sid = await _setup(authed, monkeypatch)
     make = _maker()
@@ -334,4 +385,29 @@ async def test_snapshot_verwijderen_proef_en_terugdraaien(authed, monkeypatch):
     agen, db = await _db()
     assert (await db.get(UpdateRun, ids[0])).snapshot["removed_at"]
     assert not (await db.get(UpdateRun, ids[1])).snapshot.get("removed_at")  # andere CT, zelfde naam
+    await agen.aclose()
+
+
+async def test_update_snapshot_van_een_ct_herkend_zonder_de_naam_van_de_node(authed):
+    """pct bewaart bij de snapshot de naam van de SSH-host van de node, en die kan anders heten dan de node in
+    Proxmox. Verwijderen via hw → snapshots herkent de run toch: terugdraaien wordt daarna niet meer aangeboden."""
+    name = "hp-upd-20261001-040000"
+    agen, db = await _db()
+    now = datetime.now(timezone.utc)
+    ct = UpdateRun(target="ssh:1:ct:105", target_name="plex", status="ok", finished_at=now,
+                   snapshot={"kind": "pct", "host_id": 1, "vmid": 105, "node": "proxmox-thuis", "name": name})
+    other = UpdateRun(target="ssh:1:ct:106", target_name="pihole", status="ok", finished_at=now,
+                      snapshot={"kind": "pct", "host_id": 1, "vmid": 106, "node": "proxmox-thuis", "name": name})
+    db.add_all([ct, other])
+    await db.commit()
+    assert [r.id for r in await snap.held_by(db, "pve50", "lxc", 105, name)] == [ct.id]
+    assert await snap.held_by(db, "pve50", "qemu", 105, name) == []  # een pct-snapshot is altijd van een CT
+    assert await snap.held_by(db, "pve50", "lxc", 105, "hp-upd-20261001-040001") == []
+    assert (await authed.get(f"/api/updates/runs/{ct.id}")).json()["can_rollback"]
+
+    assert await snap.mark_removed(db, "pve50", "lxc", 105, name) == [ct.id]
+    await db.commit()
+    assert not (await authed.get(f"/api/updates/runs/{ct.id}")).json()["can_rollback"]
+    assert (await authed.get(f"/api/updates/runs/{other.id}")).json()["can_rollback"]  # andere CT, zelfde naam
+    assert await snap.held_by(db, "pve50", "lxc", 105, name) == []
     await agen.aclose()

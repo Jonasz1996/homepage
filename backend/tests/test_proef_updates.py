@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 
 import asyncssh
 import httpx
+import pytest
+from cryptography.fernet import InvalidToken
 from sqlalchemy import func, select
 
 from app import setupcheck
@@ -345,3 +347,81 @@ async def test_snapshots_opruimen_als_proef(authed, monkeypatch):
     await db.refresh(old_ct)
     await db.refresh(old_vm)
     assert old_ct.snapshot["removed_at"] and old_vm.snapshot["removed_at"]
+
+
+async def test_proef_verdwenen_tegel_of_vm_is_een_zekere_fout(authed, monkeypatch):
+    """Bestaat de Proxmox-tegel of de VM niet meer, dan stopt de echte run zeker bij de snapshot: ✕, niet ?. Een
+    Proxmox die niet antwoordt (HTTP 500) blijft onzeker: dat kan straks weer lukken."""
+    g = await _group(authed)
+    sid = await _pve(authed, g)
+    weg = await _pve(authed, g)
+    vm, oud = Node(), Node()
+    hid = await _host(authed, "opnsense", await vm.start(), vm.key, source=f"pve:{weg}:qemu/100")
+    gone = await _host(authed, "oud", await oud.start(), oud.key, source=f"pve:{sid}:qemu/4242")
+    assert (await authed.delete(f"/api/services/{weg}")).status_code == 200
+    agen, db = await _db()
+    keys = [f"ssh:{hid}", f"ssh:{gone}"]
+    await _updates_state(db, [_t(keys[0], "opnsense", "host"), _t(keys[1], "oud", "host")])
+    calls = []
+    monkeypatch.setattr(router, "clients", HttpClients(httpx.MockTransport(_pve_with_tasks(calls))))
+
+    p = (await authed.post("/api/updates/install/proef", json={"targets": keys, "security_only": True})).json()
+    checks = {c["what"]: c for c in p["checks"]}
+    tile = checks["opnsense: snapshot via de Proxmox-API"]
+    assert tile["ok"] is False and "tegel van deze machine bestaat niet meer" in tile["detail"]
+    guest = checks["oud: snapshot via de Proxmox-API"]
+    assert guest["ok"] is False and "qemu 4242 niet gevonden in Proxmox" in guest["detail"]
+    snaps = [s for s in p["steps"] if s["via"] == "proxmox-api" and s["call"].endswith("/snapshot")]
+    assert len(snaps) == 2 and all(s["note"].startswith("de echte run stopt hier: ") for s in snaps)
+    assert vm.commands == [] and oud.commands == [] and all(m == "GET" for m, _ in calls)
+
+    # Proxmox antwoordt niet: onzeker, zoals voorheen.
+    monkeypatch.setattr(router, "clients", HttpClients(httpx.MockTransport(lambda req: httpx.Response(500))))
+    p = (await authed.post("/api/updates/install/proef", json={"targets": keys[1:], "security_only": True})).json()
+    c = next(c for c in p["checks"] if "Proxmox-API" in c["what"])
+    assert c["ok"] is None and "HTTP 500" in c["detail"]
+    assert p["steps"][0]["note"] == "de naam krijgt het tijdstip van de echte run"
+
+
+async def test_opruimproef_stopt_waar_het_opruimen_stopt(authed):
+    """Een SSH-login die niet te lezen is, stopt de hele ronde van cleanup_snapshots: de proef toont voor de snapshots
+    erna geen stap, maar zegt dat ze niet bereikt worden."""
+    g = await _group(authed)
+    sid = await _pve(authed, g)
+    agen, db = await _db()
+    # Versleuteld met een andere sleutel (bv. na een nieuwe secret.key).
+    h = SshHost(name="pve50", host="192.168.0.50", password="gAAAAABnietmetdezesleutel0123456789abcdef",
+                host_key="ssh-ed25519 AAAA")
+    db.add(h)
+    await db.flush()
+    old = datetime.now(timezone.utc) - timedelta(days=10)
+    db.add_all([
+        UpdateRun(target="plex", target_name="plex", trigger="manueel", security_only=False, status="ok",
+                  reboot_needed=False, finished_at=old,
+                  snapshot={"kind": "pct", "host_id": h.id, "vmid": 105, "node": "pve50",
+                            "name": "hp-upd-20261001-030000"}),
+        UpdateRun(target="opnsense", target_name="opnsense", trigger="manueel", security_only=False, status="ok",
+                  reboot_needed=False, finished_at=old,
+                  snapshot={"kind": "api", "service_id": sid, "type": "qemu", "vmid": 100, "node": "pve50",
+                            "name": "hp-upd-20261001-031000"}),
+    ])
+    await db.commit()
+    calls = []
+    plan = await upgrade.describe_cleanup(db, HttpClients(httpx.MockTransport(_pve_with_tasks(calls))))
+    assert plan["steps"] == [] and calls == []
+    skipped = {x["what"]: x["why"] for x in plan["skipped"]}
+    assert skipped["hp-upd-20261001-030000 van plex"].startswith("de SSH-login is niet te lezen (")
+    assert "het opruimen stopt hier" in skipped["hp-upd-20261001-030000 van plex"]
+    assert skipped["hp-upd-20261001-031000 van opnsense"] == \
+        "niet bereikt: het opruimen stopt bij hp-upd-20261001-030000"
+    # Ze staan nog in de lijst van wat weg zou gaan: zo komt er een nieuwe regel op de tijdlijn als dat verandert.
+    assert {s["name"] for s in plan["snapshots"]} == {"hp-upd-20261001-030000", "hp-upd-20261001-031000"}
+
+    # In het echt: de ronde stopt bij de eerste, Proxmox krijgt niets te doen en beide snapshots blijven staan.
+    with pytest.raises(InvalidToken):
+        await upgrade.cleanup_snapshots(_maker_from(agen), HttpClients(httpx.MockTransport(_pve_with_tasks(calls))))
+    assert calls == []
+    for r in (await db.execute(select(UpdateRun))).scalars():
+        await db.refresh(r)
+        assert not r.snapshot.get("removed_at")
+    await agen.aclose()

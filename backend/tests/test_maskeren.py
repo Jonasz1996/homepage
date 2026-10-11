@@ -1,6 +1,7 @@
+import logging
 from collections import Counter
 
-from app import proef
+from app import logring, proef
 from app.masking import basic, mask, mask_tree, variants
 
 
@@ -63,3 +64,50 @@ def test_plan_nummert_maskeert_en_wordt_tekst():
     assert "✓ hostsleutel bevestigd" in t and "? token mag snapshots: niet na te gaan" in t
     assert "overgeslagen: pve51: fysieke machine" in t and "daarna: updates opnieuw scannen" in t
     assert "Er zou niets gebeuren." in proef.text(proef.plan("leeg", []))
+
+
+def test_waarde_tussen_aanhalingstekens_helemaal_gemaskeerd():
+    """Een wachtwoord met spaties of een komma tussen aanhalingstekens: de hele waarde, niet alleen het eerste stuk."""
+    cases = {
+        '{"password": "correct horse battery staple"}': '{"password": "***"}',
+        "{'password': 'p,ss'}": "{'password': '***'}",
+        'password: "abc': 'password: "***',  # geen sluitend aanhalingsteken: tot de volgende spatie
+        '{"db_password": "a\\"b c", "user": "jonas"}': '{"db_password": "***", "user": "jonas"}',
+    }
+    for raw, want in cases.items():
+        assert mask(raw) == want, raw
+        assert mask(want) == want, want  # al gemaskeerd: blijft zo
+
+
+def test_afkappen_laat_geen_losse_waarde_achter():
+    """Valt de snede in "password: hunter2pw" of "Bearer ...", dan verdwijnt ook de waarde: een losse waarde zonder
+    haar naam herkent het maskeren niet meer. Zoals een property-test: elke plaats van de snede."""
+    words = " ".join(f"w{i:03d}" for i in range(60))
+    for secret, value in (("password: hunter2pw", "hunter2pw"), ("password = hunter2pw", "hunter2pw"),
+                          ("Bearer abcdefghijklmnop", "abcdefghijklmnop")):
+        text = f"{words} {secret} {words}"
+        at = text.index(secret)
+        seen = set()
+        for n in range(8, len(text)):
+            # cut houdt n // 4 tekens vooraan en de rest achteraan: daar begint het einde.
+            start = len(text) - (n - n // 4 - 3)
+            if not at <= start <= at + len(secret):
+                continue
+            seen.add(start)
+            out = mask(logring.cut(text, n))
+            assert value not in out, (secret, n, out)
+        assert seen == set(range(at, at + len(secret) + 1))
+
+
+def test_logregel_zonder_nul():
+    """PostgreSQL weigert \\u0000 in JSONB: met een NUL in de ring zou het bewaren van de regels blijven mislukken."""
+    h = logring.RingHandler(size=3)
+    lg = logging.getLogger("homepage.test.nul")
+    lg.addHandler(h)
+    lg.propagate = False
+    try:
+        lg.warning("syslog van %s: a\x00b\x00", "nas")
+        assert h.tail()[-1]["msg"] == "syslog van nas: ab"
+    finally:
+        lg.removeHandler(h)
+        lg.propagate = True

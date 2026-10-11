@@ -346,6 +346,7 @@ async def test_proef_met_controle_en_daarna_echt(authed, tmp_path, fakebin):
     assert any(w.startswith("Op PBS-Pi: remote pbs-vm bestaat al: wordt overschreven") for w in pl["warnings"])
     assert any("token homepage-sync@pbs!pbs-pi bestaat al: wordt vervangen" in w for w in pl["warnings"])
     assert log[0].startswith("$ proef op PBS-VM (127.0.0.1)") and any("+ proxmox-backup-manager" in x for x in log)
+    assert pl["after"][0] == "melding en tijdlijn: PBS-sync ingesteld: PBS-VM → PBS-Pi" and len(pl["after"]) == 3
     # Alleen een auditregel (de proef meldde zich aan als root), geen melding en niets op de tijdlijn.
     audit, events, notes = await _counts(db)
     assert (audit, events, notes) == (before[0] + 1, before[1], before[2])
@@ -377,6 +378,9 @@ async def test_proef_met_controle_en_daarna_echt(authed, tmp_path, fakebin):
     r = (await authed.post("/api/backups/sync/proef", json=plan)).json()["plan"]
     assert [x.split()[1:3] for x in r["steps"][1]["call"].splitlines()] == [["remote", "update"]]
     assert any("sync-job pbs-vm-naar-pbs-pi bestaat al: blijft zoals hij is" in w for w in r["warnings"])
+    # De controle weet het, ook al zien de bewaarde gegevens van de tegel de sync-job nog niet.
+    assert r["after"][0].startswith("melding en tijdlijn: PBS-sync bijgewerkt: PBS-VM → PBS-Pi")
+    assert not any("elke dag om 06:00" in x for x in r["after"])
     r = await authed.post("/api/backups/sync/create", json=plan)
     assert r.status_code == 200 and r.json()["job_existed"]
     title, level, body = (await _notes(db, "backup"))[-1]
@@ -515,3 +519,38 @@ async def test_doel_faalt_geheim_gemaskeerd(authed, monkeypatch):
     r = await authed.post("/api/backups/sync/create", json=plan)
     assert r.status_code == 502 and SECRET not in r.text and "Op PBS-Pi mislukt (exit 1)" in r.text
     assert await _notes(db, "backup") == []
+
+
+async def test_proef_zegt_wat_daarna_volgt_als_de_sync_job_al_bestaat(authed, monkeypatch):
+    """Bestaat de sync-job al volgens de laatste gegevens, dan laat de echte run hem staan (ook zijn uur) en zegt de
+    melding "bijgewerkt": de proef belooft dan geen nieuw uur. Zonder SSH-controle."""
+    async def no_ssh(*a, **kw):
+        raise AssertionError("de proef zonder controle mag geen SSH openen")
+    monkeypatch.setattr(pbssync, "_run", no_ssh)
+    world = Lab()
+    vm, pi, db, plan, agen = await _setup(authed, world)
+    http = HttpClients(httpx.MockTransport(world))
+
+    async def after(syncs):
+        world.syncs = syncs
+        await coverage.run_coverage(db, http)
+        await db.commit()
+        pl = (await authed.post("/api/backups/sync/proef", json=plan)).json()["plan"]
+        assert not pl["controle"]
+        return pl["after"]
+
+    job = {"store": "pi", "remote": "pbs-vm", "remote-store": "backup", "schedule": "21:00", "last-run-state": "OK"}
+    a = await after([{**job, "id": "pbs-vm-naar-pbs-pi"}])
+    assert a[0] == ("melding en tijdlijn: PBS-sync bijgewerkt: PBS-VM → PBS-Pi (sync-job pbs-vm-naar-pbs-pi bestond "
+                    "al en blijft zoals hij was)")
+    assert "06:00 wordt niet ingesteld" in a[2] and not any("elke dag om 06:00" in x for x in a)
+
+    # Een andere sync-job: deze bestaat nog niet en wordt ingesteld, met het uur.
+    a = await after([{**job, "id": "iets-anders"}])
+    assert a[0] == "melding en tijdlijn: PBS-sync ingesteld: PBS-VM → PBS-Pi"
+    assert "PBS-Pi haalt zelf elke dag om 06:00 een kopie op" in a[2] and len(a) == 3
+
+    # De tegel ziet geen remotes of sync-jobs: onzeker, en dat staat erbij.
+    a = await after([])
+    assert a[0] == "melding en tijdlijn: PBS-sync ingesteld: PBS-VM → PBS-Pi"
+    assert "bestaat sync-job pbs-vm-naar-pbs-pi toch al" in a[-1] and "'PBS-sync bijgewerkt'" in a[-1]

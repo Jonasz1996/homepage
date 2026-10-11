@@ -372,6 +372,51 @@ async def test_geheimen_gemaskeerd(authed, ring, monkeypatch):
     assert not set(diagnose.DENY) & set(d["achtergrond"])
 
 
+async def test_cronregels_en_mislukte_loginnamen_niet_in_de_export(authed):
+    """Een cronregel kan een wachtwoord bevatten (mysqldump -p...), en wie zich vergist typt zijn wachtwoord soms in
+    het vak van de gebruikersnaam. Geen patroon herkent die: ze gaan er helemaal niet in."""
+    agen, db = await _db()
+    db.add_all([
+        Event(kind="cron", title="Nieuwe cronjob op nas", body="0 3 * * * mysqldump -u root -pS3cretDbPw --all"),
+        Event(kind="cron", title="Cronjob weg op nas", body=None),
+        Event(kind="melding", title="Back-up klaar", body="plex: 2 GB"),
+        AuditLog(action="login_failed", detail={"username": "MijnEchtWachtwoord!"}, ip="192.168.0.10"),
+        AuditLog(action="login_failed", detail={"username": "jonas"}, ip="192.168.0.11"),
+    ])
+    await db.commit()
+    await agen.aclose()
+
+    r = await authed.get("/api/diagnose")
+    assert r.status_code == 200, r.text
+    assert "S3cretDbPw" not in r.text and "MijnEchtWachtwoord" not in r.text
+    d = r.json()
+    bodies = {e["title"]: e["body"] for e in d["tijdlijn"]}
+    assert bodies["Nieuwe cronjob op nas"] == diagnose.WITHHELD
+    assert bodies["Cronjob weg op nas"] is None and bodies["Back-up klaar"] == "plex: 2 GB"
+    # Een bestaande gebruiker blijft staan: dan is het een gewone mislukte login.
+    failed = {a["ip"]: a["detail"] for a in d["audit"] if a["action"] == "login_failed"}
+    assert failed == {"192.168.0.10": {"username": "***"}, "192.168.0.11": {"username": "jonas"}}
+
+
+async def test_zwak_wachtwoord_niet_overal_vervangen(authed):
+    """Een gewoon woord als wachtwoord overal door *** vervangen zou het net verraden ("***-diagnose-…"). Alleen de
+    patronen vangen het, en de export zegt dat het er is."""
+    agen, db = await _db()
+    db.add(SshHost(name="nas", host="192.168.0.9", username="beheer", password=encrypt("homepage")))
+    db.add(Notification(title="NAS", body="https://beheer:homepage@nas.lan/api faalt, password=homepage"))
+    await db.commit()
+    await agen.aclose()
+
+    r = await authed.get("/api/diagnose")
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["bestand"].startswith("homepage-diagnose-")
+    assert r.headers["content-disposition"] == f'attachment; filename="{d["bestand"]}"'
+    assert d["gemaskeerd"]["zwak"] >= 1 and "kort of een gewoon woord" in d["let_op"]
+    [n] = [x for x in d["meldingen"] if x["title"] == "NAS"]
+    assert n["body"] == "https://beheer:***@nas.lan/api faalt, password=***"
+
+
 async def test_onleesbare_geheimen_geteld(authed):
     agen, db = await _db()
     db.add(SshHost(name="oud", host="10.0.0.1", password="gAAAAABnietmetdezesleutel0123456789abcdef"))
@@ -509,6 +554,21 @@ async def test_flush_alleen_bij_nieuwe_regels(client, ring):
             raise AssertionError("logs:syslog niet bewaard")
     finally:
         task.cancel()
+    await agen.aclose()
+
+
+async def test_hartslag_ook_als_de_logregels_niet_in_de_database_kunnen(client, monkeypatch, caplog):
+    """Kan flush() niet bewaren (zoals PostgreSQL met een NUL in JSONB), dan blijft de hartslag van de worker toch
+    komen: anders zou het dashboard melden dat de worker niet meer draait."""
+    async def broken(db, role):
+        raise ValueError("unsupported Unicode escape sequence")
+    monkeypatch.setattr(logring, "flush", broken)
+    agen, db = await _db()
+    maker = async_sessionmaker(db.bind, expire_on_commit=False)
+    await Worker.beat(SimpleNamespace(maker=maker, started=datetime.now(timezone.utc)))
+    st = await db.get(AppState, "worker")
+    assert st is not None and st.value["pid"] == os.getpid()
+    assert "eigen logregels bewaren mislukt" in caplog.text
     await agen.aclose()
 
 
