@@ -479,7 +479,10 @@
   // Snelkoppelingen van de app (manifest) en de Android-app: /?open=history, updates, network, ...
   function openFromUrl() {
     const q = new URLSearchParams(location.search)
-    const what = q.get('open')
+    // Terug van Authentik na het koppelen (⚿ → authentik), met de fout als het niet lukte. Komt een loginfout terug
+    // terwijl je al ingelogd bent, dan was het ook een koppeling: zelfde venster.
+    const ssoErr = q.get('oidc_error') || q.get('login_error') || ''
+    const what = q.get('open') || (ssoErr ? 'security' : null)
     if (!what) return
     history.replaceState(null, '', location.pathname)
     const kinds = { history: 'history', report: 'history', updates: 'updates', network: 'network', capacity: 'capacity',
@@ -493,6 +496,7 @@
     else if (what === 'kaart') modal = { kind: 'network', tab: 'kaart' }
     else if (what === 'aandacht' || what === 'instellingen') modal = { kind: 'attention', tab: what === 'aandacht' ? 'nu' : what }
     else if (what === 'melding') openPushed(q.get('n'))
+    else if (what === 'security') modal = { kind: 'security', tab: ssoErr || q.get('tab') === 'sso' ? 'sso' : undefined, error: ssoErr }
     else if (kinds[what]) modal = { kind: kinds[what], tab: what === 'report' ? 'report' : undefined }
   }
   // Tik op een pushbericht (/?open=melding&n=<id>): hetzelfde openen als een klik in het meldingencentrum.
@@ -823,7 +827,7 @@
 {:else if modal?.kind === 'updates'}
   <Lazy load={() => import('./Updates.svelte')} onclose={() => (modal = null)} onchanged={loadUpdates} />
 {:else if modal?.kind === 'security'}
-  <Lazy load={() => import('./Security.svelte')} tab={modal.tab} onclose={() => { modal = null; loadWhere() }} />
+  <Lazy load={() => import('./Security.svelte')} tab={modal.tab} error={modal.error} onclose={() => { modal = null; loadWhere() }} />
 {:else if modal?.kind === 'news'}
   <Lazy load={() => import('./Changelog.svelte')} entries={modal.entries} version={modal.version}
         onclose={() => { modal = null; markNews() }} />

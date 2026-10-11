@@ -31,6 +31,11 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     last_login_at: Mapped[datetime | None]
     last_login_ip: Mapped[str | None] = mapped_column(String(64))
+    # Gekoppeld Authentik-account: de uitgever (iss) en de vaste ID (sub) uit het ID-token. Alleen daarop wordt een
+    # login via Authentik herkend, nooit op de naam. oidc_name dient alleen om te tonen welk account gekoppeld is.
+    oidc_issuer: Mapped[str | None] = mapped_column(String(300))
+    oidc_sub: Mapped[str | None] = mapped_column(String(255), unique=True)
+    oidc_name: Mapped[str | None] = mapped_column(String(64))
 
 
 class Session(Base):
