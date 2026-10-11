@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.engine import URL, make_url
+from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.health import selfcheck as sc
