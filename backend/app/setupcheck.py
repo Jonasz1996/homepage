@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .health import scan as hw, security
 from .integrations import IntegrationError, build
-from .models import (AppState, CronJob, HealRule, LogEntry, PushMonitor, Service, ServiceState, SshHost,
+from .models import (AppState, CronJob, HealRule, LogEntry, PushMonitor, Service, ServiceState, SshHost, User,
                      WebhookSource)
 from .monitoring import (cluster, configs, coverage, devices, pbssync, restoretest, routes, upgrade, watchdog, webpush,
                          zabbix as zbx)
@@ -549,10 +549,21 @@ async def safety(db: AsyncSession, cfg: dict) -> list[dict]:
     out.append(row("outside", "beveiliging", "Van buitenaf", "half" if c["level"] == "warn" else "ok", c["text"],
                    fix={"window": "security", "tab": "outside"}))
     oidc = await _state(db, "oidc")
-    out.append(row("authentik", "beveiliging", "Inloggen via Authentik", "ok" if oidc.get("enabled") else "none",
-                   "Staat aan." if oidc.get("enabled") else "Inloggen gaat met je wachtwoord en 2FA.",
-                   [] if oidc.get("enabled") else ["Optioneel: sleutel-icoon → authentik, met client id en secret."],
-                   {"window": "security", "tab": "sso"}, optional=True))
+    sso = {"window": "security", "tab": "sso"}
+    linked = (await db.execute(select(func.count()).select_from(User).where(User.oidc_sub.is_not(None)))).scalar_one()
+    if oidc.get("enabled") and not linked:
+        # Het dashboard herkent een Authentik-account alleen nog aan zijn vaste ID: zonder koppeling geen login.
+        out.append(row("authentik", "beveiliging", "Inloggen via Authentik", "half",
+                       "Staat aan, maar er is nog geen Authentik-account gekoppeld: inloggen via Authentik werkt pas "
+                       "daarna. Wachtwoord en 2FA werken gewoon.",
+                       ["Ingelogd met wachtwoord en 2FA: sleutel-icoon → authentik → Koppel Authentik-account."], sso,
+                       optional=True))
+    else:
+        on = bool(oidc.get("enabled"))
+        out.append(row("authentik", "beveiliging", "Inloggen via Authentik", "ok" if on else "none",
+                       "Staat aan." if on else "Inloggen gaat met je wachtwoord en 2FA.",
+                       [] if on else ["Optioneel: sleutel-icoon → authentik, met client id en secret."], sso,
+                       optional=True))
     return out
 
 

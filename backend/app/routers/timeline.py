@@ -25,6 +25,8 @@ AUDIT_TITLES = {
                              + (f"{d.get('minutes')} min" if d.get("minutes") else "gestopt"),
     "syslog_rollout": lambda d: f"rsyslog uitgerold op {d.get('host')}",
     "oidc_settings_changed": lambda d: "Authentik-instellingen gewijzigd",
+    # (Koppelen geeft zelf een melding, en staat zo al op de tijdlijn.)
+    "oidc_unlinked": lambda d: "Authentik-account ontkoppeld",
     "password_changed": lambda d: "Wachtwoord gewijzigd",
     "service_secrets_changed": lambda d: f"Geheimen van {d.get('service')} gewijzigd",
     "ssh_host_added": lambda d: f"SSH-host {d.get('name')} toegevoegd",

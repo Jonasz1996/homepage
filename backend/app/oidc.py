@@ -2,8 +2,9 @@
 
 Authorization code flow met PKCE, state en nonce. Het ID-token wordt gecontroleerd met de sleutels van de
 provider (JWKS, RS256/ES256) of, als Authentik geen signing key heeft, met het client secret (HS256).
-Alleen bestaande gebruikers kunnen zo inloggen: de gebruikersnaam bij Authentik moet gelijk zijn aan die
-in het dashboard. 2FA gebeurt dan bij Authentik; standaard eist het dashboard dat het ID-token dat ook zegt.
+Alleen bestaande gebruikers kunnen zo inloggen, en alleen met het Authentik-account dat ze zelf gekoppeld hebben:
+het dashboard herkent dat aan de uitgever en de vaste ID (iss en sub), nooit aan de naam. 2FA gebeurt dan bij
+Authentik; standaard eist het dashboard dat het ID-token dat ook zegt.
 """
 
 import base64
@@ -154,6 +155,18 @@ def check_claims(claims: dict, issuer: str, client_id: str, nonce: str, now: flo
         raise OidcError("ID-token is verlopen")
     if claims.get("nonce") != nonce:
         raise OidcError("Nonce klopt niet (oude of vervalste login)")
+    # De vaste ID van het account; verplicht volgens de standaard, en het enige waarop het dashboard je herkent.
+    sub = claims.get("sub")
+    if not isinstance(sub, str) or not sub or len(sub) > 255:
+        raise OidcError("ID-token zonder sub (vaste ID van het account)")
+
+
+def subject_is_name(claims: dict, name_claim: str = "preferred_username") -> bool:
+    """Is de sub gewoon de gebruikersnaam of het e-mailadres? (Subject mode bij de provider in Authentik.) Die kunnen
+    veranderen of later bij iemand anders terechtkomen: dan is de sub geen vaste ID."""
+    sub = str(claims.get("sub") or "").strip().lower()
+    names = {str(claims.get(k) or "").strip().lower() for k in ("preferred_username", "email", "upn", name_claim)}
+    return bool(sub) and sub in names
 
 
 def has_mfa(claims: dict) -> bool:
