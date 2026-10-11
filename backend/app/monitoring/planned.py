@@ -5,6 +5,7 @@ Een herhalend venster gebruikt het uur en de minuut van `start` in de lokale tij
 """
 
 from datetime import datetime, timedelta, timezone
+from math import ceil
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -120,15 +121,16 @@ async def apply(db: AsyncSession, now: datetime | None = None) -> int:
 async def stop(db: AsyncSession, w: MaintenanceWindow, now: datetime | None = None) -> None:
     """Venster verwijderd of uitgezet terwijl het loopt: het onderhoud dat het zette, meteen beëindigen. Een ouder
     herhalend venster van meer dan REPEAT_MAX kan dat nog met zijn volle lengte gezet hebben (tot begin + w.minutes,
-    van vóór de grens): ook dat stopt, tot die volle lengte voorbij is."""
+    van vóór de grens): ook dat stopt, tot die volle lengte voorbij is. Alleen wat het venster zelf zette (precies tot
+    het einde van een keer, of tot de volle lengte): onderhoud dat met de hand verlengd is, blijft staan."""
     now = now or datetime.now(timezone.utc)
     if not w.enabled:
         return
-    for st, en in occurrences(w, now):
-        full = max(en, st + timedelta(minutes=w.minutes))
+    # Zo ver terug als het venster bewaard is: een ouder venster van vrijdag 18 u voor 60 uur loopt zondag nog.
+    for st, en in occurrences(w, now - timedelta(minutes=w.minutes), days=ceil(w.minutes / 1440) + 1):
+        full = st + timedelta(minutes=w.minutes)
         if not st - LEAD <= now < full:
             continue
         for s in await targets(db, w):
-            until = _aware(s.maintenance_until)
-            if until is not None and en <= until <= full:
+            if _aware(s.maintenance_until) in (en, full):
                 s.maintenance_until = now

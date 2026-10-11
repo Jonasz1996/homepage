@@ -455,7 +455,8 @@
     } else {
       return
     }
-    // Een tegel naar een groep slepen waar nu gepland onderhoud loopt, legt zijn check stil: dat vraagt je 2FA.
+    // Een tegel naar een groep slepen met gepland onderhoud (nu of later), legt zijn check (of wat eronder hangt)
+    // stil: dat vraagt je 2FA.
     await act(() => withReauth(() => api('/layout/order', { method: 'PUT', body })))
   }
 

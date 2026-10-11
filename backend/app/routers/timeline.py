@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
@@ -33,6 +33,15 @@ AUDIT_TITLES = {
     "log_rule_added": lambda d: f"Logregel {d.get('name')} toegevoegd",
     "integration_action_failed": lambda d: f"{d.get('service')}: {d.get('op')} mislukt",
 }
+# Tot de update met migratie 0024 stonden deze acties alleen in de auditlog: die oude regels (van vóór het moment in
+# app_state LEGACY_KEY) blijven op de tijdlijn. Wat daarna kwam, staat er via de melding of gebeurtenis van de route.
+LEGACY_TITLES = {
+    "maintenance": lambda d: f"Onderhoud {d.get('service') or d.get('group') or ''}: "
+                             + (f"{d.get('minutes')} min" if d.get("minutes") else "gestopt"),
+    "password_changed": lambda d: "Wachtwoord gewijzigd",
+    "log_rule_deleted": lambda d: f"Logregel {d.get('name')} verwijderd",
+}
+LEGACY_KEY = "tijdlijn_audit_tot"
 KINDS = ("storing", "herstart", "backup", "updates", "wijziging", "actie", "capaciteit", "netwerk", "toegang", "log", "cron",
          "gezondheid", "melding")
 
@@ -68,14 +77,18 @@ async def timeline(before: datetime | None = None, kind: list[str] | None = Quer
         for rid, ts, summary in (await db.execute(q)).all():
             items.append({"id": f"r{rid}", "ts": _aware(ts), "kind": "wijziging", "level": "info", "title": summary,
                           "body": None, "service_id": None, "data": {"revision": rid}})
-        q = select(AuditLog).where(AuditLog.action.in_(AUDIT_TITLES)).order_by(AuditLog.id.desc()).limit(limit)
+        which = AuditLog.action.in_(AUDIT_TITLES)
+        if (legacy := await db.get(AppState, LEGACY_KEY)) and (legacy.value or {}).get("tot"):
+            which = or_(which, and_(AuditLog.action.in_(LEGACY_TITLES),
+                                    AuditLog.ts < _aware(datetime.fromisoformat(legacy.value["tot"]))))
+        q = select(AuditLog).where(which).order_by(AuditLog.id.desc()).limit(limit)
         if before:
             q = q.where(AuditLog.ts < before)
         for a in (await db.execute(q)).scalars():
             items.append({"id": f"a{a.id}", "ts": _aware(a.ts), "kind": "wijziging",
                           "level": "err" if a.action.endswith("failed") else "info",
-                          "title": AUDIT_TITLES[a.action](a.detail or {}), "body": None, "service_id": None,
-                          "data": {"ip": a.ip}})
+                          "title": (AUDIT_TITLES.get(a.action) or LEGACY_TITLES[a.action])(a.detail or {}),
+                          "body": None, "service_id": None, "data": {"ip": a.ip}})
 
     items.sort(key=lambda i: i["ts"], reverse=True)
     items = items[:limit]
