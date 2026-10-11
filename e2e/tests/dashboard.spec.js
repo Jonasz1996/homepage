@@ -110,7 +110,7 @@ test('bewerkmodus: pagina, groep en tegel', async () => {
 // Elk venster uit de menu's in de titelbalk opent en kan weer dicht.
 const MENUS = {
   Infrastructuur: ['Gezondheid', 'Capaciteit', 'Netwerk', 'Cronjobs', 'Logs', 'Tijdlijn'],
-  Beheer: ['Terminal', 'Updates', 'Gepland onderhoud', 'Configuratiewijzigingen', 'Hersteltest'],
+  Beheer: ['Nieuwe service', 'Terminal', 'Updates', 'Gepland onderhoud', 'Configuratiewijzigingen', 'Hersteltest'],
   Instellingen: ['Beveiliging', 'API-beheer', 'Webhooks', 'Meldingen op je gsm', 'Instellingen-checklist', 'Wat is er nieuw'],
 }
 const closeButtons = () => page.locator('button[aria-label="Sluiten"], button[aria-label$=" sluiten"]:not([aria-label="Sessie sluiten"])')
@@ -316,4 +316,79 @@ test('gsm: knoppen achter het menu', async () => {
   await page.keyboard.press('Escape')
   await expect(page.getByRole('menu')).toHaveCount(0)
   await page.setViewportSize({ width: 1400, height: 900 })
+})
+
+test('nieuwe service: proef zegt wat ontbreekt', async () => {
+  await menu('Beheer', 'Nieuwe service')
+  const win = page.getByRole('dialog', { name: 'service new' })
+  await page.fill('#ns-name', 'test')
+  await page.fill('#ns-ip', '192.168.0.50')
+  await page.fill('#ns-port', '8080')
+  await page.check('#ns-lan')
+  await win.getByRole('button', { name: 'proef', exact: true }).click()
+  await expect(win.getByText('er is niets uitgevoerd')).toBeVisible()
+  await expect(win.getByText('Geen NPM-API').first()).toBeVisible()
+  await expect(win.getByRole('button', { name: 'uitvoeren' })).toHaveCount(0)
+  await page.fill('#ns-port', '8081')
+  await expect(win.getByText('Gewijzigd na de proef')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(win).toHaveCount(0)
+})
+
+test('nieuwe service: opruimen zonder iets te vinden', async () => {
+  await menu('Beheer', 'Nieuwe service')
+  const win = page.getByRole('dialog', { name: 'service new' })
+  await win.getByRole('tab', { name: 'opruimen' }).click()
+  await page.fill('#nc-fqdn', 'oud')
+  await win.getByRole('button', { name: 'proef', exact: true }).click()
+  await expect(win.getByText('Er zou niets gebeuren.')).toBeVisible()
+  await expect(win.getByRole('button', { name: 'opruimen', exact: true })).toBeDisabled()
+  await page.keyboard.press('Escape')
+  await expect(win).toHaveCount(0)
+})
+
+test('nieuwe service op de gsm', async () => {
+  await page.setViewportSize({ width: 393, height: 852 })
+  await page.getByRole('button', { name: 'Menu' }).click()
+  await page.getByRole('menuitem', { name: /^Nieuwe service/ }).click()
+  await expect(page.locator('#ns-ip')).toBeVisible()
+  await expect(page.locator('#ns-port')).toBeVisible()
+  // Niets in het venster steekt rechts uit (geen horizontaal scrollen).
+  const breed = await page.evaluate(() => Math.max(document.documentElement.scrollWidth,
+    ...[...document.querySelectorAll('[role=dialog] *')].map((e) => Math.ceil(e.getBoundingClientRect().right))))
+  expect(breed).toBeLessThanOrEqual(393)
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('dialog', { name: 'service new' })).toHaveCount(0)
+  await page.setViewportSize({ width: 1400, height: 900 })
+})
+
+test('tegel: opruimen… alleen voor namen in het domein', async () => {
+  // Een Cloudflare DNS-API met alleen de zone: het domein komt uit de database, zonder call naar buiten.
+  const r = await page.request.post('/api/apis', { headers: { 'X-Requested-With': 'homepage' },
+    data: { name: 'Cloudflare DNS', kind: 'cloudflare', url: 'https://api.cloudflare.com/client/v4', config: { zone: 'jbogaert.be' } } })
+  expect(r.status()).toBe(201)
+  await menu('Beheer', 'Dashboard bewerken')
+  for (const [name, url] of [['Test', 'https://test.jbogaert.be'], ['PVE', 'https://192.168.0.5:8006']]) {
+    await page.getByRole('button', { name: 'Service toevoegen aan Infra' }).click()
+    await page.fill('#sf-name', name)
+    await page.fill('#sf-url', url)
+    await page.getByRole('button', { name: 'Opslaan' }).click()
+    await expect(page.locator('.tile', { hasText: name })).toBeVisible()
+  }
+  await page.getByRole('button', { name: '✓ klaar' }).click()
+
+  await page.locator('.tile', { hasText: 'Test' }).hover()
+  await page.getByRole('button', { name: 'Details van Test' }).click()
+  await page.getByRole('button', { name: 'opruimen…' }).click()
+  const win = page.getByRole('dialog', { name: 'service new' })
+  await expect(win.getByRole('tab', { name: 'opruimen' })).toHaveAttribute('aria-selected', 'true')
+  await expect(page.locator('#nc-tile option:checked')).toHaveText(/^Test /)
+  await page.keyboard.press('Escape')
+  await expect(win).toHaveCount(0)
+
+  await page.locator('.tile', { hasText: 'PVE' }).hover()
+  await page.getByRole('button', { name: 'Details van PVE' }).click()
+  await expect(page.getByRole('button', { name: '✎ bewerken' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'opruimen…' })).toHaveCount(0)
+  await page.keyboard.press('Escape')
 })
