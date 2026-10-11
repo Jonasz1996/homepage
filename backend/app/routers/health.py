@@ -57,6 +57,7 @@ def _summary(hardware: dict, snaps: dict, domains: dict, selfc: dict, worker: di
     warn = sum(1 for d in disks if d.get("level") == "warn") + sum(
         1 for h in hosts for p in h.get("pools", []) if p.get("level") in ("warn", "err"))
     warn += sum(1 for h in hosts if (h.get("throttle") or {}).get("now")) + (disk == "warn")
+    warn += bool((selfc.get("rollup") or {}).get("late"))
     hot = [h["name"] for h in hosts if h.get("cpu_temp") is not None and h["cpu_temp"] >= cfg["cpu_warn"]]
     return {"err": err + len(problems) + sum(1 for d in soon if d["days_left"] <= 7),
             "warn": warn + len(old) + len(hot) + sum(1 for d in soon if d["days_left"] > 7),

@@ -14,8 +14,8 @@ from .health import domains as dom, scan as hw, security, selfcheck as sc, snaps
 from .integrations import REGISTRY
 from .integrations.zabbix import RED_FROM
 from .models import AppState, CronJob, Device, MaintenanceWindow, Service, ServiceState, UpdateRun
-from .monitoring import cluster, coverage, planned, restoretest, updates as upd, zabbix as zbx
-from .monitoring.engine import MASS_KEY, active
+from .monitoring import cluster, coverage, planned, restoretest, rollup, updates as upd, zabbix as zbx
+from .monitoring.engine import KEEP_CHECKS_DAYS, MASS_KEY, active
 
 ACK_KEY = "attention_ack"
 RANK = {"err": 0, "warn": 1, "info": 2}
@@ -306,6 +306,23 @@ async def homepage(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
         out.append(item("worker", "err", "homepage", "De worker van het dashboard draait niet",
                         f"Zonder worker geen checks, meldingen of back-ups: {worker['why']}. "
                         "In de container: systemctl status homepage-worker.", fix))
+    hourly = await rollup.lag(db, now)
+    # Draait de worker niet, dan zegt het punt hierboven al genoeg.
+    if hourly["late"] and worker["ok"]:
+        behind = timedelta(hours=hourly["behind_h"])
+        left = KEEP_CHECKS_DAYS - behind.days
+        loss = (f"Blijft dit zo, dan verdwijnen over {_days(left)} de eerste checks voor goed en krijgt de "
+                "jaargrafiek een gat." if left > 0 else "Er verdwijnen nu al checks voor goed: de jaargrafiek krijgt "
+                "een gat.")
+        out.append(item("uurtotalen", "warn", "homepage",
+                        f"De worker telt de checks al {ago(behind)} niet meer per uur op" if hourly["until"]
+                        else "De worker telt de checks niet per uur op",
+                        "De grafiek en de uptime over 7 dagen tot een jaar en het weekrapport halen die uren nu uit "
+                        f"de losse checks. Met TimescaleDB worden losse checks na {KEEP_CHECKS_DAYS} dagen gewist, ook "
+                        f"als ze nog niet opgeteld zijn. {loss} Zonder TimescaleDB wacht het opruimen, maar groeit de "
+                        "database. In de container: journalctl -u homepage-worker | grep uurtotalen.", fix,
+                        # Negeren geldt een week; daarna (of als het weer even lukte) komt het terug.
+                        sig=f"{hourly['until']}|{behind.days // 7}"))
     mass = await _state(db, MASS_KEY)
     if mass.get("since"):
         since = _aware(datetime.fromisoformat(mass["since"]))

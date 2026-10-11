@@ -31,6 +31,9 @@ REDO = timedelta(hours=2)
 # Per dag één transactie: de eerste keer of na een lange stilstand blijft elke stap kort.
 STEP = timedelta(days=1)
 ROLLUP_EVERY = 600
+# Normaal loopt de watermark hoogstens iets meer dan een uur achter. Meer dan een dag: het optellen lukt niet meer
+# (zelfcontrole en het !-venster zeggen het).
+BEHIND = timedelta(days=1)
 
 # Checks tijdens onderhoud tellen niet mee voor de uptime.
 NOT_MAINT = CheckResult.maintenance.is_not(True)
@@ -140,6 +143,20 @@ async def watermark(db: AsyncSession) -> datetime | None:
     value = (await db.execute(select(AppState.value).where(AppState.key == KEY))).scalar()
     until = (value or {}).get("until")
     return _aware(datetime.fromisoformat(until)) if until else None
+
+
+async def lag(db: AsyncSession, now: datetime | None = None) -> dict:
+    """Hoe ver de uurtotalen achterlopen. until: de watermark (None: nog nooit opgeteld); behind_h: hoeveel uur
+    er nog niet opgeteld is (zonder watermark: sinds de oudste losse check); late: meer dan BEHIND."""
+    now = now or datetime.now(timezone.utc)
+    until = await watermark(db)
+    ref = until
+    if ref is None:
+        oldest = (await db.execute(select(func.min(CheckResult.ts)))).scalar()
+        ref = floor_hour(oldest) if oldest else None
+    behind = max(now - ref, timedelta(0)) if ref else timedelta(0)
+    return {"until": until.isoformat() if until else None, "behind_h": int(behind.total_seconds() // 3600),
+            "late": behind > BEHIND}
 
 
 async def _rows(db: AsyncSession, raw: bool, start: datetime, end: datetime | None, size: int | None,
