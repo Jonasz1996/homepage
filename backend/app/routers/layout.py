@@ -211,8 +211,8 @@ async def update_service(service_id: int, data: ServiceIn, request: Request, ses
     await _check_parent(db, service_id, data.parent_id)
     # Een check pauzeren of zijn meldingen uitzetten is wat iemand met een gestolen sessie als eerste zou doen:
     # dat vraagt een recente 2FA, en je krijgt er een melding van (ook op je gsm). Ook de check onder een ouder hangen
-    # die down of in onderhoud is, of naar een groep verplaatsen waar nu gepland onderhoud loopt: dan meldt hij zolang
-    # niets.
+    # die down of in onderhoud is, of naar een groep verplaatsen met gepland onderhoud (nu of later): dan meldt hij
+    # zolang niets. Zonder eigen check geldt dat voor wat eronder hangt.
     silenced = (silencing(service.check, data.check)
                 or await parent_silencing(db, service, data.check, data.parent_id)
                 or await group_silencing(db, service, data.check, data.group_id))
@@ -272,8 +272,8 @@ async def delete_service(service_id: int, request: Request, sess: Session = Depe
 @router.put("/layout/order")
 async def set_order(data: OrderIn, request: Request, sess: Session = Depends(current_session),
                     user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    # Een tegel met een lopende check naar een groep slepen waar nu gepland onderhoud loopt, legt die check zolang stil:
-    # net als in update_service vraagt dat een recente 2FA en geeft het een melding. Eerst, vóór er iets verandert.
+    # Een tegel naar een groep slepen met gepland onderhoud (nu of later), legt zijn check (of wat eronder hangt) dan
+    # stil: net als in update_service vraagt dat een recente 2FA en geeft het een melding. Eerst, vóór er iets verandert.
     for group_id, service_ids in (data.services or {}).items():
         for sid in service_ids:
             s = await _get(db, Service, sid)

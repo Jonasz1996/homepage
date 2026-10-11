@@ -1,5 +1,5 @@
 """Wat meldingen stillegt (onderhoud, gepland onderhoud, een cronjob dempen, een webhook of logregel uit, een
-beveiligingspunt negeren, een check onder een ouder hangen die down is of naar een groep waar gepland onderhoud loopt)
+beveiligingspunt negeren, een check onder een ouder hangen die down is of naar een groep met gepland onderhoud)
 vraagt een recente 2FA, komt in het auditlog en geeft een melding die ook naar de gsm gaat: zoals een check pauzeren."""
 
 from datetime import datetime, timedelta, timezone
@@ -427,40 +427,80 @@ async def test_onder_een_ouder_die_down_of_in_onderhoud_is_vraagt_2fa(authed):
     await agen.aclose()
 
 
-async def test_naar_een_groep_waar_gepland_onderhoud_loopt_vraagt_2fa(authed):
+async def test_zonder_eigen_check_onder_een_ouder_die_down_of_in_onderhoud_is_telt_wat_eronder_hangt(authed):
+    """Een tegel zonder check meldt zelf niets, maar wat eronder hangt wel: een kind van een ouder die down is, meldt
+    niets, en onderhoud geldt voor alles eronder. Zo'n tegel daaronder hangen vraagt dus ook 2FA."""
+    g = await _group(authed)
+    node = await _svc(authed, g, "pve50", {"type": "ping"})
+    up = await _svc(authed, g, "pve51", {"type": "ping"})
+    docker = await _svc(authed, g, "docker")
+    plex = await _svc(authed, g, "plex", {"type": "http"}, parent_id=docker)
+    agen, db = await _db()
+    db.add(ServiceState(service_id=node, status="down", since=datetime.now(timezone.utc), fail_count=3))
+    await db.commit()
+    base = {"group_id": g, "name": "docker", "url": "https://docker.lan"}
+    await _stale()
+    assert _needs_2fa(await authed.patch(f"/api/services/{docker}", json={**base, "parent_id": node}))
+    await _reauth(authed)
+    assert (await authed.post(f"/api/services/{up}/maintenance", json={"minutes": 60})).status_code == 200
+    await _stale()
+    assert _needs_2fa(await authed.patch(f"/api/services/{docker}", json={**base, "parent_id": up}))
+    # Wat eronder hangt en zelf al in onderhoud is, valt niet extra stil.
+    (await db.get(Service, plex)).maintenance_until = datetime.now(timezone.utc) + timedelta(hours=2)
+    await db.commit()
+    assert (await authed.patch(f"/api/services/{docker}", json={**base, "parent_id": node})).status_code == 200
+    (await db.get(Service, plex)).maintenance_until = None
+    await db.commit()
+    await agen.aclose()
+    await _reauth(authed)
+    assert (await authed.patch(f"/api/services/{docker}", json={**base, "parent_id": up})).status_code == 200
+    assert [t for t, *_ in await _notes()][1:] == ["Afhankelijk van pve51 (in onderhoud), legt plex stil: docker"]
+
+
+async def test_naar_een_groep_met_gepland_onderhoud_vraagt_2fa(authed):
     """Een venster voor een groep geldt voor alles wat er dan in zit: een tegel erin slepen, of er via de editor of een
-    oude versie in zetten, legt zijn check stil. Met de stand van nu: een venster dat later loopt of uit staat, niet."""
+    oude versie in zetten, legt zijn check stil. Ook vlak voor het venster begint: dan is hij er elke keer stil. Een
+    venster dat voorbij is of uit staat, telt niet."""
     page = (await authed.post("/api/pages", json={"name": "P"})).json()["id"]
-    home, backup, later = [(await authed.post("/api/groups", json={"page_id": page, "name": n})).json()["id"]
-                           for n in ("Thuis", "Back-up", "Later")]
+    home, backup, later, past = [(await authed.post("/api/groups", json={"page_id": page, "name": n})).json()["id"]
+                                 for n in ("Thuis", "Back-up", "Later", "Voorbij")]
     plex = await _svc(authed, home, "plex", {"type": "http"})
     wiki = await _svc(authed, home, "wiki")
     now = datetime.now(timezone.utc)
+    sunday = now + timedelta(hours=3)
     agen, db = await _db()
     for name, group, start, on in (("nacht", backup, now - timedelta(minutes=10), True),
-                                   ("zondag", later, now + timedelta(hours=3), True),
-                                   ("oud", later, now - timedelta(minutes=10), False)):
+                                   ("vorige keer", past, now - timedelta(hours=3), True),
+                                   ("oud", past, now - timedelta(minutes=10), False)):
         db.add(MaintenanceWindow(name=name, group_id=group, repeat="once", start=start, minutes=60, weekdays=[],
                                  enabled=on))
+    db.add(MaintenanceWindow(name="zondag", group_id=later, repeat="weekly", start=sunday, minutes=60,
+                             weekdays=[sunday.astimezone().weekday()], enabled=True))
     await db.commit()
     await agen.aclose()
     base = {"name": "plex", "url": "https://plex.lan", "check": {"type": "http"}}
     await _stale()
     assert _needs_2fa(await authed.patch(f"/api/services/{plex}", json={**base, "group_id": backup}))
     assert _needs_2fa(await authed.put("/api/layout/order", json={"services": {backup: [plex], home: [wiki]}}))
+    # Een herhalend venster dat pas later loopt: bij elke keer stil.
+    assert _needs_2fa(await authed.patch(f"/api/services/{plex}", json={**base, "group_id": later}))
+    assert _needs_2fa(await authed.put("/api/layout/order", json={"services": {later: [plex]}}))
     agen, db = await _db()
     assert (await db.get(Service, plex)).group_id == home
     await agen.aclose()
-    # Vrij: een tegel zonder check, een groep waar het onderhoud pas later loopt of uit staat.
+    # Vrij: een tegel zonder check (en zonder iets eronder), een groep waar het onderhoud voorbij is of uit staat.
     assert (await authed.put("/api/layout/order", json={"services": {backup: [wiki]}})).status_code == 200
-    assert (await authed.patch(f"/api/services/{plex}", json={**base, "group_id": later})).status_code == 200
+    assert (await authed.patch(f"/api/services/{plex}", json={**base, "group_id": past})).status_code == 200
     assert (await authed.put("/api/layout/order", json={"services": {home: [plex]}})).status_code == 200
     assert not await _notes()
 
     await _reauth(authed)
+    assert (await authed.patch(f"/api/services/{plex}", json={**base, "group_id": later})).status_code == 200
     assert (await authed.put("/api/layout/order", json={"services": {backup: [wiki, plex]}})).status_code == 200
-    assert [t for t, *_ in await _notes()] == ["Naar groep Back-up (gepland onderhoud 'nacht' loopt): plex"]
-    assert (await _actions()).count("check_silenced") == 1
+    assert [t for t, *_ in await _notes()] == [
+        f"Naar groep Later (gepland onderhoud 'zondag', volgende keer {sunday.astimezone():%d/%m %H:%M}): plex",
+        "Naar groep Back-up (gepland onderhoud 'nacht' loopt): plex"]
+    assert (await _actions()).count("check_silenced") == 2
     # Al in die groep: de volgorde wijzigen blijft vrij.
     await _stale()
     assert (await authed.put("/api/layout/order", json={"services": {backup: [plex, wiki]}})).status_code == 200
@@ -476,3 +516,46 @@ async def test_naar_een_groep_waar_gepland_onderhoud_loopt_vraagt_2fa(authed):
     titles = [n.title for n in (await db.execute(select(Notification).where(Notification.source == "auth"))).scalars()]
     assert "Checks stil door een oude versie: plex" in titles
     await agen.aclose()
+
+
+async def test_zonder_eigen_check_naar_een_groep_met_gepland_onderhoud_telt_wat_eronder_hangt(authed):
+    """Een venster voor een groep zet ook een tegel zonder check (of gepauzeerd) in onderhoud, en onderhoud geldt voor
+    alles wat eronder hangt: zo'n node in de groep zetten legt de checks van zijn CT's stil. Wat zelf al in die groep zit
+    of al in onderhoud is, valt niet extra stil."""
+    page = (await authed.post("/api/pages", json={"name": "P"})).json()["id"]
+    home, backup = [(await authed.post("/api/groups", json={"page_id": page, "name": n})).json()["id"]
+                    for n in ("Thuis", "Back-up")]
+    node = await _svc(authed, home, "pve50", {"type": "ping", "paused": True})
+    plex = await _svc(authed, home, "plex", {"type": "http"}, parent_id=node)
+    await _svc(authed, home, "jellyfin", {"type": "http"}, parent_id=plex)
+    await _svc(authed, backup, "wiki", {"type": "http"}, parent_id=node)
+    nas = await _svc(authed, home, "nas")
+    now = datetime.now(timezone.utc)
+    agen, db = await _db()
+    db.add(MaintenanceWindow(name="nacht", group_id=backup, repeat="once", start=now - timedelta(minutes=10),
+                             minutes=60, weekdays=[], enabled=True))
+    await db.commit()
+    base = {"name": "pve50", "url": "https://pve50.lan", "check": {"type": "ping", "paused": True}}
+    await _stale()
+    assert _needs_2fa(await authed.patch(f"/api/services/{node}", json={**base, "group_id": backup}))
+    assert _needs_2fa(await authed.put("/api/layout/order", json={"services": {backup: [node]}}))
+    # Zonder iets eronder: vrij. Met alles eronder al in onderhoud ook.
+    assert (await authed.put("/api/layout/order", json={"services": {backup: [nas]}})).status_code == 200
+    (await db.get(Service, plex)).maintenance_until = now + timedelta(hours=2)
+    await db.commit()
+    assert (await authed.put("/api/layout/order", json={"services": {backup: [nas, node]}})).status_code == 200
+    assert (await authed.put("/api/layout/order", json={"services": {home: [node]}})).status_code == 200
+    (await db.get(Service, plex)).maintenance_until = None
+    await db.commit()
+    await agen.aclose()
+    assert not await _notes()
+
+    await _reauth(authed)
+    assert (await authed.patch(f"/api/services/{node}", json={**base, "group_id": backup})).status_code == 200
+    assert [t for t, *_ in await _notes()] == [
+        "Naar groep Back-up (gepland onderhoud 'nacht' loopt), legt jellyfin en 1 andere stil: pve50"]
+    # Een oude versie terugzetten waarin de node in die groep zat: geen achterdeur.
+    rev = (await authed.get("/api/revisions")).json()[0]["id"]
+    await _stale()
+    assert (await authed.put("/api/layout/order", json={"services": {home: [node]}})).status_code == 200
+    assert _needs_2fa(await authed.post(f"/api/revisions/{rev}/restore"))
