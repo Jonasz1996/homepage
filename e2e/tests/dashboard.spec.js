@@ -182,6 +182,30 @@ test('een groot venster houdt zijn tab als een ander groot venster opent en slui
   await expect(closeButtons()).toHaveCount(0)
 })
 
+test('Escape sluit alleen het venster dat bovenaan ligt', async () => {
+  const zoek = async (q) => {
+    await page.keyboard.press('Control+k')
+    await page.keyboard.type(q)
+    await page.keyboard.press('Enter')
+  }
+  await menu('Beheer', 'Terminal')
+  await page.getByRole('button', { name: '⚙ standaard' }).click()
+  const standaard = page.getByRole('dialog', { name: 'ssh --defaults' })
+  await expect(standaard).toBeVisible()
+  // Gezondheid erboven: Escape laat de standaardlogin eronder staan.
+  await zoek('cluster: quorum')
+  await expect(page.getByRole('button', { name: 'Gezondheid sluiten' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(standaard).toHaveCount(1)
+  // De terminal weer naar voren: nu sluit Escape de standaardlogin wel.
+  await zoek('ssh naar je machines')
+  await page.keyboard.press('Escape')
+  await expect(standaard).toHaveCount(0)
+  await page.getByRole('button', { name: 'Terminal sluiten' }).click()
+  await page.getByRole('button', { name: 'Gezondheid sluiten' }).click()
+  await expect(closeButtons()).toHaveCount(0)
+})
+
 test('verbinding weg: balk met opnieuw proberen, daarna weer bijgewerkt', async () => {
   // Het dashboard ververst elke 30 seconden: binnen die tijd komt de balk.
   await page.route('**/api/overzicht**', (r) => r.abort())

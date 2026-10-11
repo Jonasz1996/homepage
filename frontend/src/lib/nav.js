@@ -46,22 +46,17 @@ if (typeof window !== 'undefined') {
   })
 }
 
-/**
- * Registreert een open venster of menu. close() wordt opgeroepen bij terug; geeft een functie die de laag weghaalt,
- * met release.top(): of deze laag nu bovenaan ligt (Escape mag dan alleen dit venster sluiten).
- */
+/** Registreert een open venster of menu. close() wordt opgeroepen bij terug; geeft een functie die de laag weghaalt. */
 export function layer(close) {
   const me = { close }
   layers.push(me)
   sync()
   let done = false
-  const release = () => {
+  return () => {
     if (done) return
     done = true
     const i = layers.indexOf(me)
     if (i >= 0) layers.splice(i, 1)
     sync()
   }
-  release.top = () => layers.at(-1) === me
-  return release
 }

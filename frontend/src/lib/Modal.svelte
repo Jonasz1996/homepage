@@ -12,12 +12,12 @@
   let { title, onclose, children, wide = false, small = false } = $props()
   const me = {}
   let box = $state()
-  let navLayer = null
+  let ov = $state()
 
   onMount(() => {
     stack.push(me)
     // De terugknop van de gsm sluit dit venster.
-    const release = (navLayer = layer(() => onclose()))
+    const release = layer(() => onclose())
     const before = document.activeElement
     tick().then(() => {
       if (box && !box.contains(document.activeElement)) box.querySelector('input, select, textarea, button:not(.x)')?.focus({ preventScroll: true })
@@ -30,8 +30,12 @@
   })
 
   function key(e) {
-    // Ook niet als er een groot venster boven dit venster ligt (bv. de terminal, geopend vanuit een cronjob).
-    if (e.key === 'Escape' && stack.at(-1) === me && navLayer?.top() !== false) onclose()
+    if (e.key !== 'Escape' || stack.at(-1) !== me) return
+    // Ook niet als er een groot venster boven dit venster ligt (bv. de terminal, geopend vanuit een cronjob): elk
+    // venster bedekt het hele scherm, dus wat linksboven ligt, ligt bovenaan.
+    const top = document.elementFromPoint(0, 0)?.closest('.ov')
+    if (top && top !== ov) return
+    onclose()
   }
 </script>
 
@@ -39,7 +43,7 @@
 <svelte:window onkeydown={key} />
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div class="ov" class:small onclick={(e) => e.target === e.currentTarget && onclose()}>
+<div class="ov" class:small bind:this={ov} onclick={(e) => e.target === e.currentTarget && onclose()}>
   <div class="box" class:wide class:small role="dialog" aria-modal="true" aria-label={title} bind:this={box}>
     <Card {title} glow>
       {#snippet right()}<button class="mini x" onclick={onclose} aria-label="Sluiten">✕</button>{/snippet}

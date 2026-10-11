@@ -3,7 +3,7 @@
   import { api } from './api.js'
   import { dash } from './dash.svelte.js'
   import { layer } from './nav.js'
-  import { NOTIFICATION_SOURCES } from './windows.js'
+  import { byId, NOTIFICATION_SOURCES, sourceWindow } from './windows.js'
 
   // Eigen meldingencentrum: de bel in de titelbalk met het aantal ongelezen gebeurtenissen, uitklapbaar paneel.
   // Wat nu mis is, staat onder Aandacht; hier staan de gebeurtenissen, de tijdlijn is het archief.
@@ -52,14 +52,15 @@
   })
 
   const clickable = (n) => NOTIFICATION_SOURCES.includes(n.source) || !!n.service_id
-  // Eerst de focus terug op de bel: een venster dat nu opent, geeft ze bij het sluiten daaraan terug.
-  function closePanel() {
-    bell?.focus({ preventScroll: true })
+  // Eerst de focus terug op de bel: een venster dat nu opent, geeft ze bij het sluiten daaraan terug. Niet bij een
+  // groot venster: dat neemt de focus niet, en een Enter of spatie zou de bel erachter openen.
+  function closePanel(big = false) {
+    if (!big) bell?.focus({ preventScroll: true })
     dash.notifOpen = false
   }
   function pick(n) {
     if (!clickable(n)) return
-    closePanel()
+    closePanel(!!byId[sourceWindow(n.source)?.id]?.big)
     if (!n.read) api(`/notifications/${n.id}/read`, { method: 'POST' }).then(() => dash.refresh(['meldingen'])).catch(() => {})
     dash.openNotification(n)
   }
@@ -100,7 +101,7 @@
       {#each data.items as n (n.id)}
         <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
         <div class="n {n.level}" class:unread={!n.read} class:go={clickable(n)} role={clickable(n) ? 'button' : undefined}
-             tabindex={clickable(n) ? 0 : undefined} onclick={() => pick(n)} onkeydown={(e) => e.key === 'Enter' && pick(n)}>
+             tabindex={clickable(n) ? 0 : undefined} onclick={() => pick(n)} onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); pick(n) } }}>
           <div class="t"><span class="lvl">{n.level}</span>{n.title}</div>
           {#if n.body}<div class="b">{n.body}</div>{/if}
           <div class="ts">{fmt(n.ts)} · {n.source}{#if n.source === 'rapport'} · <u>volledig rapport</u>{/if}</div>

@@ -42,6 +42,7 @@ def nep(monkeypatch):
     f = Fake()
     monkeypatch.setattr(integrations_router, "clients", HttpClients(httpx.MockTransport(f)))
     integrations_router._cache.clear()
+    integrations_router._since.clear()
     monkeypatch.setattr(overzicht, "_tegels_taak", None)
     monkeypatch.setattr(overzicht, "_tegels_vorige", None)
     monkeypatch.setattr(overzicht, "_tegels_begin", float("-inf"))
@@ -357,6 +358,9 @@ async def test_vers_na_een_wijziging(authed, nep, monkeypatch):
     los.set()
     await asyncio.wait_for(asyncio.shield(oud), 5)
     assert overzicht._tegels_vorige is nieuw
+    # Ook de cache per tegel (waar de volgende berekening en Aandacht uit lezen) houdt het nieuwe resultaat.
+    assert sid not in integrations_router.last_errors()
+    assert "fields" in integrations_router._cache[(sid, "summary")][2]
 
 
 async def test_trage_kapotte_tegel_geeft_de_vorige_stand(authed, nep, monkeypatch):

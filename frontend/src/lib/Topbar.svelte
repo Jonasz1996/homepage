@@ -2,7 +2,7 @@
   import { dash } from './dash.svelte.js'
   import { storm } from './fx.js'
   import { layer } from './nav.js'
-  import { MENUS, WINDOWS } from './windows.js'
+  import { byId, MENUS, WINDOWS } from './windows.js'
   import Notifications from './Notifications.svelte'
 
   // De titelbalk: Aandacht (wat nu mis is, het enige getal dat telt), Meldingen (gebeurtenissen) en drie menu's met
@@ -67,13 +67,14 @@
   })
 
   // De focus eerst terug op de menuknop (het menu-item verdwijnt): een venster dat nu opent, geeft ze bij het sluiten
-  // daaraan terug.
-  function shut() {
-    document.querySelector('.mbtn.on')?.focus({ preventScroll: true })
+  // daaraan terug. Niet bij een groot venster: dat neemt de focus niet, en een Enter of spatie zou het menu erachter
+  // openen.
+  function shut(big = false) {
+    if (!big) document.querySelector('.mbtn.on')?.focus({ preventScroll: true })
     open = null
   }
   function go(id) {
-    shut()
+    shut(!!byId[id]?.big)
     dash.open(id, startOf(id))
   }
   function toggleEdit() {

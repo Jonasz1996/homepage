@@ -4,8 +4,8 @@ import { api, ApiError } from './api.js'
 import { fxEnabled, setFx } from './fx.js'
 import { byId, resolve, sourceWindow } from './windows.js'
 
-// Hoe vaak elk deel van /api/overzicht ververst. Eén klok, één verzoek: bij elke tik gaan de delen mee die aan de
-// beurt zijn. Komt het tabblad terug in beeld, dan één verzoek met wat intussen verlopen is.
+// Hoe vaak elk deel van /api/overzicht ververst. Eén klok: bij elke tik gaan de delen mee die aan de beurt zijn (in
+// hoogstens twee verzoeken, zie SLOW). Komt het tabblad terug in beeld, dan meteen wat intussen verlopen is.
 export const PARTS = {
   status: 30000, meldingen: 30000, widgets: 60000, zabbix: 60000,
   aandacht: 120000, cron: 120000, health: 120000, net: 120000, updates: 300000,
@@ -66,8 +66,10 @@ class Dash {
 
   #last = {}
   #timer = null
-  // Per start(): een antwoord dat binnenkomt na een stop (uitloggen), telt niet meer.
+  // Per start() een nieuw nummer; #active is dat nummer zolang het verversen loopt (0 na stop, bv. uitloggen). Een
+  // antwoord van daarvoor telt niet meer, en na een stop vertrekt er geen verzoek en geen klok meer.
   #gen = 0
+  #active = 0
   // Twee rijen, elk met hoogstens één verzoek tegelijk: de tegels (en Aandacht, dat op de tegels wacht) apart, zodat
   // een integratie die niet antwoordt de status, de meldingen en de rest niet tot 8 s ophoudt.
   #lanes = newLanes()
@@ -86,7 +88,7 @@ class Dash {
 
   /** Haalt de delen op die aan de beurt zijn (of precies deze, met force). */
   refresh(force = null) {
-    if (!this.#gen) return Promise.resolve()
+    if (!this.#active) return Promise.resolve()
     const now = Date.now()
     const due = force || Object.keys(PARTS).filter((p) => !this.#last[p] || now - this.#last[p] >= PARTS[p] - 2000)
     return Promise.all([
@@ -102,7 +104,7 @@ class Dash {
       if (forced) lane.again = [...new Set([...(lane.again || []), ...parts])]
       return
     }
-    const gen = this.#gen
+    const gen = this.#active
     const now = Date.now()
     lane.busy = true
     try {
@@ -110,7 +112,7 @@ class Dash {
       // nog loopt, die las misschien de tegel van ervoor.
       const vers = forced && parts.includes('widgets') ? '&vers=1' : ''
       const r = await api(`/overzicht?delen=${parts.join(',')}${vers}`)
-      if (gen !== this.#gen) return
+      if (gen !== this.#active) return
       this.#apply(r.delen || {})
       const failed = r.fouten || {}
       for (const p of parts) {
@@ -124,7 +126,7 @@ class Dash {
         this.offlineWhy = ''
       }
     } catch (e) {
-      if (gen !== this.#gen) return
+      if (gen !== this.#active) return
       // Uitgelogd: App.svelte toont het loginscherm. Anders is de homepage zelf (of de weg ernaartoe) weg.
       if (!(e instanceof ApiError && (e.status === 401 || e.status === 403))) {
         this.#failedAt = Date.now()
@@ -136,7 +138,7 @@ class Dash {
       lane.busy = false
       const again = lane.again
       lane.again = null
-      if (again && gen === this.#gen) this.refresh(again)
+      if (again && gen === this.#active) this.refresh(again)
     }
   }
 
@@ -164,13 +166,14 @@ class Dash {
   }
 
   #tick() {
+    if (!this.#active) return
     if (!document.hidden) this.refresh()
     this.#schedule(TICK)
   }
 
   /** Start het verversen; geeft een stopfunctie. */
   start() {
-    const gen = ++this.#gen
+    const gen = (this.#active = ++this.#gen)
     this.#last = {}
     this.#lanes = newLanes()
     this.#failedAt = 0
@@ -179,7 +182,7 @@ class Dash {
     const vis = () => { if (!document.hidden) this.refresh() }
     document.addEventListener('visibilitychange', vis)
     return () => {
-      if (this.#gen === gen) this.#gen = gen + 1
+      if (this.#active === gen) this.#active = 0
       clearTimeout(this.#timer)
       document.removeEventListener('visibilitychange', vis)
     }
