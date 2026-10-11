@@ -8,7 +8,10 @@ import { byId, resolve, sourceWindow } from './windows.js'
 // beurt zijn. Komt het tabblad terug in beeld, dan één verzoek met wat intussen verlopen is.
 export const PARTS = {
   status: 30000, meldingen: 30000, widgets: 60000, zabbix: 60000,
-  aandacht: 120000, cron: 120000, health: 120000, net: 120000, updates: 300000, buiten: 600000,
+  aandacht: 120000, cron: 120000, health: 120000, net: 120000, updates: 300000,
+  // Van waar je verbonden bent: één keer bij het laden (en na het venster Van buitenaf). Elke vraag van buitenaf telt
+  // op de server als een nieuw bezoek.
+  buiten: Infinity,
 }
 const TICK = 30000
 const RETRY = 15000
@@ -52,8 +55,9 @@ class Dash {
     this.fx = fxEnabled()
   }
 
-  services = $derived(this.layout.pages.flatMap((p) => p.groups.flatMap((g) => g.services)))
-  groupOptions = $derived(this.layout.pages.flatMap((p) => p.groups.map((g) => ({ id: g.id, label: `${p.name} / ${g.name}` }))))
+  pages = $derived(this.layout.pages || [])
+  services = $derived(this.pages.flatMap((p) => p.groups.flatMap((g) => g.services)))
+  groupOptions = $derived(this.pages.flatMap((p) => p.groups.map((g) => ({ id: g.id, label: `${p.name} / ${g.name}` }))))
 
   // --- Verversen ------------------------------------------------------------
 
@@ -90,7 +94,7 @@ class Dash {
       const failed = r.fouten || {}
       for (const p of due) {
         // Een deel dat mislukte: bij de volgende tik opnieuw, niet pas na zijn eigen termijn.
-        this.#last[p] = failed[p] ? now - PARTS[p] + TICK : now
+        this.#last[p] = !failed[p] ? now : Number.isFinite(PARTS[p]) ? now - PARTS[p] + TICK : 0
       }
       this.lastOk = new Date()
       this.offline = null
@@ -108,6 +112,11 @@ class Dash {
       this.#again = null
       if (again) this.refresh(again)
     }
+  }
+
+  /** "opnieuw proberen" in de balk Geen verbinding: alles meteen, behalve buiten als dat al bekend is. */
+  retry() {
+    return this.refresh(Object.keys(PARTS).filter((p) => p !== 'buiten' || !this.where))
   }
 
   #apply(d) {

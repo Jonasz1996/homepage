@@ -3,7 +3,7 @@
   import { api } from './api.js'
   import { boom } from './fx.js'
   import { CHANGELOG } from './changelog.js'
-  import { dash, PARTS } from './dash.svelte.js'
+  import { dash } from './dash.svelte.js'
   import { byId, resolve } from './windows.js'
   import AttentionStrip from './AttentionStrip.svelte'
   import Card from './Card.svelte'
@@ -170,7 +170,7 @@
         <i></i>
         <span>Geen verbinding met de homepage sinds {hm(dash.offline)}{dash.offlineWhy ? ` (${dash.offlineWhy})` : ''}.
           {dash.lastOk ? `Wat je ziet is van ${hm(dash.lastOk)}.` : 'Er is nog niets geladen.'}</span>
-        <button class="mini" onclick={() => dash.refresh(Object.keys(PARTS))}>opnieuw proberen</button>
+        <button class="mini" onclick={() => dash.retry()}>opnieuw proberen</button>
       </div>
     {/if}
     <AttentionStrip />

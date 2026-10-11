@@ -177,9 +177,6 @@
 <svelte:window onkeydown={key} />
 
 <Window {open} title="ssh" label="Terminal" {onclose}>
-  <!-- Leeg, maar niet weglaten: op de gsm verbergt Window de titel en duwt alleen de knoppenrij ✕ naar rechts.
-       Zonder die rij staat ✕ links naast de bolletjes. -->
-  {#snippet actions()}{/snippet}
   <div class="cols">
     <aside>
       <form class="qc" onsubmit={quickConnect}>

@@ -10,6 +10,8 @@
     answer(d, d.kind === 'text' ? (values[d.id] ?? d.value) : true)
   }
   const cancel = (d) => answer(d, d.kind === 'text' ? null : false)
+  // Bij iets dat niet terug kan (rood), staat de focus op Annuleren: een Enter te veel verwijdert dan niets.
+  const safeFocus = (node, on) => { if (on) queueMicrotask(() => node.focus({ preventScroll: true })) }
 </script>
 
 {#each dialogs.list as d (d.id)}
@@ -22,7 +24,7 @@
       {/if}
       <div class="row">
         <button class="btn" class:danger={d.danger}>{d.ok || 'OK'}</button>
-        <button type="button" class="btn alt" onclick={() => cancel(d)}>Annuleren</button>
+        <button type="button" class="btn alt" onclick={() => cancel(d)} use:safeFocus={d.danger && d.kind !== 'text'}>Annuleren</button>
       </div>
     </form>
   </Modal>
