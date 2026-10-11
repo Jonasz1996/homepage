@@ -110,7 +110,11 @@ async def refresh(db: AsyncSession, http: HttpClients, now: datetime | None = No
     now = now or datetime.now(timezone.utc).replace(microsecond=0)
     seen: dict[str, dict] = {}
     errors = []
-    for svc in (await db.execute(select(Service).where(Service.type == "opnsense"))).scalars():
+    svcs = list((await db.execute(select(Service).where(Service.type == "opnsense"))).scalars())
+    # Geen transactie open tijdens de calls naar OPNsense: de verbinding gaat terug naar de pool, de tegels blijven
+    # bruikbaar (expire_on_commit=False; build() doet zelf geen query).
+    await db.commit()
+    for svc in svcs:
         try:
             for n in await build(svc, http).neighbours():
                 if MAC_RE.match(n["mac"]):
@@ -205,9 +209,12 @@ async def scan_ports(ip: str, ports: list[int] | None = None) -> list[int]:
 
 
 async def scan_device(db: AsyncSession, d: Device, now: datetime | None = None, ports: list[int] | None = None) -> list[int]:
+    """Scant de poorten van één apparaat. Commit eerst wat er al was: geen transactie open tijdens de scan (tot een
+    paar seconden per apparaat). Het resultaat bewaart de oproeper."""
     now = now or datetime.now(timezone.utc).replace(microsecond=0)
     if not d.ip:
         return d.ports or []
+    await db.commit()
     found = await scan_ports(d.ip, ports)
     before = set(d.ports or [])
     added = [p for p in found if p not in before]
