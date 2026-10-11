@@ -24,7 +24,9 @@ router = APIRouter(prefix="/api/logs", tags=["logs"])
 
 RANGES = {"1h": timedelta(hours=1), "24h": timedelta(hours=24), "7d": timedelta(days=7), "30d": timedelta(days=30)}
 BUCKETS = {"1h": 60, "24h": 1800, "7d": 6 * 3600, "30d": 86400}
-TOO_SLOW = "Zoeken duurde te lang; kies een kortere periode of een filter (host, app of ernst)"
+# In de woorden van de logviewer (Logs.svelte): die kent een periode, een machine links en een niveau-keuze;
+# geen app-filter.
+TOO_SLOW = "Zoeken duurde te lang; kies een kortere periode, één machine of een niveau (bv. 'err en erger')"
 
 
 def _row(e: LogEntry) -> dict:

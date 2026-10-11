@@ -300,7 +300,10 @@ async def test_log_search_timeout_gives_clear_error(authed, monkeypatch):
             event.remove(db.bind.sync_engine, "before_cursor_execute", cancel)
     for resp in (r, h):
         assert resp.status_code == 503, resp.text
-        assert resp.json()["detail"].startswith("Zoeken duurde te lang; kies een kortere periode of een filter")
+        detail = resp.json()["detail"]
+        assert detail.startswith("Zoeken duurde te lang; kies een kortere periode, één machine of een niveau")
+        # Alleen filters die de logviewer echt heeft, in zijn eigen woorden (geen app-filter, geen "host").
+        assert "app" not in detail and "host" not in detail
     # Daarna werkt zoeken gewoon weer.
     assert (await authed.get("/api/logs", params={"range": "30d", "q": "schijf"})).status_code == 200
     await agen.aclose()
