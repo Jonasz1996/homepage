@@ -12,7 +12,7 @@ export const CHANGELOG = [
       'Haalt het dashboard een tijd niets meer op, dan zegt een rode balk sinds wanneer, met "opnieuw proberen". Bovenaan staat wanneer het laatst bijgewerkt is (oranje als dat langer dan een minuut geleden is).',
       'Een tabblad en een groep met een probleem hebben een rode of oranje stip. Klik op "x down" of op "alleen problemen" om enkel de tegels met een probleem te zien, van alle pagina\'s. Groepen klap je dicht met een klik op hun naam; dat onthoudt elk toestel apart.',
       'Effecten (Instellingen → Effecten) zetten nu echt alles uit: achtergrond, gloed, scanlijnen, glas en animaties. Op een touchscreen staan ze standaard uit.',
-      'Het dashboard haalt alles op met één verzoek per 30 seconden in plaats van negen aparte, en een deel dat mislukt, probeert het de volgende keer opnieuw.',
+      'Het dashboard haalt alles op met twee verzoeken per 30 seconden in plaats van negen aparte: de tegels apart, zodat een integratie die niet antwoordt de status en de meldingen niet ophoudt. Een deel dat mislukt, probeert het de volgende keer opnieuw, en na een gewijzigde tegel rekent het de tegels meteen opnieuw.',
       'Kleine tekst en gelezen meldingen zijn beter leesbaar, en de knop ▤ voor het mini dashboard op een tegel is groter, op de gsm nog wat meer.',
     ],
     instellen: [

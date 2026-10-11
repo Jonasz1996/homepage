@@ -38,7 +38,8 @@ venster staat in `frontend/src/lib/windows.js`, met de oude korte naam die je in
   een venster rechtstreeks (zo werken de snelkoppelingen van de app en de pushberichten)
 - bevestigen en een getal invullen gebeurt in eigen vensters, niet met de vensters van de browser (die doen in een
   Android-WebView vaak niets)
-- het hoofdscherm ververst met één verzoek (`/api/overzicht`, elke 30 s, met per deel een eigen termijn). Valt de
+- het hoofdscherm ververst via `/api/overzicht` (elke 30 s, met per deel een eigen termijn; de tegels in een eigen
+  verzoek, zodat een integratie die niet antwoordt de status en de meldingen niet ophoudt). Valt de
   verbinding weg, dan zegt een balk sinds wanneer en hoe oud wat je ziet is, met *opnieuw proberen*; naast de datum
   staat wanneer het laatst bijgewerkt is
 - een tabblad en een dichtgeklapte groep krijgen een rood bolletje met het aantal tegels dat down is (oranje bij
