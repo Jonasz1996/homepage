@@ -12,8 +12,8 @@ from .config import get_settings
 from .db import get_db, get_maker
 from .deps import COOKIE, csrf_guard, secure_cookie
 from .monitoring import watchdog
-from .routers import (apis, attention, auth, backups, capacity, configs, cron, diagnose, heal, health, hooks, importexport, integrations, layout, logs, monitoring, network, notifications,
-                      netmap, noodplan, npmroutes, oidc, outside, overzicht, planning, restoretest, search, securitycheck, ssh, timeline, upgrade, versie,
+from .routers import (apis, attention, auth, backups, buitencheck, capacity, configs, cron, diagnose, exposure, heal, health, hooks, importexport, integrations, layout, logs, monitoring, network, notifications,
+                      netmap, nieuweservice, noodplan, npmroutes, oidc, outside, overzicht, planning, restoretest, search, securitycheck, ssh, timeline, upgrade, versie,
                       webpush, zabbix)
 from .routers import push
 
@@ -21,18 +21,23 @@ log = logging.getLogger("homepage.api")
 
 
 async def _startup() -> None:
-    """Manuele update-runs die liepen toen de API herstartte, als mislukt markeren (anders blijft dat doel geblokkeerd)."""
+    """Manuele update-runs die liepen toen de API herstartte, als mislukt markeren (anders blijft dat doel geblokkeerd),
+    en runs van een nieuwe service als onderbroken (dan kan ongedaan maken)."""
     from .monitoring.upgrade import mark_interrupted
+    from .nieuweservice import mark_interrupted as ns_interrupted
 
     try:
         async with get_maker()() as db:
             n = await mark_interrupted(db, ("manueel",))
+            m = await ns_interrupted(db)
             await db.commit()
         if n:
             log.warning("%s update-run(s) onderbroken door herstart", n)
+        if m:
+            log.warning("%s run(s) van nieuwe service onderbroken door herstart", m)
     except Exception:
         # Opstarten mag hier niet op vastlopen (bv. database nog niet bereikbaar of nog niet gemigreerd).
-        log.exception("onderbroken update-runs opruimen mislukt")
+        log.exception("onderbroken runs markeren mislukt")
 
 
 @asynccontextmanager
@@ -93,6 +98,9 @@ app.include_router(npmroutes.router)
 app.include_router(diagnose.router)
 app.include_router(noodplan.router)
 app.include_router(overzicht.router)
+app.include_router(nieuweservice.router)
+app.include_router(buitencheck.router)
+app.include_router(exposure.router)
 
 
 @app.middleware("http")

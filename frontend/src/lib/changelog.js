@@ -15,6 +15,54 @@ export const CHANGELOG = [
     ],
   },
   {
+    nr: 38,
+    datum: '2026-10-11',
+    titel: 'Nieuwe service in één keer',
+    items: [
+      'Beheer → Nieuwe service: één formulier met naam, IP en poort maakt de proxy host in NPM (met het wildcardcertificaat of een eigen Let\'s Encrypt-certificaat), het record in Cloudflare of een regel in de tunnel, de naam in AdGuard, een tegel met check (en de koppeling met Zabbix), en zet de CT/VM in een back-upjob van PBS. Kies "alleen thuis" of publiek; "alleen thuis" vraagt een toegangslijst van NPM die alleen je LAN en VPN toelaat.',
+      'Eerst een proef: die zegt per systeem wat er zou gebeuren en wat ontbreekt, en voert niets uit. Pas je daarna iets aan, dan moet de proef opnieuw. Uitvoeren vraagt je 2FA en komt in de audit-log; je ziet stap per stap wat lukt.',
+      'Stopt een run halverwege (of herstart de homepage ondertussen), dan haalt "ongedaan maken" weg wat hij al maakte, ook weer na een proef. Zo\'n halve run staat onder ! tot je hem ongedaan maakt.',
+      'Het tabblad opruimen (of "opruimen…" bij een tegel op je domein) doet het omgekeerde: DNS eerst, dan AdGuard, NPM, eventueel de back-up en de tegel als laatste. Het raakt alleen records die naar NPM wijzen of die het dashboard zelf maakte; wat blijft staan, zegt de proef. Records van het dashboard waarvan de host in NPM weg is, staan eronder om op te ruimen.',
+      'Het tabblad geschiedenis toont elke run met zijn stappen. De Instellingen-checklist heeft een rij "Nieuwe service in één keer" die zegt wat er nog ontbreekt.',
+      'Van buitenaf hoort dit bij ⚿ → van buitenaf → acties.',
+    ],
+    instellen: [
+      'NPM: een tweede gebruiker "dashboard-acties" met een echt e-mailadres, geen Administrator, Item Visibility All Items en Proxy Hosts en Certificates op Manage. Vul die in als action_username en action_password bij de NPM-API (README → Nieuwe service in één keer).',
+      'Cloudflare: een token met Zone Read en DNS Edit op jbogaert.be (plus Cloudflare Tunnel Edit als je namen via de tunnel gaan), als nieuwe API van soort Cloudflare DNS met zone = jbogaert.be.',
+      'Proxmox, voor de back-up: liefst een back-upjob op een pool en Pool.Allocate op die pool voor homepage-acties@pve; of, voor een job met een lijst VMID\'s, Sys.Modify op / en Datastore.Allocate op de opslag van de job (README zegt wat die rechten nog meer toelaten).',
+      'Voor "alleen thuis": een toegangslijst in NPM met alleen je LAN en VPN (bv. allow 192.168.0.0/16), satisfy all, die ook het dashboard toelaat.',
+    ],
+  },
+  {
+    nr: 37,
+    datum: '2026-10-11',
+    titel: 'Check van buitenaf',
+    items: [
+      'Netwerk → check van buitenaf: een gratis Cloudflare Worker bekijkt je publieke tegels om de 5 minuten van buitenaf, zoals een bezoeker. Werkt iets thuis wel en van buitenaf niet (tunnel, NPM, DNS, certificaat), dan staat op de tegel "thuis ok · buiten down" en krijg je een melding; vallen er meer tegels om dezelfde reden uit, dan één melding voor allemaal.',
+      'Een klein bolletje op een tegel zegt dat ze ook van buitenaf gecheckt wordt.',
+    ],
+    instellen: [
+      'In Cloudflare een API-token met Account → Workers Scripts → Edit. Zet het in API-beheer bij je Cloudflare-API als geheim workers_token. Dan in Netwerk → check van buitenaf: proef en In Cloudflare zetten, en daarna het token weghalen. Liever zelf plakken kan ook.',
+    ],
+  },
+  {
+    nr: 36,
+    datum: '2026-10-11',
+    titel: 'Wat is publiek',
+    items: [
+      'Netwerk heeft een tabblad publiek: per naam onder jbogaert.be of iemand op internet erbij kan, en of er een login voor staat (Cloudflare Access, Authentik of een toegangslijst in NPM). Rood = van buitenaf bereikbaar zonder login ervoor. Het tabblad toont het aantal rode namen.',
+      'Het dashboard volgt elke weg naar binnen: de tunnel, de oranje en de grijze wolk, en rechtstreeks via je thuis-IP als poort 443 daar voor iedereen naar NPM gaat. Dan is Cloudflare Access te omzeilen, en dat zegt het ook. Een IP-lijst die je LAN toelaat, telt via de tunnel niet: cloudflared komt zelf van je LAN.',
+      'Ook records die iemand kan overnemen (naar een vroeger thuis-IP, of naar een naam die niet meer bestaat), records waar NPM niets mee doet en wildcards. Heeft een app zijn eigen login, of gebruik je een record voor je VPN, markeer het dan als bewust (met je 2FA-code en een reden).',
+      'Elk uur nagekeken. Een naam die nieuw open staat, geeft een melding, en ! toont de rode namen. Het dashboard leest alleen: het verandert niets in Cloudflare, NPM of OPNsense. Welke calls het doet, zie je met "welke calls?".',
+    ],
+    instellen: [
+      'Cloudflare → My Profile → API Tokens → het token van API-beheer (of van de tegel Cloudflare Tunnel) → Edit: voeg Zone → Zone → Read, Zone → DNS → Read en Account → Access: Apps and Policies → Read toe, met bij Zone Resources je zone jbogaert.be. Optioneel ook Zone → Zone Settings → Read. Krijg je een nieuw token, zet het dan in API-beheer.',
+      'NPM → Users → de gebruiker van het dashboard → Permissions: Item visibility All Items, en View op Proxy Hosts, Redirection Hosts, 404 Hosts, Access Lists en SSL Certificates. Bereikt cloudflared NPM met een Docker-naam (bv. http://npm:80), zet die naam dan bij de NPM-API in npm_names.',
+      'Zet de nachtelijke kopie van OPNsense aan (Beheer → Configuratiewijzigingen): zo weet het dashboard of poort 443 van je thuis-IP voor iedereen openstaat.',
+      'Open Infrastructuur → Netwerk → publiek en klik op vernieuwen. Lees eerst "hoe het binnenkomt", werk dan de rode namen af, ruim records die over te nemen zijn op en beslis over de wildcard.',
+    ],
+  },
+  {
     nr: 35,
     datum: '2026-10-11',
     titel: 'Eenvoudiger',

@@ -12,7 +12,7 @@ export const WINDOWS = [
     hint: 'schijven, temperatuur, snapshots, domeinen, cluster, back-ups', load: () => import('./Health.svelte') },
   { id: 'capacity', menu: 'infra', label: 'Capaciteit', code: 'df', hint: 'opslag, cpu, ram, stroom en prognose',
     load: () => import('./Capacity.svelte') },
-  { id: 'network', menu: 'infra', label: 'Netwerk', code: 'net', hint: 'internet, apparaten, kaart, firewall, Wake-on-LAN',
+  { id: 'network', menu: 'infra', label: 'Netwerk', code: 'net', hint: 'internet, publiek, apparaten, kaart, firewall, Wake-on-LAN, check van buitenaf',
     load: () => import('./Network.svelte') },
   { id: 'cron', menu: 'infra', label: 'Cronjobs', code: 'cron', big: true, hint: 'geplande taken op al je machines',
     load: () => import('./Cron.svelte') },
@@ -23,6 +23,8 @@ export const WINDOWS = [
   { id: 'noodplan', menu: 'infra', label: 'Noodplan', hint: 'afdrukbaar: wat draait waar, back-ups, terugzetten',
     load: () => import('./Noodplan.svelte') },
 
+  { id: 'nieuweservice', menu: 'beheer', label: 'Nieuwe service', hint: 'proxy, DNS, tegel en back-up in één keer',
+    load: () => import('./NewService.svelte') },
   { id: 'terminal', menu: 'beheer', label: 'Terminal', code: '>_', big: true, hint: 'SSH naar je machines',
     load: () => import('./Terminal.svelte') },
   { id: 'updates', menu: 'beheer', label: 'Updates', code: 'apt', hint: 'openstaande pakketten en images',
@@ -73,6 +75,8 @@ const ALIASES = {
   apparaten: { id: 'network', tab: 'apparaten' },
   kaart: { id: 'network', tab: 'kaart' },
   firewall: { id: 'network', tab: 'firewall' },
+  buitencheck: { id: 'network', tab: 'buitencheck' },
+  publiek: { id: 'network', tab: 'publiek' },
   report: { id: 'history', tab: 'report' },
   tijdlijn: { id: 'history' },
   apt: { id: 'updates' },
@@ -84,6 +88,7 @@ const ALIASES = {
   'ssh-discover': { id: 'terminal', sub: 'discover' },
   'logs-setup': { id: 'logs', setup: true },
   edit: { id: 'service' },
+  opruimen: { id: 'nieuweservice', tab: 'opruimen' },
 }
 
 /** Alle namen waaronder een venster geopend kan worden. */
@@ -111,6 +116,9 @@ const SOURCES = {
   domein: { id: 'health', tab: 'domeinen' },
   homepage: { id: 'health', tab: 'homepage' },
   cluster: { id: 'health', tab: 'cluster' },
+  nieuweservice: { id: 'nieuweservice', tab: 'geschiedenis' },
+  buitencheck: { id: 'network', tab: 'buitencheck' },
+  blootstelling: { id: 'network', tab: 'publiek' },
 }
 export const sourceWindow = (source) => (SOURCES[source] ? { ...SOURCES[source] } : null)
 export const NOTIFICATION_SOURCES = Object.keys(SOURCES)

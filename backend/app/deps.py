@@ -126,7 +126,8 @@ EVENT_KIND = {"monitor": "storing", "backup": "backup", "capaciteit": "capacitei
               "auth": "toegang", "cron": "cron",
               "hardware": "gezondheid", "snapshots": "gezondheid", "domein": "gezondheid", "homepage": "gezondheid",
               "herstel": "actie", "config": "wijziging", "apparaat": "netwerk",
-              "cluster": "gezondheid", "webhook": "melding"}
+              "cluster": "gezondheid", "webhook": "melding", "buitencheck": "netwerk", "blootstelling": "netwerk",
+              "nieuweservice": "actie"}
 
 
 def event(db: AsyncSession, kind: str, title: str, body: str | None = None, level: str = "info",

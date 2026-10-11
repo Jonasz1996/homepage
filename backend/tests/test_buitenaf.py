@@ -76,6 +76,10 @@ def test_welke_routes_van_buitenaf_uit_staan():
         "POST /api/health/snapshots/delete": "acties",
         "PUT /api/restoretest/settings": "acties", "POST /api/restoretest/run": "acties",
         "POST /api/devices/{mac}/scan": "acties",
+        # Check van buitenaf: de Worker, zijn geheim of zijn adres, en wat met het bewaarde workers_token kijkt.
+        "PUT /api/buitencheck/settings": "acties", "POST /api/buitencheck/token": "acties",
+        "POST /api/buitencheck/deploy": "acties", "POST /api/buitencheck/deploy/proef": "acties",
+        "POST /api/buitencheck/test": "acties",
         # API-beheer: alles waarmee de server een nieuw adres of pad ophaalt (van buitenaf ook met een verse 2FA). Een
         # tegel met integratie die een ander adres krijgt (layout, import) controleert dat zelf: outside.require.
         "POST /api/apis": "acties", "PATCH /api/apis/{api_id}": "acties", "POST /api/apis/{api_id}/calls": "acties",
@@ -93,9 +97,29 @@ def test_welke_routes_van_buitenaf_uit_staan():
         "POST /api/backups/sync/create": "terminal",
         # De proef van de PBS-sync meldt zich via SSH aan op beide PBS'en (alleen lezen), net als de echte knop.
         "POST /api/backups/sync/proef": "terminal",
+        # Nieuwe service: de proeven lezen NPM, Cloudflare en Proxmox en proberen een poort; de runs veranderen ze.
+        "POST /api/nieuweservice/proef": "acties", "POST /api/nieuweservice/maken": "acties",
+        "POST /api/nieuweservice/opruimen/proef": "acties", "POST /api/nieuweservice/opruimen": "acties",
+        "POST /api/nieuweservice/runs/{run_id}/ongedaan/proef": "acties",
+        "POST /api/nieuweservice/runs/{run_id}/ongedaan": "acties",
     }
     ws = {r.path for r in _routes() if isinstance(r, WebSocketRoute)}
     assert ws == {"/api/ssh/ws/{host_id}", "/api/cron/ws/run/{job_id}", "/api/cron/ws/tail/{target}"}
+
+
+async def test_nieuwe_service_van_buitenaf_uit(authed):
+    """Een nieuwe service maken of opruimen verandert NPM, Cloudflare en Proxmox: van buitenaf staat dat uit, ook de
+    proef (die probeert een poort). Kijken gaat wel."""
+    new = {"name": "x", "ip": "192.168.0.27", "port": 80}
+    for path, body in (("/api/nieuweservice/proef", new), ("/api/nieuweservice/maken", {**new, "plan_hash": "0" * 16}),
+                       ("/api/nieuweservice/opruimen/proef", {"fqdn": "x.jbogaert.be"}),
+                       ("/api/nieuweservice/opruimen", {"fqdn": "x.jbogaert.be", "plan_hash": "0" * 16}),
+                       ("/api/nieuweservice/runs/ns-x/ongedaan/proef", None),
+                       ("/api/nieuweservice/runs/ns-x/ongedaan", {"plan_hash": "0" * 16})):
+        r = await authed.post(path, json=body, headers=CF)
+        assert r.status_code == 403 and r.json()["detail"] == "buiten:acties", (path, r.text)
+    assert (await authed.get("/api/nieuweservice/domein", headers=CF)).json() == {"domain": None}
+    assert (await authed.get("/api/nieuweservice/runs", headers=CF)).json() == {"runs": [], "busy": None}
 
 
 async def test_thuis_en_buiten(authed):

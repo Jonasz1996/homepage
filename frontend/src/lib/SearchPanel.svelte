@@ -62,6 +62,7 @@
     { label: 'van buitenaf: wat mag er via cloudflare (terminal, updates, acties)', run: () => dash.open('security', { tab: 'outside' }) },
     { label: 'veiligheidscheck: 2fa, tokens, sessies, ssh-sleutel', run: () => dash.open('health', { tab: 'beveiliging' }) },
     { label: 'firewall: welke poorten het dashboard gebruikt', run: () => dash.open('network', { tab: 'firewall' }) },
+    { label: 'publiek: welke namen van buitenaf bereikbaar zijn, met of zonder login', run: () => dash.open('network', { tab: 'publiek' }) },
     { label: 'weekrapport', run: () => dash.open('history', { tab: 'report' }) },
     { label: 'apparaten op het netwerk, poortscan', run: () => dash.open('network', { tab: 'apparaten' }) },
     { label: 'netwerkkaart: wat valt er mee uit', run: () => dash.open('network', { tab: 'kaart' }) },

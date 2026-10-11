@@ -1,10 +1,14 @@
 """Proxmox VE: nodes, VM's, containers en opslag via de API met een API-token."""
 
 import re
+from urllib.parse import quote
 
 from .base import Integration, IntegrationError, cell, field, level_for, pct
 
 NODE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$")
+JOB_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+# Geen /: geneste pools past het dashboard niet aan.
+POOL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 
 class Proxmox(Integration):
@@ -47,6 +51,50 @@ class Proxmox(Integration):
     async def get(self, path: str, write: bool = False):
         data = await self.request("GET", "/api2/json" + path, headers=self.headers(write))
         return (data or {}).get("data") or []
+
+    async def backup_jobs(self) -> list[dict]:
+        return await self.get("/cluster/backup")
+
+    async def storages(self) -> list[dict]:
+        return await self.get("/storage")
+
+    async def guest(self, vmid: int) -> dict | None:
+        """De VM of CT met dit nummer zoals /cluster/resources hem kent (node, type, pool, status, name), of None."""
+        for r in await self.get("/cluster/resources?type=vm"):
+            if r.get("vmid") is not None and int(r["vmid"]) == int(vmid) and r.get("type") in ("lxc", "qemu"):
+                return {"vmid": int(r["vmid"]), "type": r["type"], "node": r.get("node"), "pool": r.get("pool") or None,
+                        "status": r.get("status"), "name": r.get("name")}
+        return None
+
+    def job_update_request(self, job_id: str, vmids: list[int]) -> tuple[str, str, dict]:
+        """Een back-upjob met een lijst van VMID's een nieuwe lijst geven (met het actietoken)."""
+        if not isinstance(job_id, str) or not JOB_RE.match(job_id):
+            raise IntegrationError("Ongeldige back-upjob")
+        ids = sorted({int(v) for v in vmids})
+        if not ids:
+            raise IntegrationError("Een back-upjob zonder VM's of containers: niet aangepast")
+        return "PUT", f"/api2/json/cluster/backup/{job_id}", {"vmid": ",".join(map(str, ids))}
+
+    def pool_update_request(self, pool: str, vmid: int, remove: bool = False) -> tuple[str, str, dict]:
+        """Een VM of CT aan een pool toevoegen of eruit halen. Nooit allow-move: een guest uit een andere pool halen
+        doet het dashboard niet."""
+        if not isinstance(pool, str) or not POOL_RE.match(pool):
+            raise IntegrationError("Ongeldige pool")
+        body: dict = {"poolid": pool, "vms": str(int(vmid))}
+        if remove:
+            body["delete"] = 1
+        return "PUT", "/api2/json/pools", body
+
+    async def privs_at(self, path: str) -> set[str]:
+        """Wat het actietoken mag op precies dit pad (bv. /storage/pbs-pi)."""
+        data = await self.request("GET", f"/api2/json/access/permissions?path={quote(path, safe='')}",
+                                  headers=self.headers(write=True))
+        perms = (data or {}).get("data") or {}
+        return {p for v in perms.values() if isinstance(v, dict) for p, on in v.items() if on}
+
+    async def send(self, method: str, path: str, body: dict | None = None):
+        """Een call die iets verandert, met het actietoken (form data, zoals de API van Proxmox het wil)."""
+        return await self.request(method, path, headers=self.headers(write=True), data=body)
 
     def resources_request(self) -> tuple[str, str]:
         """De call van resources(): de proefmodus toont precies deze."""

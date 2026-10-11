@@ -20,6 +20,10 @@ class IntegrationError(Exception):
     """Fout die we zo aan de gebruiker tonen (geen stacktrace, geen geheimen)."""
 
 
+class Forbidden(IntegrationError):
+    """HTTP 403: het token of de gebruiker heeft te weinig rechten voor deze call (geen storing)."""
+
+
 # Netwerkfouten in gewone taal: "ConnectError" alleen zegt niemand iets.
 _NET = (
     ("CERTIFICATE_VERIFY_FAILED", "certificaat niet vertrouwd: zet insecure op true (zelfondertekend certificaat)"),
@@ -131,10 +135,16 @@ class Integration:
         """Zoals request, maar voor een bestand (bv. config.xml) in plaats van JSON."""
         return (await self._send(method, path, **kw)).text
 
+    def _error_detail(self, r: httpx.Response) -> str | None:
+        """De foutmelding van de API zelf bij een 4xx of 5xx (gemaskeerd, kort), of None: dan de algemene tekst."""
+        return None
+
     async def _send(self, method: str, path: str, **kw) -> httpx.Response:
+        # Een eigen time-out per call (een certificaat van Let's Encrypt aanvragen duurt tot anderhalve minuut).
+        timeout = kw.pop("timeout", TIMEOUT)
         try:
             # Nooit volgen: anders gaan headers als X-API-Key mee naar een ander adres.
-            r = await self.client.request(method, self.base + path, timeout=TIMEOUT, follow_redirects=False, **kw)
+            r = await self.client.request(method, self.base + path, timeout=timeout, follow_redirects=False, **kw)
         except httpx.TimeoutException as e:
             raise IntegrationError("Time-out") from e
         except httpx.HTTPError as e:
@@ -142,14 +152,14 @@ class Integration:
         if r.status_code == 401:
             raise IntegrationError("Geweigerd (HTTP 401): API-token ontbreekt of is fout")
         if r.status_code == 403:
-            raise IntegrationError("Geweigerd (HTTP 403): het token heeft te weinig rechten")
+            raise Forbidden("Geweigerd (HTTP 403): het token heeft te weinig rechten")
         if 300 <= r.status_code < 400:
             to = r.headers.get("location", "")
             raise IntegrationError(f"Doorgestuurd (HTTP {r.status_code}) naar {to[:120] or '?'}: zet die url in de instellingen, "
                                    "of rechtstreeks het adres van de API (bv. https://192.168.0.50:8006). "
                                    "Een login (Authentik) ervoor laat geen API-token door.")
         if r.status_code >= 400:
-            raise IntegrationError(f"HTTP {r.status_code} op {path.split('?')[0]}")
+            raise IntegrationError(self._error_detail(r) or f"HTTP {r.status_code} op {path.split('?')[0]}")
         return r
 
     async def summary(self) -> list[dict]:

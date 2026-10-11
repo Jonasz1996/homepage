@@ -5,19 +5,27 @@
   import Modal from './Modal.svelte'
   import Tabs from './Tabs.svelte'
   import { storm } from './fx.js'
+  import { dash } from './dash.svelte.js'
+  import Buitencheck from './Buitencheck.svelte'
   import Devices from './Devices.svelte'
   import Firewall from './Firewall.svelte'
+  import Exposure from './Exposure.svelte'
   import NetMap from './NetMap.svelte'
 
-  // Internet: publiek IP, WAN-gateways (OPNsense), Cloudflare-tunnels en Wake-on-LAN; en de apparaten op het LAN.
+  // Internet: publiek IP, WAN-gateways (OPNsense), Cloudflare-tunnels en Wake-on-LAN; wat publiek is (welke namen van
+  // buitenaf bereikbaar zijn); en de apparaten op het LAN.
   let { onclose, onchanged, initialTab, initialQuery = '' } = $props()
   let tab = $state(untrack(() => initialTab) || 'internet')
-  const TABS = [
+  // Een rood bolletje als een tegel van buitenaf stuk is en daar een melding van kwam (niet stil).
+  let outsideDot = $derived(Object.values(dash.status).some((s) => s?.vanbuiten?.status === 'down' && !s.vanbuiten.quiet) ? 'err' : null)
+  let TABS = $derived([
     { key: 'internet', label: 'internet' },
+    { key: 'publiek', label: 'publiek', count: data?.exposure?.err, level: 'err' },
     { key: 'apparaten', label: 'apparaten' },
     { key: 'kaart', label: 'kaart' },
     { key: 'firewall', label: 'firewall' },
-  ]
+    { key: 'buitencheck', label: 'check van buitenaf', dot: outsideDot },
+  ])
 
   let data = $state(null)
   let error = $state('')
@@ -60,10 +68,14 @@
   <Tabs items={TABS} bind:value={tab} />
   {#if tab === 'apparaten'}
     <Devices {initialQuery} />
+  {:else if tab === 'publiek'}
+    <Exposure onchanged={(d) => { if (data) data.exposure = { ...data.exposure, err: d.counts?.err || 0 } }} />
   {:else if tab === 'kaart'}
     <NetMap />
   {:else if tab === 'firewall'}
     <Firewall />
+  {:else if tab === 'buitencheck'}
+    <Buitencheck />
   {:else}
   {#if error}<p class="err">{error}</p>{/if}
   {#if data}
