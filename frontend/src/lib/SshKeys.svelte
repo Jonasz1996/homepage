@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte'
   import { api, withReauth } from './api.js'
+  import { ask } from './dialog.svelte.js'
   import Modal from './Modal.svelte'
 
   let { keys = [], hosts = [], onclose, onchanged } = $props()
@@ -27,7 +28,7 @@
   }
 
   async function del(k) {
-    if (!confirm(`Sleutel '${k.name}' verwijderen? Hosts die hem gebruiken vallen terug op een wachtwoord.`)) return
+    if (!(await ask(`Sleutel '${k.name}' verwijderen? Hosts die hem gebruiken vallen terug op een wachtwoord.`, { ok: 'Verwijderen', danger: true }))) return
     try {
       await withReauth(() => api(`/ssh/keys/${k.id}`, { method: 'DELETE' }))
       onchanged()
@@ -49,7 +50,7 @@
   }
   async function pinSet(ids, on) {
     if (!ids.length) return
-    if (on && ids.length > 1 && !confirm(`De sleutel op ${ids.length} hosts vastzetten op het IP van het dashboard?`)) return
+    if (on && ids.length > 1 && !(await ask(`De sleutel op ${ids.length} hosts vastzetten op het IP van het dashboard?`, { ok: 'Vastzetten' }))) return
     pinBusy = on ? 'pin' : 'unpin'
     pinMsg = ''
     try {

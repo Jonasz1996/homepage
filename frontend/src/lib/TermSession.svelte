@@ -6,6 +6,7 @@
   import '@xterm/xterm/css/xterm.css'
   import { onMount } from 'svelte'
   import { outsideMessage, requestReauth, signalOutside } from './api.js'
+  import { ask } from './dialog.svelte.js'
 
   // Eén SSH-sessie: xterm.js in de browser, de shell zelf loopt via de WebSocket van de API.
   // Zoals PuTTY: selecteren = kopiëren, rechtsklik = plakken, middenklik = de laatste selectie plakken.
@@ -93,11 +94,11 @@
     return null
   }
 
-  function pasteText(text) {
+  async function pasteText(text) {
     if (!text) return
     const lines = text.replace(/\r?\n$/, '').split(/\r?\n/).length
     // Meerdere regels plakken voert ze allemaal uit: eerst vragen (zoals Windows Terminal).
-    if (lines > 1 && !confirm(`${lines} regels plakken in ${host.name}? Elke regel wordt uitgevoerd.`)) return
+    if (lines > 1 && !(await ask(`${lines} regels plakken in ${host.name}? Elke regel wordt uitgevoerd.`, { ok: 'Plakken' }))) return
     term.paste(text)
     term.focus()
   }
@@ -105,7 +106,7 @@
   export async function paste() {
     const text = await readClipboard()
     if (text !== null) return pasteText(text)
-    if (lastSel) { pasteText(lastSel); say('laatste selectie geplakt'); return }
+    if (lastSel) { await pasteText(lastSel); say('laatste selectie geplakt'); return }
     say('klembord plakken: Ctrl+V (over http mag rechtsklik het klembord niet lezen)')
   }
 
