@@ -3,6 +3,23 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 35,
+    datum: '2026-10-11',
+    titel: 'Eenvoudiger',
+    items: [
+      'De titelbalk heeft nog vijf knoppen: ! Aandacht (alles wat nu mis is, het enige getal dat telt), 🔔 Meldingen (gebeurtenissen) en de menu\'s Infrastructuur, Beheer en Instellingen met leesbare namen. De oude korte namen (hw, df, net, apt, diff, ...) staan er nog naast en werken ook in Ctrl+K. Op de gsm zitten de drie menu\'s samen achter ☰.',
+      'De terugknop van je gsm of browser sluit het bovenste venster, menu of vraag, in plaats van het dashboard te verlaten. Vragen als "Verwijderen?" zijn eigen vensters in de stijl van het dashboard, ook in een Android-app.',
+      'Haalt het dashboard een tijd niets meer op, dan zegt een rode balk sinds wanneer, met "opnieuw proberen". Bovenaan staat wanneer het laatst bijgewerkt is (oranje als dat langer dan een minuut geleden is).',
+      'Een tabblad en een groep met een probleem hebben een rode of oranje stip. Klik op "x down" of op "alleen problemen" om enkel de tegels met een probleem te zien, van alle pagina\'s. Groepen klap je dicht met een klik op hun naam; dat onthoudt elk toestel apart.',
+      'Effecten (Instellingen → Effecten) zetten nu echt alles uit: achtergrond, gloed, scanlijnen, glas en animaties. Op een touchscreen staan ze standaard uit.',
+      'Het dashboard haalt alles op met één verzoek per 30 seconden in plaats van negen aparte, en een deel dat mislukt, probeert het de volgende keer opnieuw.',
+      'Kleine tekst en gelezen meldingen zijn beter leesbaar, en de knop ▤ voor het mini dashboard op een tegel is groter, op de gsm nog wat meer.',
+    ],
+    instellen: [
+      'Niets. Zoek je een oude knop: Ctrl+K met de oude naam (bv. hw of df) opent hetzelfde venster.',
+    ],
+  },
+  {
     nr: 34,
     datum: '2026-10-11',
     titel: 'Betrouwbaarheid',
