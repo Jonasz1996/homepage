@@ -220,6 +220,7 @@ class World:
     def __init__(self):
         self.seen: list[str] = []
         self.broken_pbs = False
+        self.redirect_pbs = None
 
     def __call__(self, req: httpx.Request) -> httpx.Response:
         p = req.url.path
@@ -228,6 +229,8 @@ class World:
             raise httpx.ConnectError("geen route naar de host", request=req)
         if req.url.host == "192.168.0.60":
             if p == "/api2/json/config/datastore":
+                if self.redirect_pbs:
+                    return httpx.Response(302, headers={"Location": self.redirect_pbs})
                 if self.broken_pbs:
                     return httpx.Response(403, json={"data": None})
                 return _ok([{"name": "backup", "path": "/mnt/datastore/backup", "comment": "Cmt-x9"}])
@@ -451,6 +454,21 @@ async def test_vorige_versie_bij_fout(authed, monkeypatch, tmp_path):
     src = next(s for s in v["sources"] if s["key"] == f"pbs:{pbs}")
     assert src == {"key": f"pbs:{pbs}", "name": "PBS pi", "ok": True} and v["data"]["pbs"][0]["stale_from"] is None
     assert nood.problems(v, T0 + timedelta(days=16)) == []
+    await agen.aclose()
+
+
+async def test_foutmelding_gemaskeerd(authed, monkeypatch, tmp_path):
+    # De fouttekst van buiten (hier het adres van een doorverwijzing) gaat naar de browser: zonder bekende geheimen.
+    _, pbs = await _setup(authed, monkeypatch, tmp_path)
+    world = World()
+    world.redirect_pbs = "https://login.example/?token=Kd2-pbs-4Wm"
+    assert (await _run(world))["ok"]
+    agen, db = await _db()
+    v = await _plan(db)
+    src = next(s for s in v["sources"] if s["key"] == f"pbs:{pbs}")
+    assert not src["ok"] and "302" in src["error"] and "***" in src["error"] and "Kd2-pbs-4Wm" not in src["error"]
+    st = nood.status(v, False, T0, False, "/x")
+    assert "Kd2-pbs-4Wm" not in str(st) and v["masked"] == 0
     await agen.aclose()
 
 

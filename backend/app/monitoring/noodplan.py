@@ -1056,6 +1056,8 @@ async def run(maker, http, trigger: str = "week", user: str | None = None, now: 
             st.value = {**prev, "running": {"at": now.isoformat(), "by": user or "worker", "pid": os.getpid()},
                         "tried": now.isoformat()}
             snap, srcs = await _snapshot(db), await sources(db)
+            # De bekende geheimen: voor de foutteksten van buiten (die gaan naar de browser) en het document.
+            secrets = await known(db)
             _connect(srcs, http)
             await db.commit()
         try:
@@ -1065,7 +1067,7 @@ async def run(maker, http, trigger: str = "week", user: str | None = None, now: 
             seen: list[set] = []
             for s in srcs:
                 if s["integ"] is None:
-                    failures[s["key"]] = s["error"]
+                    failures[s["key"]] = mask(s["error"], secrets)
                     continue
                 try:
                     if s["kind"] == "pve":
@@ -1078,7 +1080,7 @@ async def run(maker, http, trigger: str = "week", user: str | None = None, now: 
                         c = await _pbs(s, s["integ"], snap, ips)
                     fresh[s["key"]] = c
                 except IntegrationError as e:
-                    failures[s["key"]] = str(e)[:300]
+                    failures[s["key"]] = mask(str(e)[:300], secrets)
             data, srcs_out = _merge(srcs, fresh, failures, prev, now)
             _place(snap, data, ips)
             data["dashboard"] = _dashboard(snap, data)
@@ -1086,9 +1088,7 @@ async def run(maker, http, trigger: str = "week", user: str | None = None, now: 
             data["access"] = _access(snap, data, ips)
             value = {"v": 1, "at": now.isoformat(), "trigger": trigger, "by": user,
                      "seconds": round(time.monotonic() - started), "sources": srcs_out, "data": data}
-            # B: renderen (de bekende geheimen komen uit de database), niets schrijven.
-            async with maker() as db:
-                secrets = await known(db)
+            # B: renderen, niets schrijven.
             html, masked, kinds = render_with(value, "html", secrets)
             md = render_with(value, "md", secrets)[0]
             s = get_settings()
