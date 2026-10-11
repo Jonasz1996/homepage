@@ -4,6 +4,7 @@
   import { advance, append, cursorOf, prepend } from './logtail.js'
   import LogRules from './LogRules.svelte'
   import LogSetup from './LogSetup.svelte'
+  import Window from './Window.svelte'
 
   // Logviewer: alle syslog-regels van je machines, met zoeken, filters en live meekijken.
   let { open = false, initial = null, onclose } = $props()
@@ -171,81 +172,74 @@
   let maxBar = $derived(Math.max(1, ...(hist?.points || []).map((p) => p.total)))
 </script>
 
-<div class="ov" class:hidden={!open}>
-  <div class="win card glow">
-    <div class="bar">
-      <div class="dots"><i></i><i></i><i></i></div>
-      <span class="title">root@jbogaert:~# tail -f /var/log/{host || '*'}</span>
-      <div class="right">
-        <button class="mini" onclick={() => (modal = 'rules')}>meldingsregels</button>
-        <button class="mini" onclick={() => (modal = 'setup')}>machines toevoegen</button>
-        <button class="mini x" onclick={onclose} aria-label="Logs sluiten">✕</button>
-      </div>
-    </div>
-    <div class="cols">
-      <aside>
-        <button class="hb" class:on={!host} onclick={() => (host = null)}>
-          <b>alle machines</b><small>{hostsError && !hosts.length ? 'aantal onbekend' : `${hosts.reduce((a, h) => a + h.count, 0).toLocaleString('nl-BE')} regels / 24 u`}</small>
+<Window {open} title="tail -f /var/log/{host || '*'}" label="Logs" {onclose}>
+  {#snippet actions()}
+    <button class="mini" onclick={() => (modal = 'rules')}>meldingsregels</button>
+    <button class="mini" onclick={() => (modal = 'setup')}>machines toevoegen</button>
+  {/snippet}
+  <div class="cols">
+    <aside>
+      <button class="hb" class:on={!host} onclick={() => (host = null)}>
+        <b>alle machines</b><small>{hostsError && !hosts.length ? 'aantal onbekend' : `${hosts.reduce((a, h) => a + h.count, 0).toLocaleString('nl-BE')} regels / 24 u`}</small>
+      </button>
+      {#each hosts as h (h.host)}
+        <button class="hb" class:on={host === h.host} onclick={() => (host = host === h.host ? null : h.host)}>
+          <b>{#if h.docker}<span class="dk" title="Docker-container (Portainer)">▣</span> {/if}{h.host}</b>
+          <small>{h.count.toLocaleString('nl-BE')}{#if h.errors}&nbsp;·&nbsp;<span class="e">{h.errors} fouten</span>{/if}</small>
         </button>
-        {#each hosts as h (h.host)}
-          <button class="hb" class:on={host === h.host} onclick={() => (host = host === h.host ? null : h.host)}>
-            <b>{#if h.docker}<span class="dk" title="Docker-container (Portainer)">▣</span> {/if}{h.host}</b>
-            <small>{h.count.toLocaleString('nl-BE')}{#if h.errors}&nbsp;·&nbsp;<span class="e">{h.errors} fouten</span>{/if}</small>
-          </button>
-        {:else}
-          {#if !hostsError}<p class="hint">Nog geen logs ontvangen. Kies <b>machines toevoegen</b>.</p>{/if}
+      {:else}
+        {#if !hostsError}<p class="hint">Nog geen logs ontvangen. Kies <b>machines toevoegen</b>.</p>{/if}
+      {/each}
+      {#if hostsError}<p class="hint">Lijst met machines {hostsError}{hosts.length ? '; de aantallen zijn van daarnet' : ''}. Nieuwe poging over 30 s.</p>{/if}
+    </aside>
+    <section>
+      <div class="filters">
+        <input class="q" bind:value={q} placeholder="zoeken in berichten…" />
+        <select bind:value={sev} aria-label="Ernst">
+          <option value="">alle niveaus</option>
+          <option value="4">warning en erger</option>
+          <option value="3">err en erger</option>
+          <option value="2">crit en erger</option>
+        </select>
+        {#each RANGES as r}
+          <button class="mini" class:on={range === r} onclick={() => (range = r)}>{r}</button>
         {/each}
-        {#if hostsError}<p class="hint">Lijst met machines {hostsError}{hosts.length ? '; de aantallen zijn van daarnet' : ''}. Nieuwe poging over 30 s.</p>{/if}
-      </aside>
-      <section>
-        <div class="filters">
-          <input class="q" bind:value={q} placeholder="zoeken in berichten…" />
-          <select bind:value={sev} aria-label="Ernst">
-            <option value="">alle niveaus</option>
-            <option value="4">warning en erger</option>
-            <option value="3">err en erger</option>
-            <option value="2">crit en erger</option>
-          </select>
-          {#each RANGES as r}
-            <button class="mini" class:on={range === r} onclick={() => (range = r)}>{r}</button>
+        <label class="chk"><input type="checkbox" bind:checked={live} /> live</label>
+      </div>
+      {#if hist}
+        <svg class="hist" viewBox="0 0 {hist.points.length} 40" preserveAspectRatio="none" aria-hidden="true">
+          {#each hist.points as p, i}
+            {@const h = (p.total / maxBar) * 38}
+            {@const he = (p.err / maxBar) * 38}
+            {@const hw = (p.warn / maxBar) * 38}
+            <rect x={i + 0.1} width="0.8" y={40 - h} height={h} class="t" />
+            <rect x={i + 0.1} width="0.8" y={40 - he - hw} height={hw} class="w" />
+            <rect x={i + 0.1} width="0.8" y={40 - he} height={he} class="e" />
           {/each}
-          <label class="chk"><input type="checkbox" bind:checked={live} /> live</label>
-        </div>
-        {#if hist}
-          <svg class="hist" viewBox="0 0 {hist.points.length} 40" preserveAspectRatio="none" aria-hidden="true">
-            {#each hist.points as p, i}
-              {@const h = (p.total / maxBar) * 38}
-              {@const he = (p.err / maxBar) * 38}
-              {@const hw = (p.warn / maxBar) * 38}
-              <rect x={i + 0.1} width="0.8" y={40 - h} height={h} class="t" />
-              <rect x={i + 0.1} width="0.8" y={40 - he - hw} height={hw} class="w" />
-              <rect x={i + 0.1} width="0.8" y={40 - he} height={he} class="e" />
-            {/each}
-          </svg>
-        {:else if histError}
-          <p class="hnote">{histError}</p>
-        {:else if busy}
-          <p class="hnote">grafiek laden…</p>
-        {/if}
-        {#if error}<p class="err">{error}</p>{/if}
-        <div class="list">
-          {#each items as l (l.id)}
-            <div class="ln {sevClass(l.severity)}">
-              <span class="ts">{fmt(l.ts)}</span>
-              <button class="host" onclick={() => (host = l.host)}>{l.host}</button>
-              <span class="app">{l.app || '-'}</span>
-              <span class="sev">{SEV[l.severity]}</span>
-              <span class="msg">{l.msg}</span>
-            </div>
-          {:else}
-            <p class="hint pad">{busy ? 'laden…' : 'Geen regels gevonden.'}</p>
-          {/each}
-          {#if more}<button class="mini more" onclick={loadMore}>meer laden</button>{/if}
-        </div>
-      </section>
-    </div>
+        </svg>
+      {:else if histError}
+        <p class="hnote">{histError}</p>
+      {:else if busy}
+        <p class="hnote">grafiek laden…</p>
+      {/if}
+      {#if error}<p class="err">{error}</p>{/if}
+      <div class="list">
+        {#each items as l (l.id)}
+          <div class="ln {sevClass(l.severity)}">
+            <span class="ts">{fmt(l.ts)}</span>
+            <button class="host" onclick={() => (host = l.host)}>{l.host}</button>
+            <span class="app">{l.app || '-'}</span>
+            <span class="sev">{SEV[l.severity]}</span>
+            <span class="msg">{l.msg}</span>
+          </div>
+        {:else}
+          <p class="hint pad">{busy ? 'laden…' : 'Geen regels gevonden.'}</p>
+        {/each}
+        {#if more}<button class="mini more" onclick={loadMore}>meer laden</button>{/if}
+      </div>
+    </section>
   </div>
-</div>
+</Window>
 
 {#if modal === 'rules'}
   <LogRules hosts={hosts.map((h) => h.host)} onclose={() => (modal = null)} />
@@ -255,9 +249,6 @@
 
 <style>
   .dk { color: var(--mid); font-size: 11px; margin-right: 4px }
-  .ov { position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, .65); padding: 2vh 1vw; display: flex }
-  .ov.hidden { display: none }
-  .win { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden }
   .cols { flex: 1; display: flex; min-height: 0 }
   aside { width: 210px; flex: none; border-right: 1px solid var(--line); padding: 10px; overflow: auto; display: flex; flex-direction: column; gap: 3px }
   .hb { text-align: left; background: none; border: 1px solid transparent; border-radius: 8px; padding: 5px 8px; color: var(--text); cursor: pointer; font: inherit }

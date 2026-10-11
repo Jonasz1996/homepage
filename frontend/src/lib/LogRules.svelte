@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte'
   import { api, withReauth } from './api.js'
+  import { ask } from './dialog.svelte.js'
   import Modal from './Modal.svelte'
 
   // Meldingsregels: een logregel die overeenkomt, verschijnt in het meldingencentrum.
@@ -42,7 +43,7 @@
   }
 
   async function del(r) {
-    if (!confirm(`Regel '${r.name}' verwijderen?`)) return
+    if (!(await ask(`Regel '${r.name}' verwijderen?`, { ok: 'Verwijderen', danger: true }))) return
     error = ''
     try {
       await withReauth(() => api(`/logs/rules/${r.id}`, { method: 'DELETE' }))

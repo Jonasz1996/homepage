@@ -1,7 +1,9 @@
 <script>
   import { onMount, untrack } from 'svelte'
   import { api, withReauth } from './api.js'
+  import { ask } from './dialog.svelte.js'
   import Modal from './Modal.svelte'
+  import Tabs from './Tabs.svelte'
   import { storm } from './fx.js'
   import Devices from './Devices.svelte'
   import Firewall from './Firewall.svelte'
@@ -10,6 +12,12 @@
   // Internet: publiek IP, WAN-gateways (OPNsense), Cloudflare-tunnels en Wake-on-LAN; en de apparaten op het LAN.
   let { onclose, onchanged, initialTab, initialQuery = '' } = $props()
   let tab = $state(untrack(() => initialTab) || 'internet')
+  const TABS = [
+    { key: 'internet', label: 'internet' },
+    { key: 'apparaten', label: 'apparaten' },
+    { key: 'kaart', label: 'kaart' },
+    { key: 'firewall', label: 'firewall' },
+  ]
 
   let data = $state(null)
   let error = $state('')
@@ -27,7 +35,7 @@
   onMount(load)
 
   async function wake(w) {
-    if (!confirm(`${w.name} wekken met Wake-on-LAN?`)) return
+    if (!(await ask(`${w.name} wekken met Wake-on-LAN?`, { ok: 'Wekken' }))) return
     try {
       const r = await withReauth(() => api(`/services/${w.service_id}/wol`, { method: 'POST' }))
       msg = `✓ ${r.message}`
@@ -49,12 +57,7 @@
 </script>
 
 <Modal title="ip -br addr && cloudflared tunnel list" {onclose} wide>
-  <div class="tabs">
-    <button class="mini" class:on={tab === 'internet'} onclick={() => (tab = 'internet')}>internet</button>
-    <button class="mini" class:on={tab === 'apparaten'} onclick={() => (tab = 'apparaten')}>apparaten</button>
-    <button class="mini" class:on={tab === 'kaart'} onclick={() => (tab = 'kaart')}>kaart</button>
-    <button class="mini" class:on={tab === 'firewall'} onclick={() => (tab = 'firewall')}>firewall</button>
-  </div>
+  <Tabs items={TABS} bind:value={tab} />
   {#if tab === 'apparaten'}
     <Devices {initialQuery} />
   {:else if tab === 'kaart'}
@@ -135,7 +138,6 @@
 </Modal>
 
 <style>
-  .tabs { display: flex; gap: 6px; margin-bottom: 12px }
   .top { display: flex; align-items: center; gap: 12px }
   .ip { flex: 1 }
   .ip b { display: block; font-size: 22px; font-weight: 500; color: var(--text-h); letter-spacing: .02em }

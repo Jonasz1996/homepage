@@ -1,13 +1,22 @@
 <script>
   import { untrack } from 'svelte'
   import { api, withReauth } from './api.js'
+  import { ask } from './dialog.svelte.js'
   import Modal from './Modal.svelte'
+  import Tabs from './Tabs.svelte'
 
   // Beveiliging: waar je ingelogd bent, wat er gebeurd is (auditlog), je wachtwoord en wat er van buitenaf mag.
 
   let { onclose, tab: initialTab = null, error: oidcError = '' } = $props()
 
   let tab = $state(untrack(() => initialTab) || 'sessions')
+  const TABS = [
+    { key: 'sessions', label: 'sessies' },
+    { key: 'audit', label: 'auditlog' },
+    { key: 'password', label: 'wachtwoord' },
+    { key: 'sso', label: 'authentik' },
+    { key: 'outside', label: 'van buitenaf' },
+  ]
   let sessions = $state([])
   let audit = $state([])
   let more = $state(false)
@@ -86,7 +95,7 @@
     } catch (e) { error = e.message }
   }
   async function revokeOthers() {
-    if (!confirm('Alle andere apparaten afmelden?')) return
+    if (!(await ask('Alle andere apparaten afmelden?', { ok: 'Afmelden', danger: true }))) return
     try {
       await withReauth(() => api('/auth/sessions/revoke-others', { method: 'POST' }))
       await loadSessions()
@@ -118,7 +127,7 @@
     } catch (e) { ssoErr = e.message }
   }
   async function unlinkSso() {
-    if (!confirm('Authentik-account ontkoppelen? Inloggen via Authentik werkt dan niet meer tot je opnieuw koppelt.')) return
+    if (!(await ask('Authentik-account ontkoppelen? Inloggen via Authentik werkt dan niet meer tot je opnieuw koppelt.', { ok: 'Ontkoppelen', danger: true }))) return
     ssoErr = ''
     ssoMsg = ''
     try {
@@ -197,13 +206,7 @@
 </script>
 
 <Modal title="cat /var/log/auth.log" {onclose} wide>
-  <div class="tabs">
-    <button class="mini" class:on={tab === 'sessions'} onclick={() => (tab = 'sessions')}>sessies</button>
-    <button class="mini" class:on={tab === 'audit'} onclick={() => (tab = 'audit')}>auditlog</button>
-    <button class="mini" class:on={tab === 'password'} onclick={() => (tab = 'password')}>wachtwoord</button>
-    <button class="mini" class:on={tab === 'sso'} onclick={() => (tab = 'sso')}>authentik</button>
-    <button class="mini" class:on={tab === 'outside'} onclick={() => (tab = 'outside')}>van buitenaf</button>
-  </div>
+  <Tabs items={TABS} bind:value={tab} />
   <p class="err">{error}</p>
 
   {#if tab === 'sessions'}
@@ -355,7 +358,6 @@
 </Modal>
 
 <style>
-  .tabs { display: flex; gap: 6px }
   .sess { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 10px; background: var(--fill);
           border: 1px solid rgba(255, 255, 255, .08); margin-bottom: 6px }
   .sess.me { border-color: rgba(143, 214, 164, .45) }

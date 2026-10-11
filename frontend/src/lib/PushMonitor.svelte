@@ -3,6 +3,7 @@
   import { api, poll, withReauth } from './api.js'
   import { rel } from './cronfmt.js'
   import CopyCmd from './CopyCmd.svelte'
+  import { ask } from './dialog.svelte.js'
 
   // Push-monitor (zoals in Uptime Kuma): een script roept het geheime adres aan. Blijft dat langer stil dan het
   // interval, dan gaat de tegel down.
@@ -26,8 +27,8 @@
       error = ''
     } catch (e) { error = e.message } finally { busy = false }
   }
-  function rotate() {
-    if (!confirm('Een nieuw adres maken? Het huidige werkt dan meteen niet meer: pas je scripts aan.')) return
+  async function rotate() {
+    if (!(await ask('Een nieuw adres maken? Het huidige werkt dan meteen niet meer: pas je scripts aan.', { ok: 'Vervangen', danger: true }))) return
     act('/rotate')
   }
   async function setOutside(e) {

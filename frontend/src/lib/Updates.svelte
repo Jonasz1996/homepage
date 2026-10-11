@@ -1,8 +1,10 @@
 <script>
   import { onMount } from 'svelte'
   import { api, poll, withReauth } from './api.js'
+  import { ask } from './dialog.svelte.js'
   import Modal from './Modal.svelte'
   import ProefPlan from './ProefPlan.svelte'
+  import Tabs from './Tabs.svelte'
 
   // Openstaande updates: nodes en PBS via hun API, machines en containers via SSH, Docker via Portainer.
   // Installeren kan hier ook: eerst een snapshot, dan apt, dan kijken of de services nog leven; terugdraaien met één klik.
@@ -16,6 +18,7 @@
   let open = $state({})
   let onlyOpen = $state(true)
   let tab = $state('open')
+  const TABS = [{ key: 'open', label: 'openstaand' }, { key: 'runs', label: 'installaties' }, { key: 'auto', label: "'s nachts" }]
   let picked = $state({})
   let snapshot = $state(true)
   let secOnly = $state(false)
@@ -64,7 +67,7 @@
   }
 
   async function rollback(r) {
-    if (!confirm(`${r.name} terugzetten naar snapshot ${r.snapshot.name}? Alles wat sindsdien op die machine veranderde gaat verloren.`)) return
+    if (!(await ask(`${r.name} terugzetten naar snapshot ${r.snapshot.name}? Alles wat sindsdien op die machine veranderde gaat verloren.`, { ok: 'Terugzetten', danger: true }))) return
     try {
       await withReauth(() => api(`/updates/runs/${r.id}/rollback`, { method: 'POST' }))
       detail = { ...r, status: 'terugdraaien', output: detail?.output || '' }
@@ -113,11 +116,12 @@
 
 <Modal title="apt list --upgradable" {onclose} wide>
   {#if error}<p class="err">{error}</p>{/if}
-  <div class="tabs">
-    <button class="mini" class:on={tab === 'open'} onclick={() => (tab = 'open')}>openstaand</button>
-    <button class="mini" class:on={tab === 'runs'} onclick={() => (tab = 'runs')}>installaties{#if busy}<i class="pulse"></i>{/if}</button>
-    <button class="mini" class:on={tab === 'auto'} onclick={() => (tab = 'auto')}>'s nachts{#if cfg?.auto}<b class="on-dot" class:pr={cfg.proef} title={cfg.proef ? 'aan als proef' : 'aan'}>●</b>{/if}</button>
-  </div>
+  <Tabs items={TABS} bind:value={tab}>
+    {#snippet badge(t)}
+      {#if t.key === 'runs' && busy}<i class="pulse"></i>
+      {:else if t.key === 'auto' && cfg?.auto}<b class="on-dot" class:pr={cfg.proef} title={cfg.proef ? 'aan als proef' : 'aan'}>●</b>{/if}
+    {/snippet}
+  </Tabs>
   {#if data && tab === 'open'}
     <div class="top">
       <div class="sum">
@@ -246,7 +250,6 @@
 </Modal>
 
 <style>
-  .tabs { display: flex; gap: 6px; margin-bottom: 12px }
   .pulse { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #a9c7ff; margin-left: 6px; animation: p 1.2s infinite }
   @keyframes p { 50% { opacity: .3 } }
   .on-dot { color: var(--ok); margin-left: 5px; font-size: 9px }

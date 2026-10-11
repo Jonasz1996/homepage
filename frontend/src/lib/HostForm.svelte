@@ -1,6 +1,7 @@
 <script>
   import { untrack } from 'svelte'
   import { api, withReauth } from './api.js'
+  import { ask } from './dialog.svelte.js'
   import Modal from './Modal.svelte'
 
   let { host = null, keys = [], services = [], folders = [], defaults = null, onclose, onsaved, onkeys } = $props()
@@ -36,14 +37,14 @@
   }
 
   async function del() {
-    if (!confirm(`Host '${host.name}' verwijderen?`)) return
+    if (!(await ask(`Host '${host.name}' verwijderen?`, { ok: 'Verwijderen', danger: true }))) return
     await withReauth(() => api(`/ssh/hosts/${host.id}`, { method: 'DELETE' }))
     onsaved()
     onclose()
   }
 
   async function forget() {
-    if (!confirm('Opgeslagen hostsleutel vergeten? Bij de volgende verbinding moet je hem opnieuw bevestigen.')) return
+    if (!(await ask('Opgeslagen hostsleutel vergeten? Bij de volgende verbinding moet je hem opnieuw bevestigen.', { ok: 'Vergeten', danger: true }))) return
     try {
       await withReauth(() => api(`/ssh/hosts/${host.id}/forget-hostkey`, { method: 'POST' }))
       host.host_key_fingerprint = null

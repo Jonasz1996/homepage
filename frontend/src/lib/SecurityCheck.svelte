@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte'
   import { api, withReauth } from './api.js'
+  import { ask } from './dialog.svelte.js'
 
   // Veiligheidscheck (hw → beveiliging): 2FA, secret.key, kopie buiten de container, sessies van buitenaf,
   // wat er van buitenaf mag, het slot voor het dashboard, de SSH-sleutel en de rechten van de Proxmox-tokens.
@@ -16,7 +17,7 @@
   onMount(load)
 
   async function saved() {
-    if (!confirm('Heb je /etc/homepage/secret.key op een veilige plek buiten de container bewaard (bv. in je wachtwoordkluis)?')) return
+    if (!(await ask('Heb je /etc/homepage/secret.key op een veilige plek buiten de container bewaard (bv. in je wachtwoordkluis)?', { ok: 'Ja, bewaard' }))) return
     try { await withReauth(() => api('/security/secret-key-saved', { method: 'POST' })); await load() } catch (e) { error = e.message }
   }
 

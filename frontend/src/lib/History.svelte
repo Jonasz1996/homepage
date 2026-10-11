@@ -2,11 +2,13 @@
   import { untrack } from 'svelte'
   import { api } from './api.js'
   import Modal from './Modal.svelte'
+  import Tabs from './Tabs.svelte'
 
   // Tijdlijn (storingen, herstarts, back-ups, updates, wijzigingen) en het weekrapport.
   let { onclose, tab: startTab = 'timeline' } = $props()
 
   let tab = $state(untrack(() => startTab))
+  const TABS = [{ key: 'timeline', label: 'tijdlijn' }, { key: 'report', label: 'weekrapport' }]
   let error = $state('')
 
   // Incidentnotitie bij een storing.
@@ -99,23 +101,22 @@
 </script>
 
 <Modal title="history | less" {onclose} wide>
-  <div class="tabs">
-    <button class="mini" class:on={tab === 'timeline'} onclick={() => (tab = 'timeline')}>tijdlijn</button>
-    <button class="mini" class:on={tab === 'report'} onclick={() => (tab = 'report')}>weekrapport</button>
-    <span class="sp"></span>
-    {#if tab === 'timeline'}
-      <select bind:value={kind} aria-label="Soort">
-        <option value="">alles</option>
-        {#each Object.entries(KINDS) as [k, label]}<option value={k}>{label}</option>{/each}
-      </select>
-    {:else}
-      <select bind:value={period} aria-label="Periode">
-        <option value="7">laatste 7 dagen</option>
-        <option value="week">vorige week (ma–zo)</option>
-        <option value="30">laatste 30 dagen</option>
-      </select>
-    {/if}
-  </div>
+  <Tabs items={TABS} bind:value={tab}>
+    {#snippet extra()}
+      {#if tab === 'timeline'}
+        <select bind:value={kind} aria-label="Soort">
+          <option value="">alles</option>
+          {#each Object.entries(KINDS) as [k, label]}<option value={k}>{label}</option>{/each}
+        </select>
+      {:else}
+        <select bind:value={period} aria-label="Periode">
+          <option value="7">laatste 7 dagen</option>
+          <option value="week">vorige week (ma–zo)</option>
+          <option value="30">laatste 30 dagen</option>
+        </select>
+      {/if}
+    {/snippet}
+  </Tabs>
   {#if error}<p class="err">{error}</p>{/if}
 
   {#if tab === 'timeline'}
@@ -222,9 +223,7 @@
   .note { white-space: pre-wrap; border-left: 2px solid var(--mid); padding-left: 8px; color: var(--text-h) }
   .nb { display: inline-flex; gap: 6px; margin-top: 4px }
   textarea { width: 100%; margin-top: 4px; font: inherit; font-size: 12.5px }
-  .tabs { display: flex; gap: 6px; align-items: center; margin-bottom: 8px }
-  .tabs .sp { flex: 1 }
-  .tabs select { width: auto; padding: 5px 8px }
+  select { width: auto; padding: 5px 8px }
   .day { color: var(--muted); font-size: 11.5px; text-transform: lowercase; margin: 14px 0 4px; letter-spacing: .04em }
   .tl { list-style: none; margin: 0; padding: 0 }
   .tl li { display: grid; grid-template-columns: 44px 14px 1fr; gap: 8px; align-items: start; padding: 4px 0; position: relative }

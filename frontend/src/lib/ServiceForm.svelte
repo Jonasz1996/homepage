@@ -2,6 +2,7 @@
   import { boom } from './fx.js'
   import { untrack } from 'svelte'
   import { api, withReauth } from './api.js'
+  import { ask } from './dialog.svelte.js'
   import { iconIsMono, iconUrl } from './icons.js'
   import Modal from './Modal.svelte'
 
@@ -204,7 +205,7 @@
   }
 
   async function del() {
-    if (!confirm(`'${service.name}' verwijderen?`)) return
+    if (!(await ask(`'${service.name}' verwijderen?`, { ok: 'Verwijderen', danger: true }))) return
     error = ''
     try {
       // Een tegel met een lopende check verwijderen vraagt een recente 2FA (zoals pauzeren).
