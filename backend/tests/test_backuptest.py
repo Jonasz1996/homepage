@@ -253,17 +253,25 @@ async def test_nachtelijke_back_up_ruimt_een_achtergebleven_testdatabase_op(tmp_
         (fake / "systemctl").write_text('#!/bin/sh\n[ "$*" = "is-active homepage-backuptest" ] && echo "$TEST_STATE"\n')
         (fake / "systemctl").chmod(0o755)
         env = {**env, "PATH": f"{fake}:{env['PATH']}"}
-        admin = create_async_engine(TEST_DB, isolation_level="AUTOCOMMIT")
-        async with admin.connect() as conn:
-            await conn.execute(text(f'CREATE DATABASE "{scratch}"'))
-        await admin.dispose()
 
-        # De test loopt nu: blijven staan.
-        _run("homepage-backup.sh", {**env, "TEST_STATE": "activating"})
-        assert scratch in await _databases(url)
-        # De test loopt niet: weg, en de back-up zelf lukt gewoon.
-        for f in (tmp_path / "bk").glob("homepage-*.dump"):
-            f.unlink()
-        _run("homepage-backup.sh", {**env, "TEST_STATE": "inactive"})
-        assert scratch not in await _databases(url)
-        assert next((tmp_path / "bk").glob("homepage-*.dump"), None) is not None
+        async def admin(sql: str):
+            engine = create_async_engine(TEST_DB, isolation_level="AUTOCOMMIT")
+            async with engine.connect() as conn:
+                await conn.execute(text(sql))
+            await engine.dispose()
+
+        # (Een vorige run van deze test die halverwege stopte.)
+        await admin(f'DROP DATABASE IF EXISTS "{scratch}" WITH (FORCE)')
+        await admin(f'CREATE DATABASE "{scratch}"')
+        try:
+            # De test loopt nu: blijven staan.
+            _run("homepage-backup.sh", {**env, "TEST_STATE": "activating"})
+            assert scratch in await _databases(url)
+            # De test loopt niet: weg, en de back-up zelf lukt gewoon.
+            for f in (tmp_path / "bk").glob("homepage-*.dump"):
+                f.unlink()
+            _run("homepage-backup.sh", {**env, "TEST_STATE": "inactive"})
+            assert scratch not in await _databases(url)
+            assert next((tmp_path / "bk").glob("homepage-*.dump"), None) is not None
+        finally:
+            await admin(f'DROP DATABASE IF EXISTS "{scratch}" WITH (FORCE)')
