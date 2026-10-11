@@ -9,6 +9,7 @@
   import Notes from './Notes.svelte'
   import RestoreTest from './RestoreTest.svelte'
   import Tabs from './Tabs.svelte'
+  import { inZone, nsDomain } from './nieuweservice.js'
   import ZabbixPanel from './ZabbixPanel.svelte'
   import HealRules from './HealRules.svelte'
   import Incidents from './Incidents.svelte'
@@ -16,7 +17,11 @@
   import PushMonitor from './PushMonitor.svelte'
 
   // Mini dashboard van één service: gegevens van de integratie en de monitoring-historiek.
-  let { service, groups = [], onclose, onedit, onchanged, onterminal } = $props()
+  let { service, groups = [], onclose, onedit, onchanged, onterminal, oncleanup = null } = $props()
+
+  // "opruimen…" alleen voor een tegel op <naam>.<domein> (het domein van een nieuwe service, zonder call naar buiten).
+  let domain = $state(null)
+  nsDomain().then((d) => (domain = d.domain)).catch(() => {})
 
   // SSH-hosts die aan deze service gekoppeld zijn: knop om meteen een terminal te openen.
   let sshHosts = $state([])
@@ -140,6 +145,9 @@
       {/if}
       <!-- Met de pauze zoals ze nu is: anders zet bewaren een net gepauzeerde check stil weer aan (of omgekeerd). -->
       <button class="mini" onclick={() => onedit(service.check?.type ? { ...service, check: { ...service.check, paused: paused || undefined } } : service)}>✎ bewerken</button>
+      {#if oncleanup && inZone(service.url, domain)}
+        <button class="mini" onclick={() => oncleanup(service)} title="proxy host, DNS, tegel en eventueel de back-up weghalen">opruimen…</button>
+      {/if}
     </div>
   </div>
   {#if wolMsg}<p class="wol" class:e={wolMsg.startsWith('✕')}>{wolMsg}</p>{/if}

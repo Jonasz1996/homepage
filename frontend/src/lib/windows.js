@@ -21,6 +21,8 @@ export const WINDOWS = [
   { id: 'history', menu: 'infra', label: 'Tijdlijn', code: 'history', hint: 'archief: storingen, herstarts, weekrapport',
     load: () => import('./History.svelte') },
 
+  { id: 'nieuweservice', menu: 'beheer', label: 'Nieuwe service', hint: 'proxy, DNS, tegel en back-up in één keer',
+    load: () => import('./NewService.svelte') },
   { id: 'terminal', menu: 'beheer', label: 'Terminal', code: '>_', big: true, hint: 'SSH naar je machines',
     load: () => import('./Terminal.svelte') },
   { id: 'updates', menu: 'beheer', label: 'Updates', code: 'apt', hint: 'openstaande pakketten en images',
@@ -82,6 +84,7 @@ const ALIASES = {
   'ssh-discover': { id: 'terminal', sub: 'discover' },
   'logs-setup': { id: 'logs', setup: true },
   edit: { id: 'service' },
+  opruimen: { id: 'nieuweservice', tab: 'opruimen' },
 }
 
 /** Alle namen waaronder een venster geopend kan worden. */
@@ -109,6 +112,7 @@ const SOURCES = {
   domein: { id: 'health', tab: 'domeinen' },
   homepage: { id: 'health', tab: 'homepage' },
   cluster: { id: 'health', tab: 'cluster' },
+  nieuweservice: { id: 'nieuweservice', tab: 'geschiedenis' },
 }
 export const sourceWindow = (source) => (SOURCES[source] ? { ...SOURCES[source] } : null)
 export const NOTIFICATION_SOURCES = Object.keys(SOURCES)
