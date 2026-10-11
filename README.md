@@ -306,7 +306,41 @@ Later, deel 2 (internet, Wake-on-LAN en stroom):
 - **OPNsense** (type `opnsense`, geheimen `key` en `secret` van een API-key): WAN-status, latency en verlies op de
   tegel, alle gateways en de firmwarestatus in het mini dashboard. Firmware-updates tellen mee in `apt`
 - **Cloudflare Tunnel** (type `cloudflared`, instelling `account` = account-id, geheim `token` = API-token met
-  *Account → Cloudflare Tunnel → Read*): status, verbindingen en datacenters per tunnel
+  *Account → Cloudflare Tunnel → Read*): status, verbindingen en datacenters per tunnel. Optioneel een tweede geheim
+  `workers_token` (een apart API-token met *Account → Workers Scripts → Edit*): daarmee zet het dashboard de Worker
+  van de check van buitenaf (zie *Uptime Kuma vervangen*). Voor **wat is publiek**
+  (hieronder) krijgt het gewone token meer leesrechten
+- **wat is publiek** (Infrastructuur → Netwerk → tabblad *publiek*, of `Ctrl+K` → "publiek"): per naam
+  `<x>.jbogaert.be` of iemand op internet erbij kan, en of er een login voor staat: Cloudflare Access, Authentik (of
+  een andere forward-auth) in NPM, of een access list van NPM. Rood = van buitenaf bereikbaar zonder login ervoor. Het
+  dashboard volgt elke weg naar binnen: een Cloudflare Tunnel, de oranje wolk, de grijze wolk, en rechtstreeks via je
+  thuis-IP als poort 443 daar voor iedereen naar NPM gaat (dan is Cloudflare Access te omzeilen: wie het thuis-IP
+  kent, kiest zelf de naam). Ook records die iemand kan overnemen (naar een vroeger thuis-IP, of een CNAME naar een
+  naam die niet meer bestaat), records zonder host in NPM en wildcards. Of de app zelf een login heeft, ziet het
+  dashboard niet: markeer zo'n naam als *bewust open* met een reden (vraagt je 2FA-code, komt in het auditlog). Elk
+  uur, met een melding als een naam nieuw rood wordt; *vernieuwen* kijkt meteen, *welke calls?* toont wat het opvraagt.
+  Alleen lezen: het dashboard verandert niets in Cloudflare, NPM of OPNsense, en geen enkel geheim gaat naar de browser.
+  Instellen:
+  1. **Cloudflare-token** (het token van API-beheer of van de tegel Cloudflare Tunnel): Cloudflare → My Profile →
+     API Tokens → dat token → Edit. Rechten: *Account → Cloudflare Tunnel → Read* (had je al), **Account → Access:
+     Apps and Policies → Read**, **Zone → Zone → Read**, **Zone → DNS → Read**, en optioneel *Zone → Zone Settings →
+     Read* ("Always Use HTTPS") en *Zone → Access: Apps and Policies → Read* (alleen voor oude Access-apps op
+     zoneniveau). Zone Resources: *Include → Specific zone → jbogaert.be* (en elke andere zone); Account Resources:
+     je account. Zonder zone ziet het token niets, en dat zegt het tabblad dan ook. Krijg je een nieuw token, zet het
+     dan in API-beheer. Wil je maar een paar zones nakijken: instelling `zones` = `jbogaert.be,andere.be`
+  2. **NPM-gebruiker** van het dashboard: NPM → Users → die gebruiker → Permissions: *Item visibility: All Items*,
+     *View* op Proxy Hosts, Redirection Hosts, 404 Hosts, **Access Lists** en SSL Certificates, nergens *Manage*.
+     Bereikt cloudflared NPM met een Docker-naam (`http://npm:80`), zet die naam dan bij de NPM-API in `npm_names`;
+     heeft NPM een publiek IPv6-adres, zet dat in `npm_ipv6`
+  3. **Kopie van OPNsense** (Beheer → Configuratiewijzigingen, elke nacht): zo weet het dashboard of poort 443 van
+     je thuis-IP voor iedereen naar NPM gaat of alleen voor Cloudflare. Zonder kopie gaat het ervan uit dat hij open
+     staat zodra een record naar je thuis-IP wijst
+  4. Lees eerst het kader *hoe het binnenkomt*. Staat daar *rechtstreeks naar NPM: open voor iedereen*, beperk de
+     doorverwijzing van 443 dan tot Cloudflare (een alias met `https://www.cloudflare.com/ips-v4`), gebruik alleen de
+     tunnel, of laat NPM het certificaat van Cloudflare eisen (Authenticated Origin Pulls met `ssl_verify_client on`).
+     Werk daarna de rode namen af: Cloudflare Access met een echte regel (niet "iedereen"), Authentik of een access
+     list met wachtwoord, of *bewust open*. Een IP-lijst die je LAN toelaat, houdt via de tunnel niemand tegen:
+     cloudflared komt zelf van je LAN
 - **Wake-on-LAN**: zet bij een service (bv. een HP-node) onder bewerken → Monitoring het MAC-adres. Wekken kan dan
   vanuit het mini dashboard, het netwerkoverzicht of met `Ctrl+K` → "wekken"; het vraagt je 2FA als je langer dan 15
   minuten niet bevestigd hebt. Werkt niet het standaard-broadcastadres in jouw netwerk, zet dan `"wol_broadcast":
@@ -727,6 +761,50 @@ het niet merkt. Klik je op een tegel, dan opent nog altijd de naam.
   alles samen op de NPM-tegel. Uit = via de naam, met DNS, zoals vroeger. API-koppelingen (Zabbix, Portainer, ...)
   gebruiken altijd het adres dat je zelf invulde: zet daar een IP als je DNS wil sparen
 
+**Check van buitenaf (Cloudflare Worker).** De checks hierboven lopen van binnenuit, rechtstreeks naar de server:
+ze zien niet of een tegel ook van buitenaf werkt. Een tunnel die niet verbonden is, een fout in NPM of DNS, een
+WAF-regel die alles tegenhoudt: thuis werkt dan nog alles. Een gratis Cloudflare Worker bekijkt de tegels die je
+kiest daarom ook vanuit het netwerk van Cloudflare, zoals een bezoeker op het internet. Het dashboard roept de Worker
+elke minuut aan (uitgaand 443 vanuit de container naar Cloudflare) met de tegels die het langst niet bekeken zijn; de
+Worker haalt elk adres op en geeft de statuscode terug. De Worker belt nooit zelf naar het dashboard: er komt niets
+binnen, en in NPM, Cloudflare Access of Authentik verandert niets. Hij haalt alleen https-adressen onder je eigen
+domeinen op (`ALLOWED_SUFFIXES`) en geeft zonder het gedeelde geheim (`HOMEPAGE_TOKEN`) een kale 404.
+
+Instellen in **Infrastructuur → Netwerk → check van buitenaf**, op een van twee manieren:
+
+- **via Cloudflare zetten** (aanbevolen): maak in Cloudflare (My Profile → API Tokens → Create Token → Custom token)
+  een apart API-token met alleen *Account → Workers Scripts → Edit*, voor je account. Zet het in API-beheer bij je
+  Cloudflare-API (soort *Cloudflare Tunnel*, adres `https://api.cloudflare.com/client/v4`, instelling `account` =
+  account-id) als geheim `workers_token`, naast het leestoken voor de tunnels. Gebruikte je nog nooit Workers, open
+  dan in Cloudflare één keer *Workers & Pages* en kies een naam onder workers.dev (bv. `jonas`). Vul in het venster
+  de domeinen in (`jbogaert.be`), kies onder *voorstel* de tegels (aangevinkt zijn de namen die NPM kent zonder
+  toegangslijst), bekijk de **proef** (welke calls, met welk token, het volledige script) en klik **In Cloudflare
+  zetten** (2FA). Daarna kan het token weg (*token weghalen*): het is alleen nodig om de Worker opnieuw te zetten.
+  Zolang het er staat, staat de rij *Check van buitenaf* in de instellingen-checklist op half
+- **zelf plakken**, zonder token: vijf stappen in het venster (geheim maken, een Worker maken in Cloudflare, het
+  script plakken, `HOMEPAGE_TOKEN` en `ALLOWED_SUFFIXES` invullen, het workers.dev-adres plakken en *testen en
+  aanzetten*). Het geheim maakt je browser en je ziet het één keer. Een nieuw geheim wacht tot de Worker het kent:
+  tot dan blijft het vorige gelden
+
+Het gratis plan van Cloudflare volstaat: één verzoek per minuut (1.440 van de 100.000 per dag) met hoogstens 45
+adressen, dus elke tegel om de 5 minuten, tot 225 tegels. Elke tegel in de lijst krijgt een klein bolletje (groen,
+rood, of grijs als hij wacht op een check). Werkt een tegel thuis wel en van buitenaf niet, dan staat er
+*thuis ok · buiten down*, met de reden (bv. *de Cloudflare Tunnel is niet verbonden (1033)*), en telt hij mee bij
+*alleen problemen*.
+
+Meldingen: een tegel gaat van buitenaf down na 2 mislukte checks na elkaar; dan één melding (volgens *Melden* van de
+tegel) en één als hij terug is. Vallen er 3 of meer tegels om dezelfde reden uit, dan één melding voor allemaal;
+faalt bijna alles van buitenaf, dan één melding over die massastoring. Niets als de check van binnenuit het al
+meldde, als de tegel in onderhoud of gepauzeerd is, of als NPM of de tunnel al als down gemeld waren; is die reden
+voorbij, dan begint de tegel opnieuw zonder melding. Werkt de Worker zelf niet (geheim fout, dagelijkse limiet op),
+dan één waarschuwing. Wat stuk is, staat ook in **!**.
+
+Staat er *Cloudflare houdt de check tegen met een uitdaging*: Bot Fight Mode, Under Attack of een WAF-regel daagt de
+Worker uit. Maak bij een WAF-regel een *Skip*-regel voor deze verzoeken (veld `cf.worker.upstream_zone`, met de
+waarde die Security → Events toont bij een tegengehouden check). Bot Fight Mode kan je op het gratis plan niet
+overslaan: zet die uit als ze de checks tegenhoudt. De firewall moet de container uitgaand 443 laten doen naar
+`api.cloudflare.com` en `*.workers.dev` (meestal al open: het publieke IP en de tunnels gaan ook via Cloudflare).
+
 **Voor je Uptime Kuma uitzet**:
 
 1. **! → instellingen → Checks op je tegels**: elke service die je in Kuma had, heeft hier een tegel met een check
@@ -809,6 +887,8 @@ plaats van dat van de bezoeker; het dashboard ziet nog altijd het echte IP.
 
 De adressen van Cloudflare zijn van alle klanten van Cloudflare. Wil je zeker zijn dat alleen je eigen zone bij NPM
 komt, gebruik dan alleen een Cloudflare Tunnel (geen poortdoorverwijzing naar 443) of Authenticated Origin Pulls.
+Netwerk → *publiek* zegt in het kader *hoe het binnenkomt* hoe dat bij jou staat (uit de nachtelijke kopie van
+OPNsense), en welke namen je zo langs Cloudflare Access heen bereikt.
 
 Krijg je de melding voor je eigen bezoek via Cloudflare, dan heeft Cloudflare een nieuw adresblok. Dat hoort in
 de repository: vul het aan in `deploy/nginx-map.conf` en werk bij (op het kanaal stabiel pas met een nieuwe

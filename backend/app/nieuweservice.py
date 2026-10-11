@@ -932,7 +932,7 @@ async def plan_create(db: AsyncSession, clients, body, *, at_run: bool = False, 
         hosts = await n.proxy_hosts(write=True)
         redirs, dead = await n.redirection_hosts(write=True), await n.dead_hosts(write=True)
         certs = await n.certificates(write=True)
-        acls = await n.access_lists(write=True)
+        acls = await n.access_lists_raw(write=True)
         me_w = await n.me(True)
         me_r = await n.me(False) if n.split else me_w
     except IntegrationError as e:
@@ -1632,7 +1632,7 @@ async def options(db: AsyncSession, clients) -> dict:
             hosts = await n.proxy_hosts(write=True)
             other = [*await n.redirection_hosts(write=True), *await n.dead_hosts(write=True)]
             certs = await n.certificates(write=True)
-            acls = await n.access_lists(write=True)
+            acls = await n.access_lists_raw(write=True)
             me = await n.me(True)
         except IntegrationError as e:
             notes.append(f"NPM: {mask(str(e))[:200]}")

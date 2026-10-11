@@ -11,7 +11,7 @@ from ..db import get_db
 from ..deps import audit, confirm_silence, current_session, current_user, event, notify, recent_auth
 from ..layout import record_revision
 from ..models import CheckResult, Group, Service, ServiceState, Session, User
-from ..monitoring import rollup, routes
+from ..monitoring import buitencheck, rollup, routes
 from ..monitoring.engine import active, down_after, reset_state
 from ..monitoring.rollup import NOT_MAINT
 
@@ -128,6 +128,10 @@ async def all_status(user: User = Depends(current_user), db: AsyncSession = Depe
         if str(sid) not in out and (paused or maintenance(sid)):
             out[str(sid)] = {"status": None, "maintenance_until": maintenance(sid), "paused": paused,
                              "uptime_24h": uptime.get(sid)}
+    # De check van buitenaf (Netwerk → check van buitenaf), ook voor een tegel zonder check van binnenuit. Niet "buiten":
+    # dat is in /api/overzicht al van waar je verbonden bent.
+    for sid, view in (await buitencheck.tile_views(db, now, services)).items():
+        out.setdefault(str(sid), {"status": None})["vanbuiten"] = view
     return out
 
 

@@ -39,10 +39,17 @@
   let health = $derived(maint ? 'maint' : paused ? 'paused' : status?.stale ? 'stale' : doubt ? 'doubt'
     : status?.status || (service.check?.type ? 'unknown' : null))
   let uptime = $derived(status?.uptime_24h == null ? null : status.uptime_24h * 100)
+  // Check van buitenaf (Netwerk → check van buitenaf): een bolletje op elke tegel in de lijst. De tekst alleen als de rest
+  // van de tegel niets zegt: thuis bereikbaar, of geen check van thuis uit.
+  let vb = $derived(status?.vanbuiten)
+  let outText = $derived(vb?.status !== 'down' || maint ? '' : health === 'up' ? 'thuis ok · buiten down'
+    : health === null ? 'buiten down' : '')
   const pct = (v) => (v >= 99.95 ? '100' : v.toFixed(v >= 99 ? 2 : 1)) + '%'
 
   let certDays = $derived(status?.cert_expires_at ? Math.floor((new Date(status.cert_expires_at) - Date.now()) / 86400000) : null)
   const until = (ts) => new Date(ts).toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' })
+  let vbTitle = $derived(!vb ? '' : 'van buitenaf: ' + (vb.status === 'down' ? `down sinds ${until(vb.since)}${vb.why ? ` (${vb.why})` : ''}`
+    : vb.status === 'up' ? `bereikbaar${vb.ms != null ? `, ${vb.ms} ms` : ''}${vb.colo ? ` vanuit ${vb.colo}` : ''}` : 'wacht op een check'))
   const stateLabel = { up: 'bereikbaar', down: 'down', unknown: 'nog geen check', maint: 'onderhoud', paused: 'check gepauzeerd',
     stale: 'check loopt niet meer', doubt: 'twijfel' }
   let ms = $derived(status?.latency_ms == null ? '' : status.latency_ms < 10 ? status.latency_ms.toFixed(1) : Math.round(status.latency_ms))
@@ -74,13 +81,14 @@
   class:down={health === 'down'}
   class:maint
   class:doubt={health === 'doubt'}
+  class:outdown={!!outText}
   class:paused={health === 'paused' || health === 'stale'}
   href={service.url || undefined}
   target="_blank"
   rel="noopener noreferrer"
   draggable={editing}
   title={[service.description || host || service.name, health && stateLabel[health], status?.last_error,
-          uptime != null && `uptime 24 u ${pct(uptime)}`, status?.redirected_to && `verwijst door naar ${status.redirected_to}`]
+          uptime != null && `uptime 24 u ${pct(uptime)}`, status?.redirected_to && `verwijst door naar ${status.redirected_to}`, vbTitle]
     .filter(Boolean).join(' · ')}
   onclick={click}
   {...events}
@@ -102,11 +110,13 @@
       {:else if health === 'paused'}<span class="ps">gepauzeerd</span>
       {:else if health === 'stale'}<span class="ps">check loopt niet</span>
       {:else if health === 'doubt'}<span class="dt" title={status.last_error}>twijfel ({status.fail_count}/{status.down_after || 3})</span>
+      {:else if outText}<span class="od">{outText}</span>
       {:else if ms !== ''}<span class="ms">{ms} ms</span>{/if}
       {#if uptime != null && uptime < 99.9 && (health === 'up' || health === 'doubt')}<span class="ut" class:bad={uptime < 99}>{pct(uptime)}</span>{/if}
       {#if zbx}<span class="zb" class:bad={zbx.level === 'err'} title={zbxTitle}><i></i>zbx</span>{/if}
       {#if updates?.count}<span class="upd" class:sec={updates.security} title="{updates.count} updates open{updates.security ? `, ${updates.security} beveiliging` : ''}">↑{updates.count}</span>{/if}
       {#if certDays !== null && certDays <= 21}<span class="cert" class:bad={certDays <= 3}>cert {certDays} d</span>{/if}
+      {#if vb}<span class="vb {vb.status}" role="img" title={vbTitle} aria-label={vbTitle}><i></i></span>{/if}
       {service.description || host}
     </span>
     {#if widget?.fields?.length}
@@ -118,6 +128,8 @@
     {:else if health === 'down' && status?.last_error && !status?.cause && !maint}
       <!-- De reden meteen tonen: "Time-out", "Name or service not known", "HTTP 502", ... -->
       <span class="wf"><span class="f lv-err" title={status.last_error}>⚠ {status.last_error}</span></span>
+    {:else if outText && vb.why}
+      <span class="wf"><span class="f lv-err" title={vb.why}>⚠ buiten: {vb.why}</span></span>
     {/if}
   </span>
   {#if spark}
@@ -163,6 +175,14 @@
   .ms { color: var(--text); margin-right: 4px }
   .tile.maint { border-left-color: var(--mid); opacity: .7 }
   .tile.doubt { border-left-color: var(--mid) }
+  /* Thuis werkt het, van buitenaf niet: oranje. */
+  .tile.outdown { border-left-color: var(--mid) }
+  .od { color: var(--err); margin-right: 4px; text-transform: uppercase; font-size: 11px; letter-spacing: .06em }
+  /* Het bolletje van de check van buitenaf: groene ring, rood gevuld als down, grijze ring als het wacht. */
+  .vb { display: inline-flex; align-items: center; margin-right: 5px; vertical-align: middle }
+  .vb i { width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--dim); box-sizing: border-box }
+  .vb.up i { border-color: var(--ok) }
+  .vb.down i { border-color: var(--err); background: var(--err) }
   .tile.paused { border-left-color: #666; opacity: .65 }
   .dt { color: var(--mid); margin-right: 4px }
   .ps { color: var(--dim); margin-right: 4px }

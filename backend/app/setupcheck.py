@@ -18,8 +18,9 @@ from .health import scan as hw, security
 from .integrations import IntegrationError, build
 from .models import (ApiConnection, AppState, CronJob, HealRule, LogEntry, PushMonitor, Service, ServiceState, SshHost,
                      User, WebhookSource)
-from .monitoring import (cluster, configs, coverage, devices, pbssync, restoretest, routes, upgrade, watchdog, webpush,
-                         zabbix as zbx)
+from .monitoring import (cluster, configs, coverage, devices, exposure as expo, pbssync, restoretest, routes, upgrade,
+                         watchdog, webpush, zabbix as zbx)
+from .monitoring import buitencheck as bc
 from .monitoring.containerlogs import logs_on
 from .monitoring.engine import active
 from .security import decrypt_json
@@ -387,6 +388,35 @@ async def webpush_row(db: AsyncSession) -> dict:
     return row("webpush", "monitoring", title, "ok", text, fix=fix)
 
 
+async def outside_row(db: AsyncSession) -> dict:
+    title, fix = "Check van buitenaf", {"window": "net", "tab": "buitencheck"}
+    cfg = await bc.config(db)
+    if not cfg["enabled"] or not cfg["worker_url"] or not cfg["token"]:
+        return row("buitencheck", "monitoring", title, "none", "Alles wordt alleen van binnenuit gecheckt.",
+                   ["Netwerk → check van buitenaf: zet de gratis Cloudflare Worker (token met Workers Scripts → Edit in "
+                    "API-beheer, of zelf plakken)."], fix, optional=True)
+    w = (await bc.state(db))["worker"]
+    n = len(cfg["services"])
+    text = f"{n} tegel{'s' if n != 1 else ''} van buitenaf" + (
+        f", laatst {bc.hhmm(w['ok_at'])} vanuit {w.get('colo') or '?'}." if w.get("ok_at") else ".")
+    waiting = bc._dt(cfg["token_next_at"]) if cfg["token_next"] else None
+    stored = False
+    for a in (await db.execute(select(ApiConnection).where(ApiConnection.kind == "cloudflared"))).scalars():
+        try:
+            stored = stored or bool(a.secrets and decrypt_json(a.secrets).get("workers_token"))
+        except Exception:  # noqa: BLE001 - onleesbaar (andere sleutel): telt niet
+            pass
+    todo = ("aan, maar geen tegels in de lijst" if not n
+            else f"Worker antwoordt niet: {w.get('error')}" if int(w.get("fail") or 0) >= bc.WORKER_FAIL_AFTER
+            else "Er wacht al meer dan een uur een nieuw geheim: plak het in Cloudflare of annuleer het"
+            if waiting and datetime.now(timezone.utc) - waiting > bc.PASTE_GRACE
+            else "Het token met Workers Scripts → Edit staat nog in API-beheer. Het is alleen nodig om de Worker opnieuw "
+                 "te zetten: haal het weg (Netwerk → check van buitenaf)." if stored else None)
+    if todo:
+        return row("buitencheck", "monitoring", title, "half", text, [todo], fix, optional=True)
+    return row("buitencheck", "monitoring", title, "ok", text, fix=fix, optional=True)
+
+
 async def hardware(db: AsyncSession) -> dict:
     hosts = (await _state(db, hw.STATE_KEY)).get("hosts") or []
     title, fix = "Schijven en temperatuur", {"window": "health", "tab": "schijven"}
@@ -650,6 +680,41 @@ async def nieuweservice_row(db: AsyncSession) -> dict:
                fix=fix, optional=True)
 
 
+async def exposure_row(db: AsyncSession) -> dict:
+    """Netwerk › publiek: ziet het dashboard welke namen publiek zijn, en mag het token alles lezen wat nodig is?"""
+    title, fix = "Wat is publiek (Cloudflare en NPM)", {"window": "net", "tab": "publiek"}
+    if not await expo.has_source(db, "cloudflared"):
+        return row("exposure", "beveiliging", title, "none", "Het dashboard ziet niet welke namen publiek zijn.",
+                   ["Geef je Cloudflare-token Zone → Zone → Read, Zone → DNS → Read en Account → Access: Apps and "
+                    "Policies → Read, en zet het in API-beheer (soort Cloudflare Tunnel, met je account-id)."],
+                   {"window": "api"}, optional=True)
+    s = await _state(db, expo.SUMMARY_KEY)
+    errors = [str(e) for e in s.get("errors") or []]
+    todo = list(errors)
+    if not s.get("at"):
+        todo.append("Nog niet gelukt: zie de fout hierboven, en klik daarna op vernieuwen in Netwerk › publiek."
+                    if errors else "Nog niet nagekeken: de worker doet dit elk uur, of klik op vernieuwen in Netwerk › "
+                                   "publiek.")
+    missing = s.get("missing") or []
+    todo += [f"Geef het Cloudflare-token {expo.NEEDED[k]}." for k in missing if k in ("tunnel_config", "access_read")]
+    if not await expo.has_source(db, "npm"):
+        todo.append("Nog geen NPM-tegel of -API: het dashboard ziet de DNS-records, maar niet of er een login voor staat.")
+    elif any(k in missing for k in ("npm_access_lists", "npm_redirects")):
+        todo.append("Geef de NPM-gebruiker View op Access Lists, Redirection Hosts en 404 Hosts, en laat hem alle items "
+                    "zien.")
+    if s.get("at") and s.get("origin") == "onbekend":
+        todo.append("Zet de nachtelijke kopie van OPNsense aan: dan weet het dashboard of poort 443 open staat voor "
+                    "iedereen.")
+    if todo:
+        return row("exposure", "beveiliging", title, "half", "Ingesteld, maar niet alles is na te gaan.", todo, fix)
+    c = s.get("counts") or {}
+    text = (f"{s.get('public', 0)} publieke namen: {c.get('err', 0)} open zonder login, {c.get('bewust', 0)} bewust. "
+            "Elk uur nagekeken.")
+    if s.get("optional"):
+        text += " Optioneel: " + ", ".join(expo.OPTIONAL[k] for k in s["optional"] if k in expo.OPTIONAL) + "."
+    return row("exposure", "beveiliging", title, "ok", text, fix=fix)
+
+
 async def run(db: AsyncSession, clients, results: dict[int, dict]) -> dict:
     svcs = list((await db.execute(select(Service).order_by(Service.name))).scalars())
 
@@ -669,12 +734,14 @@ async def run(db: AsyncSession, clients, results: dict[int, dict]) -> dict:
         await opnsense(db, of("opnsense"), results),
         _integration("npm", "netwerk", "Nginx Proxy Manager", of("npm"), results,
                      "Nog geen NPM-tegel: je proxy hosts kan je niet als tegels importeren en er is geen kopie van.",
-                     ["Tegel of API van type npm met je NPM-login (een eigen gebruiker met alleen leesrechten)."],
+                     ["Tegel of API van type npm met je NPM-login: een eigen gebruiker die alle items ziet, met View op "
+                      "Proxy Hosts, Redirection Hosts, 404 Hosts, Access Lists en SSL Certificates."],
                      "Proxy hosts, import en de nachtelijke kopie werken."),
         await nieuweservice_row(db),
         _integration("cloudflared", "netwerk", "Cloudflare-tunnels", of("cloudflared"), results,
                      "Nog geen Cloudflare-tegel: de status van je tunnels zie je niet.",
-                     ["Cloudflare API-token met Account → Cloudflare Tunnel → Read, plus je account-id (README)."],
+                     ["Cloudflare API-token met Account → Cloudflare Tunnel → Read, plus je account-id (README). Voor "
+                      "Netwerk › publiek ook de rechten uit de rij 'Wat is publiek'."],
                      "De status van je tunnels wordt gevolgd.", optional=True,
                      extra=[e for s in of("cloudflared") if (e := (await _state(db, f"net_tunnel:{s.id}")).get("error"))]),
         _integration("adguard", "netwerk", "AdGuard Home", of("adguard"), results, "Nog geen AdGuard-tegel.",
@@ -683,6 +750,7 @@ async def run(db: AsyncSession, clients, results: dict[int, dict]) -> dict:
         await checks_row(db, svcs),
         *([await routes_row(db, of("npm"))] if of("npm") else []),
         await webpush_row(db),
+        await outside_row(db),
         await watcher_row(db),
         await zabbix_row(db, of("zabbix"), results),
         await home_assistant(db, clients, of("homeassistant"), results),
@@ -698,6 +766,7 @@ async def run(db: AsyncSession, clients, results: dict[int, dict]) -> dict:
                      optional=True),
         *await ssh_rows(db, bool(of("proxmox"))),
         *await safety(db, cfg),
+        await exposure_row(db),
     ]
     groups = [{"key": k, "title": t, "rows": [r for r in rows if r["group"] == k]} for k, t in GROUPS]
     counts = {"ok": sum(1 for r in rows if r["state"] == "ok"),

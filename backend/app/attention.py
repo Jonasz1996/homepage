@@ -16,7 +16,9 @@ from .health import domains as dom, scan as hw, security, selfcheck as sc, snaps
 from .integrations import REGISTRY
 from .integrations.zabbix import RED_FROM
 from .models import AppState, CronJob, Device, MaintenanceWindow, Service, ServiceState, UpdateRun
-from .monitoring import cluster, coverage, devices, planned, restoretest, rollup, updates as upd, zabbix as zbx
+from .monitoring import (cluster, coverage, devices, exposure as expo, planned, restoretest, rollup, updates as upd,
+                         zabbix as zbx)
+from .monitoring import buitencheck as bc
 from .monitoring.engine import KEEP_CHECKS_DAYS, MASS_KEY, active
 from .syslog import server as rxs
 
@@ -24,7 +26,7 @@ ACK_KEY = "attention_ack"
 RANK = {"err": 0, "warn": 1, "info": 2}
 # Bij gelijke ernst: wat het meeste stuk kan maken eerst.
 AREAS = ("services", "checks", "back-ups", "cluster", "hardware", "opslag", "netwerk", "homepage", "zabbix", "cron", "updates",
-         "certificaten", "domeinen", "integraties", "beveiliging", "apparaten", "snapshots", "onderhoud")
+         "certificaten", "domeinen", "integraties", "publiek", "beveiliging", "apparaten", "snapshots", "onderhoud")
 CERT_DAYS = 14
 MAX_PER_AREA = 8
 UPDATE_RUN_DAYS = 7
@@ -495,6 +497,62 @@ async def network(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
     return out
 
 
+async def outside_checks(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
+    """De check van buitenaf: precies wat gemeld werd. Een stille tegel (thuis al stuk, onderhoud, pauze, tunnel, NPM,
+    in een groep of bij een massastoring) krijgt geen eigen punt."""
+    cfg = await _state(db, bc.CONFIG_KEY)
+    if not cfg.get("enabled") or not cfg.get("worker_url") or not cfg.get("token"):
+        return []
+    s = await bc.state(db)
+    fix = {"window": "net", "tab": "buitencheck"}
+    out = []
+    w = s["worker"]
+    # Zoals de melding: niet als het dashboard zelf geen internet heeft of thuis bijna niets bereikt.
+    if (int(w.get("fail") or 0) >= bc.WORKER_FAIL_AFTER and not (await _state(db, "public_ip")).get("error")
+            and not (await _state(db, MASS_KEY)).get("since")):
+        out.append(item("buiten:worker", "warn", "netwerk", "De check van buitenaf werkt niet", w.get("error") or "",
+                        fix, sig=w.get("error")))
+    if mass := s["mass"]:
+        out.append(item("buiten:massa", "err", "netwerk", "Van buitenaf is bijna niets bereikbaar",
+                        f"{mass.get('failing')} van de {mass.get('total')} checks · {mass.get('why')}", fix,
+                        since=mass.get("since")))
+        return out
+    for cause, g in s["groups"].items():
+        since = bc._dt(g.get("since")) or now
+        out.append(item(f"buiten:groep:{cause}", "err", "netwerk",
+                        f"{len(g.get('tiles') or [])} tegels van buitenaf onbereikbaar",
+                        f"{g.get('why') or cause} · al {ago(now - since)}", fix, since=since))
+    down = {int(k): e for k, e in s["tiles"].items()
+            if e.get("status") == "down" and not e.get("quiet") and bc._fresh(e, now)}
+    if not down:
+        return out
+    svcs = {r[0]: r for r in (await db.execute(select(Service.id, Service.name, Service.parent_id,
+                                                      Service.maintenance_until, Service.check))).all()}
+    up = {st.service_id for st in (await db.execute(select(ServiceState).where(ServiceState.service_id.in_(down))))
+          .scalars() if st.status == "up" and st.service_id in svcs and active(svcs[st.service_id][4])}
+
+    def quiet(sid: int) -> bool:
+        seen, x = set(), sid
+        while x and x in svcs and x not in seen:
+            seen.add(x)
+            if (_aware(svcs[x][3]) or now) > now:
+                return True
+            x = svcs[x][2]
+        check = svcs[sid][4] or {}
+        return bool(check.get("type") and check.get("paused"))
+
+    tiles = []
+    for sid, e in sorted(down.items(), key=lambda x: (svcs[x[0]][1].lower() if x[0] in svcs else "")):
+        if sid not in svcs or sid in ctx.get("down", set()) or quiet(sid):
+            continue
+        since = bc._dt(e.get("since")) or now
+        tiles.append(item(f"buiten:{sid}", "err", "netwerk", f"{svcs[sid][1]}: van buitenaf onbereikbaar",
+                          f"{bc._cap(e.get('why')) or 'onbereikbaar'} · al {ago(now - since)}."
+                          + (" Thuis werkt het wel." if sid in up else ""), fix, sig=f"buiten:{e.get('since')}",
+                          since=since))
+    return out + _cap(tiles, "netwerk", "Nog {n} tegels van buitenaf onbereikbaar", fix, key="buiten")
+
+
 async def zabbix(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
     z = await _state(db, zbx.STATE_KEY)
     if not z:
@@ -619,8 +677,49 @@ def integrations(errors: dict[int, str], ctx: dict) -> list[dict]:
     return _cap(out, "integraties", "Nog {n} tegels waarvan de API een fout geeft", {"window": "api"})
 
 
-SOURCES = (services, backups, clusters, hardware, capacity, network, homepage, zabbix, cron_jobs, updates, safety,
-           maintenance, new_services)
+async def public_names(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
+    """Netwerk › publiek: namen die van buitenaf open staan, records die over te nemen zijn, wildcards en records
+    zonder host. Leest alleen de samenvatting die de ronde (elk uur) bewaart: geen API's, geen markeringen."""
+    s = await _state(db, expo.SUMMARY_KEY)
+    if not s:
+        return []
+    fix = {"window": "net", "tab": "publiek"}
+    red = []
+    for r in s.get("red") or []:
+        name, why = r.get("name") or "?", r.get("why") or ""
+        if r.get("state") == "overname":
+            red.append(item(f"pub:overname:{name}", "err", "publiek", f"{name}: DNS-record kan overgenomen worden", why,
+                            fix, sig=r.get("sig")))
+        else:
+            red.append(item(f"pub:{name}", "err", "publiek", f"{name} staat open van buitenaf",
+                            f"{why} Bedoeld zo? Markeer het als bewust in Netwerk › publiek.", fix, sig=r.get("sig")))
+    out = _cap(red, "publiek", "Nog {n} namen open van buitenaf", fix, key="pub:open")
+    for w in s.get("wildcards") or []:
+        out.append(item(f"pub:wildcard:{w.get('name')}", "warn", "publiek", f"Wildcard {w.get('name')} in Cloudflare",
+                        w.get("why") or "", fix, sig=w.get("sig")))
+    n = int(s.get("wees_n") or 0)
+    if n:
+        names = list(s.get("wees") or [])
+        out.append(item("pub:wees", "warn", "publiek", f"{n} DNS-record{'s' if n != 1 else ''} zonder host",
+                        ", ".join(names[:5]) + (" …" if n > 5 else "") + ". Opruimen in Cloudflare, of markeren als bewust.",
+                        fix, sig=",".join(sorted(names))))
+    n = int(s.get("verborgen_n") or 0)
+    if n:
+        out.append(item("pub:verborgen", "warn", "publiek", f"{n} interne namen via je thuis-IP bereikbaar zonder login",
+                        s.get("origin_text") or "", fix, sig=n))
+    errors = s.get("errors") or []
+    if errors:
+        out.append(item("pub:fout", "warn", "publiek", "Niet na te gaan wat publiek is", str(errors[0]), fix,
+                        sig=str(errors[0])))
+    at = _aware(datetime.fromisoformat(s["at"])) if s.get("at") else None
+    if at and (now - at).total_seconds() > expo.STALE_AFTER:
+        out.append(item("pub:oud", "warn", "publiek", "Overzicht van wat publiek is, is oud",
+                        f"Laatst gelukt {ago(now - at)} geleden.", fix))
+    return out
+
+
+SOURCES = (services, backups, clusters, hardware, capacity, network, outside_checks, homepage, zabbix, cron_jobs, updates,
+           safety, maintenance, public_names, new_services)
 
 
 async def collect(db: AsyncSession, errors: dict[int, str] | None = None) -> dict:

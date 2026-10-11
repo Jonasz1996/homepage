@@ -49,8 +49,11 @@ def host_url(h: dict) -> str | None:
 class NginxProxyManager(Integration):
     name = "npm"
     label = "Nginx Proxy Manager"
-    config_help = {"url": "http://192.168.0.245:81 (de beheerpoort van NPM)"}
-    secret_help = {"username": "e-mailadres van de NPM-gebruiker", "password": "wachtwoord",
+    config_help = {"url": "http://192.168.0.245:81 (de beheerpoort van NPM)",
+                   "npm_names": "optioneel: andere namen van NPM zoals cloudflared ze gebruikt (bv. npm, nginx-proxy-manager)",
+                   "npm_ipv6": "optioneel: publieke IPv6-adressen van NPM (voor AAAA-records)"}
+    secret_help = {"username": "e-mailadres van de NPM-gebruiker (alle items zichtbaar; View op proxy, redirection en 404 "
+                               "hosts, access lists en certificaten)", "password": "wachtwoord",
                    "action_username": "optioneel: e-mail van een tweede NPM-gebruiker om proxy hosts te maken en te "
                                       "verwijderen (README)",
                    "action_password": "wachtwoord van die gebruiker"}
@@ -112,7 +115,8 @@ class NginxProxyManager(Integration):
     async def dead_hosts(self, write: bool = False) -> list[dict]:
         return await self.get("/nginx/dead-hosts", write)
 
-    async def access_lists(self, write: bool = False) -> list[dict]:
+    async def access_lists_raw(self, write: bool = False) -> list[dict]:
+        """Zoals NPM ze geeft (voor een nieuwe service); access_lists() hieronder is de opgekuiste versie."""
         return await self.get("/nginx/access-lists?expand=clients,items", write)
 
     async def me(self, write: bool = False) -> dict:
@@ -126,6 +130,19 @@ class NginxProxyManager(Integration):
         except (ValueError, AttributeError):
             return None
         return mask(f"NPM: {msg}")[:200] if msg else None
+
+    async def access_lists(self) -> list[dict]:
+        """De access lists: per lijst satisfy any, het aantal gebruikers en de allow/deny-regels. Gebruikersnamen en
+        wachtwoorden (of hun hint) blijven hier achter."""
+        out = []
+        for al in await self.get("/nginx/access-lists?expand=items,clients") or []:
+            if not isinstance(al, dict) or al.get("id") is None:
+                continue
+            clients = [{"directive": str(c.get("directive") or "").lower(), "address": str(c.get("address") or "").strip()}
+                       for c in al.get("clients") or [] if isinstance(c, dict)]
+            out.append({"id": al["id"], "name": str(al.get("name") or "")[:100], "satisfy_any": bool(al.get("satisfy_any")),
+                        "users": len([i for i in al.get("items") or [] if isinstance(i, dict)]), "clients": clients})
+        return out
 
     async def summary(self) -> list[dict]:
         hosts = await self.proxy_hosts()

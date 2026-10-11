@@ -3,6 +3,7 @@
   import { untrack } from 'svelte'
   import { api, poll, withReauth } from './api.js'
   import { ask } from './dialog.svelte.js'
+  import { dash } from './dash.svelte.js'
   import IntegrationPanel from './IntegrationPanel.svelte'
   import LatencyChart from './LatencyChart.svelte'
   import Modal from './Modal.svelte'
@@ -86,6 +87,7 @@
   const pct = (v) => (v == null ? '—' : `${(Math.floor(v * 1000) / 10).toFixed(1)}%`)
   const ms = (v) => (v == null ? '—' : v < 10 ? `${v.toFixed(1)} ms` : `${Math.round(v)} ms`)
   const when = (ts) => new Date(ts).toLocaleString('nl-BE', { dateStyle: 'short', timeStyle: 'short' })
+  const hhmm = (ts) => (ts ? new Date(ts).toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' }) : '?')
   function ago(ts) {
     const m = Math.round((Date.now() - new Date(ts).getTime()) / 60000)
     if (m < 60) return `${m} min`
@@ -178,6 +180,13 @@
   {/if}
 
   {#if service.check?.type === 'push'}<PushMonitor {service} />{/if}
+
+  <!-- Check van buitenaf: ook voor een tegel zonder check van thuis uit. -->
+  {#if dash.status[String(service.id)]?.vanbuiten}
+    {@const b = dash.status[String(service.id)].vanbuiten}
+    <p class="hint" class:warn={b.status === 'down'}>Van buitenaf: {b.status === 'down' ? `onbereikbaar sinds ${hhmm(b.since)}` : b.status === 'up' ? 'bereikbaar' : 'wacht op een check'}{b.why ? ` · ${b.why}` : ''}{b.note ? ` · ${b.note}` : ''}{b.at ? ` · laatst ${ago(b.at)} geleden` : ''}{b.colo ? ` vanuit ${b.colo}` : ''}.
+      <button class="mini" onclick={() => dash.open('network', { tab: 'buitencheck' })}>check van buitenaf</button></p>
+  {/if}
 
   {#if !service.check?.type}
     <p class="hint">Voor deze service staat nog geen monitoring aan. Kies onder <b>bewerken → Monitoring</b> een check.</p>

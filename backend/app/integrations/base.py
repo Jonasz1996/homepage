@@ -20,6 +20,10 @@ class IntegrationError(Exception):
     """Fout die we zo aan de gebruiker tonen (geen stacktrace, geen geheimen)."""
 
 
+class Forbidden(IntegrationError):
+    """HTTP 403: het token of de gebruiker heeft te weinig rechten voor deze call (geen storing)."""
+
+
 # Netwerkfouten in gewone taal: "ConnectError" alleen zegt niemand iets.
 _NET = (
     ("CERTIFICATE_VERIFY_FAILED", "certificaat niet vertrouwd: zet insecure op true (zelfondertekend certificaat)"),
@@ -148,7 +152,7 @@ class Integration:
         if r.status_code == 401:
             raise IntegrationError("Geweigerd (HTTP 401): API-token ontbreekt of is fout")
         if r.status_code == 403:
-            raise IntegrationError("Geweigerd (HTTP 403): het token heeft te weinig rechten")
+            raise Forbidden("Geweigerd (HTTP 403): het token heeft te weinig rechten")
         if 300 <= r.status_code < 400:
             to = r.headers.get("location", "")
             raise IntegrationError(f"Doorgestuurd (HTTP {r.status_code}) naar {to[:120] or '?'}: zet die url in de instellingen, "

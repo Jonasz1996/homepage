@@ -76,6 +76,10 @@ def test_welke_routes_van_buitenaf_uit_staan():
         "POST /api/health/snapshots/delete": "acties",
         "PUT /api/restoretest/settings": "acties", "POST /api/restoretest/run": "acties",
         "POST /api/devices/{mac}/scan": "acties",
+        # Check van buitenaf: de Worker, zijn geheim of zijn adres, en wat met het bewaarde workers_token kijkt.
+        "PUT /api/buitencheck/settings": "acties", "POST /api/buitencheck/token": "acties",
+        "POST /api/buitencheck/deploy": "acties", "POST /api/buitencheck/deploy/proef": "acties",
+        "POST /api/buitencheck/test": "acties",
         # API-beheer: alles waarmee de server een nieuw adres of pad ophaalt (van buitenaf ook met een verse 2FA). Een
         # tegel met integratie die een ander adres krijgt (layout, import) controleert dat zelf: outside.require.
         "POST /api/apis": "acties", "PATCH /api/apis/{api_id}": "acties", "POST /api/apis/{api_id}/calls": "acties",

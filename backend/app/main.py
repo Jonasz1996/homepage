@@ -12,7 +12,7 @@ from .config import get_settings
 from .db import get_db, get_maker
 from .deps import COOKIE, csrf_guard, secure_cookie
 from .monitoring import watchdog
-from .routers import (apis, attention, auth, backups, capacity, configs, cron, diagnose, heal, health, hooks, importexport, integrations, layout, logs, monitoring, network, notifications,
+from .routers import (apis, attention, auth, backups, buitencheck, capacity, configs, cron, diagnose, exposure, heal, health, hooks, importexport, integrations, layout, logs, monitoring, network, notifications,
                       netmap, nieuweservice, npmroutes, oidc, outside, overzicht, planning, restoretest, search, securitycheck, ssh, timeline, upgrade, versie,
                       webpush, zabbix)
 from .routers import push
@@ -98,6 +98,8 @@ app.include_router(npmroutes.router)
 app.include_router(diagnose.router)
 app.include_router(overzicht.router)
 app.include_router(nieuweservice.router)
+app.include_router(buitencheck.router)
+app.include_router(exposure.router)
 
 
 @app.middleware("http")
