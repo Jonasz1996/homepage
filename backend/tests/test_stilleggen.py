@@ -12,7 +12,7 @@ from app.deps import SILENCE_HINT
 from app.main import app
 from app.models import AuditLog, CronJob, MaintenanceWindow, Notification, Service, ServiceState, Session
 from app.monitoring import planned
-from app.monitoring.engine import silencing
+from app.monitoring.engine import _aware, silencing
 
 from .test_beveiliging import _reauth
 from .test_kuma_vervangen import _group, _svc
@@ -148,6 +148,85 @@ async def test_herhalend_venster_hoogstens_12_uur(authed):
     assert end - begin == timedelta(hours=12)
     assert not planned.active(old, start + timedelta(days=1, hours=13))
     assert planned.describe(old) == "elke dag om 03:00, 12 u 00"
+
+
+async def _old_window(**target) -> tuple[int, datetime, datetime]:
+    """Een herhalend venster van een hele dag (van vóór de grens van 12 uur), sinds 2 uur bezig."""
+    now = datetime.now(timezone.utc)
+    start = (now - timedelta(hours=2)).replace(second=0, microsecond=0)
+    w = MaintenanceWindow(name="altijd", repeat="daily", start=start, minutes=1440, weekdays=[], enabled=True, **target)
+    agen, db = await _db()
+    db.add(w)
+    await db.commit()
+    begin, end = planned.active(w, now)
+    await agen.aclose()
+    return w.id, begin, end
+
+
+async def _until(sid: int) -> datetime | None:
+    agen, db = await _db()
+    until = _aware((await db.get(Service, sid)).maintenance_until)
+    await agen.aclose()
+    return until
+
+
+async def test_ouder_venster_van_een_dag_blijft_uit_te_zetten_en_te_hernoemen(authed):
+    """Vroeger kon een herhalend venster een hele dag duren. Zo'n venster gaat gewoon uit, en het in de editor openen
+    en bewaren (die zet de duur op 12 uur) is niet anders plannen. Het loopt nog maar 12 uur per keer."""
+    g = await _group(authed)
+    plex = await _svc(authed, g, "plex", {"type": "http"})
+    nas = await _svc(authed, g, "nas", {"type": "http"})
+    wid, begin, end = await _old_window(service_id=plex)
+    assert end - begin == timedelta(hours=12)
+    # Wat de oude versie zette: de volle dag. Nu zet een lopend venster hoogstens 12 uur.
+    agen, db = await _db()
+    (await db.get(Service, plex)).maintenance_until = begin + timedelta(days=1)
+    await db.commit()
+    await agen.aclose()
+    old = {"name": "altijd", "service_id": plex, "repeat": "daily", "start": begin.isoformat(), "minutes": 1440}
+
+    # Uitzetten met de duur die de lijst vroeger meestuurde: vrij, en het onderhoud van de volle dag stopt.
+    await _stale()
+    r = await authed.put(f"/api/maintenance/windows/{wid}", json={**old, "enabled": False})
+    assert r.status_code == 200, r.text
+    assert await _until(plex) <= datetime.now(timezone.utc)
+    # Weer aanzetten: met een hele dag niet, met 12 uur (wat de lijst nu stuurt) met 2FA.
+    r = await authed.put(f"/api/maintenance/windows/{wid}", json=old)
+    assert r.status_code == 422 and "hoogstens 12 uur" in r.text
+    assert _needs_2fa(await authed.put(f"/api/maintenance/windows/{wid}", json={**old, "minutes": 720}))
+
+    # Openen en bewaren in de editor (die zet de duur op 12 uur) is niet anders plannen: geen 2FA, geen melding.
+    wid, begin, end = await _old_window(service_id=nas)
+    r = await authed.put(f"/api/maintenance/windows/{wid}", json={**old, "service_id": nas, "name": "nacht",
+                                                                   "start": begin.isoformat(), "minutes": 720})
+    assert r.status_code == 200, r.text
+    assert r.json()["active_until"] and await _until(nas) == end
+    assert not await _notes()
+    assert (await _actions()).count("maintenance_planned") == 2
+
+
+async def test_ouder_venster_verwijderen_stopt_ook_de_volle_dag(authed):
+    """Een venster van een hele dag dat al liep voor de update, zette het onderhoud tot het einde van die dag. Na 12 uur
+    loopt het venster niet meer, maar verwijderen stopt dat onderhoud toch (en laat onderhoud met de hand staan)."""
+    g = await _group(authed)
+    plex = await _svc(authed, g, "plex", {"type": "http"})
+    nas = await _svc(authed, g, "nas", {"type": "http"})
+    wid, begin, _ = await _old_window(group_id=g)
+    agen, db = await _db()
+    w = await db.get(MaintenanceWindow, wid)
+    w.start = begin = begin - timedelta(hours=12)
+    (await db.get(Service, plex)).maintenance_until = begin + timedelta(days=1)
+    (await db.get(Service, nas)).maintenance_until = hand = begin + timedelta(days=2)
+    await db.commit()
+    assert not planned.active(w, datetime.now(timezone.utc))
+    assert await planned.apply(db) == 0
+    await db.commit()
+    await agen.aclose()
+    assert await _until(plex) == begin + timedelta(days=1)
+    await _stale()
+    assert (await authed.delete(f"/api/maintenance/windows/{wid}")).status_code == 204
+    assert await _until(plex) <= datetime.now(timezone.utc)
+    assert await _until(nas) == hand
 
 
 async def test_onderhoud_met_de_hand_valt_op_in_aandacht(authed):

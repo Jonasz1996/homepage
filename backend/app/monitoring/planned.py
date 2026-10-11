@@ -26,12 +26,17 @@ def _local(dt: datetime) -> datetime:
     return _aware(dt).astimezone()
 
 
+def run_minutes(w) -> int:
+    """Hoe lang het venster per keer loopt (een MaintenanceWindow of wat de API binnenkrijgt)."""
+    return w.minutes if w.repeat == "once" else min(w.minutes, REPEAT_MAX)
+
+
 def occurrences(w: MaintenanceWindow, around: datetime, days: int = 1) -> list[tuple[datetime, datetime]]:
     """Begin en einde van de keren dat het venster loopt, van gisteren tot `days` dagen na `around`."""
     if w.repeat == "once":
         st = _aware(w.start)
         return [(st, st + timedelta(minutes=w.minutes))]
-    length = timedelta(minutes=min(w.minutes, REPEAT_MAX))
+    length = timedelta(minutes=run_minutes(w))
     t = _local(w.start).timetz()
     base = around.astimezone().date()
     out = []
@@ -63,7 +68,7 @@ def next_run(w: MaintenanceWindow, now: datetime) -> datetime | None:
 
 def describe(w: MaintenanceWindow) -> str:
     st = _local(w.start)
-    m = w.minutes if w.repeat == "once" else min(w.minutes, REPEAT_MAX)
+    m = run_minutes(w)
     dur = f"{m // 60} u {m % 60:02d}" if m >= 60 else f"{m} min"
     if w.repeat == "once":
         return f"{st.strftime('%d/%m/%Y %H:%M')}, {dur}"
@@ -113,11 +118,17 @@ async def apply(db: AsyncSession, now: datetime | None = None) -> int:
 
 
 async def stop(db: AsyncSession, w: MaintenanceWindow, now: datetime | None = None) -> None:
-    """Venster verwijderd of uitgezet terwijl het loopt: het onderhoud dat het zette, meteen beëindigen."""
+    """Venster verwijderd of uitgezet terwijl het loopt: het onderhoud dat het zette, meteen beëindigen. Een ouder
+    herhalend venster van meer dan REPEAT_MAX kan dat nog met zijn volle lengte gezet hebben (tot begin + w.minutes,
+    van vóór de grens): ook dat stopt, tot die volle lengte voorbij is."""
     now = now or datetime.now(timezone.utc)
-    run = active(w, now)
-    if not run:
+    if not w.enabled:
         return
-    for s in await targets(db, w):
-        if _aware(s.maintenance_until) == run[1]:
-            s.maintenance_until = now
+    for st, en in occurrences(w, now):
+        full = max(en, st + timedelta(minutes=w.minutes))
+        if not st - LEAD <= now < full:
+            continue
+        for s in await targets(db, w):
+            until = _aware(s.maintenance_until)
+            if until is not None and en <= until <= full:
+                s.maintenance_until = now

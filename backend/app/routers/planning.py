@@ -61,7 +61,8 @@ class WindowIn(BaseModel):
         if self.repeat == "weekly" and not self.weekdays:
             raise ValueError("Kies minstens één weekdag")
         # Elke dag 24 uur (of elke weekdag een hele dag) is altijd onderhoud: dan meldt die service nooit meer iets.
-        if self.repeat != "once" and self.minutes > planned.REPEAT_MAX:
+        # Alleen voor een venster dat aan staat: een ouder venster dat nog langer bewaard is, kan altijd uit.
+        if self.enabled and self.repeat != "once" and self.minutes > planned.REPEAT_MAX:
             raise ValueError(f"Een herhalend venster duurt hoogstens {planned.REPEAT_MAX // 60} uur per keer; "
                              "langer kan eenmalig")
         if self.start.tzinfo is None:
@@ -88,10 +89,11 @@ async def _target_name(db: AsyncSession, body: WindowIn) -> str:
 
 
 def _schedule(w: MaintenanceWindow | WindowIn) -> tuple:
-    """Wanneer en voor wie het venster loopt (de naam telt niet). Een herhalend venster telt alleen het uur."""
+    """Wanneer en voor wie het venster loopt (de naam telt niet). Een herhalend venster telt alleen het uur, en de duur
+    zoals het echt loopt: een ouder venster van 24 uur dat de editor op 12 uur zet, is niet anders gepland."""
     start = planned._local(w.start)
     when = start if w.repeat == "once" else start.strftime("%H:%M")
-    return w.service_id, w.group_id, w.repeat, when, w.minutes, sorted(set(w.weekdays or []))
+    return w.service_id, w.group_id, w.repeat, when, planned.run_minutes(w), sorted(set(w.weekdays or []))
 
 
 async def _confirm(db: AsyncSession, request: Request, sess: Session, user: User, body: WindowIn) -> None:
