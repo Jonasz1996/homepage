@@ -95,6 +95,8 @@ async def proxmox(db: AsyncSession, clients, svcs: list[Service], results: dict[
                     "tegel van type proxmox."], {"window": "api"})
     todo = _errors(svcs, results)
     tokens = await security.proxmox_tokens(db, clients)
+    # De rechten opvragen duurt tot 8 s per token: geen transactie open.
+    await db.commit()
     split = any(i.split for _, i in tokens)
     for name, integ in tokens:
         read, act, err = await _privs(integ)

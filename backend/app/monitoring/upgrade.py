@@ -254,6 +254,8 @@ async def _px_node(px, snap: dict) -> None:
 
 async def _px_guest(db: AsyncSession, http: HttpClients, snap: dict):
     px = await _px_service(db, http, snap)
+    # De GET naar Proxmox zonder open transactie.
+    await db.commit()
     await _px_node(px, snap)
     return px
 

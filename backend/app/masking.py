@@ -20,7 +20,7 @@ MASK = "***"
 # Kortere waarden zouden gewone woorden verminken.
 MIN_KNOWN = 4
 
-_SECRET_NAME = r"[\w.-]*(?:passw(?:or)?d|passwd|secret|token|api[_-]?key|apikey|private[_-]?key|psk)[\w.-]*"
+_SECRET_NAME = r"[\w.-]{0,40}(?:passw(?:or)?d|passwd|secret|token|api[_-]?key|apikey|private[_-]?key|psk)[\w.-]{0,40}"
 
 PATTERNS: list[tuple[str, re.Pattern, str]] = [
     ("sleutel", re.compile(r"-----BEGIN ([A-Z0-9 ]*)PRIVATE KEY-----.*?-----END \1PRIVATE KEY-----", re.S),
@@ -30,7 +30,7 @@ PATTERNS: list[tuple[str, re.Pattern, str]] = [
     ("header", re.compile(r"(?i)\b(authorization|proxy-authorization|x-api-key|api-key|x-auth-token|cookie|set-cookie)"
                           r"(\"?'?\s*[:=]\s*\"?'?)(?!\*\*\*)[^\"'\n]+"), r"\1\2***"),
     ("token", re.compile(r"(?i)\b(bearer|basic)\s+(?!\*\*\*)[A-Za-z0-9._~+/=-]{12,}"), r"\1 ***"),
-    ("url", re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/\s@:\"']*):[^/\s@\"']+@"), r"\1\2:***@"),
+    ("url", re.compile(r"(?i)\b([a-z][a-z0-9+.-]{0,30}://)([^/\s@:\"']{0,200}):[^/\s@\"']{1,500}@"), r"\1\2:***@"),
     ("url", re.compile(r"(?i)([?&;]" + _SECRET_NAME + r"=)(?!\*\*\*)[^&\s\"'#]+"), r"\1***"),
     ("url", re.compile(r"(?i)([?&;](?:key|auth|sig|signature|session|sid|code)=)(?!\*\*\*)[^&\s\"'#]+"), r"\1***"),
     ("url", re.compile(r"(/api/(?:push|hooks)/)[A-Za-z0-9_-]{16,}"), r"\1***"),
