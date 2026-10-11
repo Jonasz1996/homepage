@@ -11,6 +11,7 @@ from ..deps import audit, confirm_silence, current_session, current_user, notify
 from ..integrations import REGISTRY
 from ..layout import load_pages, pages_out, record_revision, restore_snapshot, service_out
 from ..models import ApiConnection, Group, Page, Revision, Service, Session, User
+from ..monitoring import buitencheck
 from ..monitoring.engine import active, group_silencing, identity, parent_silencing, reset_state, restarts, silencing
 from ..schemas import GroupIn, OrderIn, PageIn, ServiceIn
 from ..security import decrypt_json, encrypt_json
@@ -19,9 +20,11 @@ router = APIRouter(prefix="/api", tags=["layout"])
 
 
 async def _guard_removal(db: AsyncSession, request: Request, sess: Session, user: User, services: list[Service]) -> None:
-    """Een tegel met een lopende check verwijderen legt de bewaking stil, net als pauzeren: dat vraagt een recente 2FA
-    en geeft een melding (ook op je gsm). Anders zou een gestolen sessie de check gewoon weggooien."""
-    names = sorted(s.name for s in services if active(s.check))
+    """Een tegel met een lopende check (van binnenuit, of van buitenaf als die draait) verwijderen legt de bewaking stil,
+    net als pauzeren: dat vraagt een recente 2FA en geeft een melding (ook op je gsm). Anders zou een gestolen sessie de
+    check gewoon weggooien."""
+    outside_ids = set(await buitencheck.running(db)) if services else set()
+    names = sorted(s.name for s in services if active(s.check) or s.id in outside_ids)
     if not names:
         return
     await recent_auth(sess, user)

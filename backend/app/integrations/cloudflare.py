@@ -76,9 +76,10 @@ def _policy_verdict(p: dict) -> str:
         return "bypass"
     if decision != "allow" or not include or require:
         return "login"
-    if kinds == {"everyone"}:
+    # De include-regels gelden met "of": één regel voor iedereen (of een land) of een publiek maildomein volstaat.
+    if kinds & {"everyone", "geo"}:
         return "everyone"
-    if kinds == {"email_domain"} and all(_name(v.get("domain")) in PUBLIC_MAIL for _, v in include):
+    if any(k == "email_domain" and _name(v.get("domain")) in PUBLIC_MAIL for k, v in include):
         return "public_mail"
     return "login"
 
@@ -276,12 +277,16 @@ class CloudflareTunnel(Integration):
                                         cell(", ".join(t["colos"]) or "—"), cell(t["version"] or "—")] for t in ts]}]}
 
     # --- Workers (check van buitenaf) ----------------------------------------------------------------------------
-    # Alleen met workers_token, nooit met het token voor de tunnels, en alleen naar api.cloudflare.com: een token dat
-    # alle Workers van het account mag aanpassen, gaat zo nooit naar een ander adres.
+    # Alleen met workers_token, nooit met het token voor de tunnels, en alleen naar api.cloudflare.com met een
+    # gecontroleerd certificaat: een token dat alle Workers van het account mag aanpassen, gaat zo nooit naar een ander
+    # adres.
 
     def _workers(self) -> tuple[str, dict]:
         if self.base != API:
             raise IntegrationError(f"Zet het adres van deze API op {API}")
+        if self.config.get("insecure"):
+            raise IntegrationError("Zet 'zelfondertekend certificaat toestaan' uit bij deze API: het workers_token gaat "
+                                   "alleen over een gecontroleerde verbinding")
         account = str(self.config.get("account") or "").strip().lower()
         if not ACCOUNT_RE.match(account):
             raise IntegrationError("Account-id ontbreekt of klopt niet (32 tekens)")

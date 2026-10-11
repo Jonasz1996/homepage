@@ -355,6 +355,12 @@ def test_access_apps_soorten():
     assert verdict({"decision": "non_identity", "include": [{"everyone": {}}]}) == "bypass"
     assert verdict({"decision": "allow", "include": [{"everyone": {}}], "require": [{"group": {"id": "g"}}]}) == "login"
     assert verdict(login, everyone) == "everyone"  # de zwakste regel telt
+    # De include-regels gelden met "of": één open regel naast een echte maakt de policy open.
+    assert verdict({"decision": "allow", "include": [{"everyone": {}}, {"email": {"email": "jonas@voorbeeld.be"}}]}) == \
+        "everyone"
+    assert verdict({"decision": "allow", "include": [{"email_domain": {"domain": "gmail.com"}},
+                                                     {"email": {"email": "jonas@voorbeeld.be"}}]}) == "public_mail"
+    assert verdict({"decision": "allow", "include": [{"geo": {"country_code": "BE"}}]}) == "everyone"
     assert set(a) == {"name", "type", "hosts", "verdict"}
     assert "jonas@" not in json.dumps([a, b]) and "aud-geheim" not in json.dumps(a)
 
@@ -506,6 +512,26 @@ def test_wan_doorverwijzingen():
     assert (r["iface"], r["proto"], r["to_ip"], r["to_port"], r["to_last"], r["from_cf"]) == (
         "opt1", "tcp", NPM, 80, 443, False)
     assert ex.origin_state(mvc, set(), set(), {NPM})["open"] is True
+    # Een NAT-regel van any zonder "Pass": de WAN-filterregel naar NPM beslist mee wie binnen mag.
+    cf_only = ("<filter><rule><type>pass</type><interface>wan</interface><protocol>tcp</protocol>"
+               "<source><address>cf_ips</address></source>"
+               "<destination><address>192.168.0.245</address><port>443</port></destination></rule>{more}</filter>")
+    with_filter = lambda more="", nat="": OPN_CF.format(src="any").replace(  # noqa: E731
+        "</nat>", "</nat>" + cf_only.format(more=more)).replace("<descr>NPM</descr>", "<descr>NPM</descr>" + nat)
+    fw = ex.wan_forwards(with_filter(), 1000)
+    assert [(r["from"], r["from_cf"]) for r in fw["rules"]] == [("cf_ips (filterregel)", True), ("any", False)]
+    assert ex.origin_state(fw, set(), set(), {NPM})["basis"] == "cloudflare"
+    any_too = ("<rule><type>pass</type><interface>wan</interface><source><any/></source>"
+               "<destination><any/></destination></rule>")
+    assert ex.wan_forwards(with_filter(any_too), 1000)["rules"][0]["from_cf"] is False
+    other = ("<rule><type>pass</type><interface>wan</interface><source><any/></source>"
+             "<destination><address>192.168.0.10</address></destination></rule>")
+    assert ex.wan_forwards(with_filter(other), 1000)["rules"][0]["from_cf"] is True
+    off = ("<rule><type>pass</type><interface>wan</interface><disabled>1</disabled><source><any/></source>"
+           "<destination><any/></destination></rule>")
+    assert ex.wan_forwards(with_filter(off), 1000)["rules"][0]["from_cf"] is True
+    passing = with_filter(nat="<associated-rule-id>pass</associated-rule-id>")
+    assert ex.wan_forwards(passing, 1000)["rules"][0]["from_cf"] is False  # "Pass": geen filterregel ertussen
     no_target = OPN_CF.format(src="any").replace("<target>192.168.0.10</target>", "")
     assert ex.wan_forwards(no_target, 1000)["status"] == "onbekend"
     assert ex.wan_forwards(OPN_CF.format(src="any"), configs.MAX_SIZE)["status"] == "onbekend"
@@ -670,6 +696,94 @@ def test_vingerafdruk_en_markeringen():
     s = ex.summary(value, datetime.now(timezone.utc))
     assert s["red"][0]["name"] == "blog.jbogaert.be" and s["wees"] == ["stale.jbogaert.be"] and s["wees_n"] == 1
     assert s["origin"] == "cf" and s["never"] is False and s["public"] == 2
+
+
+def test_lezen_mislukt_is_niet_na_te_gaan():
+    """Een fout bij Cloudflare of NPM (geen 403) mag geen oordeel geven dat de ronde erna weer anders is."""
+    recs = [(n, "CNAME", TUN, True) for n in ("direct", "jellyfin", "nas")]
+    hosts = [_h(1, "jellyfin"), _h(3, "nas", "192.168.0.22", 5000, access_list_id=1)]
+    rows, _ = run(cfd(recs, access_read=None), npmd(hosts))
+    for n in ("direct", "jellyfin"):
+        r = rows[f"{n}.jbogaert.be"]
+        assert (r["state"], r["level"], r["why_key"], r["undecided"]) == ("onbekend", "warn", "onbekend_access", True)
+    # De instellingen van de tunnel: een fout maakt de rij onzeker, een 403 niet (die blijft elke ronde gelijk).
+    rows, _ = run(cfd(recs, configs={T_THUIS: None}, tunnel_config=None), npmd(hosts))
+    assert rows["jellyfin.jbogaert.be"]["undecided"] is True and "tunnel_unread" in keys(rows["jellyfin.jbogaert.be"])
+    rows, _ = run(cfd(recs, configs={T_THUIS: None}, tunnel_config=False), npmd(hosts))
+    assert rows["jellyfin.jbogaert.be"]["undecided"] is False
+    # Toegangslijsten: leesbaar is de LAN-lijst via de tunnel rood; niet leesbaar door een fout is het onzeker.
+    rows, _ = run(cfd(recs), npmd(hosts))
+    assert (rows["nas.jbogaert.be"]["state"], rows["nas.jbogaert.be"]["undecided"]) == ("open", False)
+    broken = npmd(hosts, lists=None)
+    broken.rights["npm_access_lists"] = None
+    rows, _ = run(cfd(recs), broken)
+    assert (rows["nas.jbogaert.be"]["state"], rows["nas.jbogaert.be"]["undecided"]) == ("slot", True)
+
+
+def test_tunnels_met_dezelfde_naam():
+    cf = cfd([("a", "CNAME", TUN, True), ("b", "CNAME", TUN, True), ("c", "CNAME", f"{T_OUD}.cfargotunnel.com", True)])
+    cf.tunnels = [{"id": T_THUIS, "name": "homelab", "status": "healthy", "deleted": False},
+                  {"id": T_OUD, "name": "homelab", "status": "inactive", "deleted": True},
+                  {"id": T_TWEEDE, "name": "homelab", "status": "inactive", "deleted": True}]
+    _, out = run(cf, npmd([_h(1, "a"), _h(2, "b")]))
+    assert [(t["name"], t["deleted"], t["names"]) for t in out["inbound"]["tunnels"]] == [
+        ("homelab", False, 2), ("homelab", True, 1)]
+
+
+def test_access_app_voor_de_hele_naam():
+    apps = [{"name": "API", "type": "self_hosted", "hosts": [{"host": "sonarr.jbogaert.be", "path": "/api"}],
+             "verdict": "bypass"},
+            {"name": "Alles", "type": "self_hosted", "hosts": [{"host": "*.jbogaert.be", "path": None}],
+             "verdict": "login"}]
+    assert ex.access_for(apps, "sonarr.jbogaert.be") == ("login", "Alles", None, ["/api"])
+    rows, _ = run(cfd([("sonarr", "A", HOME, True)], apps), npmd([_h(1, "sonarr")]), ctx(forwards=OPN_OK_CF()))
+    s = rows["sonarr.jbogaert.be"]
+    assert (s["state"], s["login"]) == ("slot", ["Cloudflare Access (Alles)"])
+    assert next(n for n in s["notes"] if n["key"] == "partial")["text"] == "Deels zonder login: /api (Cloudflare Access)."
+    assert "access_path" not in keys(s)
+
+
+def test_publiek_ip_onbekend():
+    recs = [("blog", "A", HOME, True), ("pw", "A", HOME, True)]
+    hosts = [_h(1, "blog"), _h(2, "pw", access_list_id=2)]
+    rows, _ = run(cfd(recs), npmd(hosts), ctx(forwards=OPN_OK_CF()))
+    known = rows["blog.jbogaert.be"]
+    rows, _ = run(cfd(recs), npmd(hosts), ctx(forwards=OPN_OK_CF(), ip_known=False, public_ip=None, home_ips=set(),
+                                                old_ips=set(), ip_why="geen antwoord"))
+    blog, pw = rows["blog.jbogaert.be"], rows["pw.jbogaert.be"]
+    # Dezelfde vingerafdruk: een markering "bewust" blijft gelden (geen nieuwe melding).
+    assert (blog["state"], blog["undecided"], blog["sig"]) == ("open", "ip", known["sig"]) and "ip_unknown" in keys(blog)
+    # Een login geldt hoe dan ook; alleen een overname is niet na te gaan.
+    assert (pw["state"], pw["undecided"]) == ("slot", "ip")
+
+
+def test_alarm_bij_onzekere_rijen():
+    """Zonder publiek IP geldt een login nog (herstel); een overname of een rij die niet te lezen was, houdt het alarm."""
+    class Db:
+        def __init__(self):
+            self.added = []
+
+        def add(self, x):
+            self.added.append(x)
+
+    old = {f"pub:{n}.jbogaert.be": {"title": n, "why": "", "kind": k}
+           for n, k in (("slot", "open"), ("overname", "overname_ip"), ("lijst", "open"), ("wees", "open"))}
+    rows = [{"name": "slot.jbogaert.be", "state": "slot", "undecided": "ip"},
+            {"name": "overname.jbogaert.be", "state": "slot", "undecided": "ip"},
+            {"name": "lijst.jbogaert.be", "state": "slot", "undecided": True},
+            {"name": "wees.jbogaert.be", "state": "wees", "undecided": "ip"}]
+    db = Db()
+    alarm = ex._notify(db, {"alarm": old}, {"rows": rows}, {})
+    assert set(alarm) == {"pub:overname.jbogaert.be", "pub:lijst.jbogaert.be", "pub:wees.jbogaert.be"}
+    assert [x.title for x in db.added if isinstance(x, Notification)] == ["slot.jbogaert.be is niet meer open"]
+
+
+def test_dit_dashboard_alleen_op_nginx():
+    hosts = [_h(1, "home", "192.168.10.156", 80), _h(2, "proef", "192.168.10.156", 8080)]
+    rows, _ = run(cfd([("home", "A", HOME, True), ("proef", "A", HOME, True)]), npmd(hosts),
+                  ctx(forwards=OPN_OK_CF(), dashboard_ip="192.168.10.156"))
+    assert rows["home.jbogaert.be"]["login"] == ["eigen login met 2FA (dit dashboard)"]
+    assert (rows["proef.jbogaert.be"]["state"], rows["proef.jbogaert.be"]["login"]) == ("open", [])
 
 
 # --- de ronde, de API en de veiligheid ----------------------------------------------------------------------------
@@ -943,7 +1057,7 @@ async def test_ip_geschiedenis(authed, pub):
     n = len(await _notifications())
     await _run(pub)
     rows = await _rows(authed)
-    assert rows["dash.jbogaert.be"]["undecided"] is True and rows["dash.jbogaert.be"]["state"] != "overname"
+    assert rows["dash.jbogaert.be"]["undecided"] == "ip" and rows["dash.jbogaert.be"]["state"] != "overname"
     assert rows["stale.jbogaert.be"]["state"] == "elders" and "ip_unknown" in keys(rows["stale.jbogaert.be"])
     assert not any(r["why_key"] == "overname_ip" for r in rows.values())
     assert "pub:dash.jbogaert.be" in (await _get_state(ex.STATE_KEY))["alarm"]
@@ -1124,6 +1238,14 @@ async def test_overzicht_leest_alleen_samenvatting(authed, pub):
     assert r.status_code == 200
     assert (await _notifications())[-1].title == \
         "Waarschuwing over publiek genegeerd: jellyfin.jbogaert.be staat open van buitenaf"
+
+
+async def test_verborgen_vingerafdruk_per_naam(authed):
+    base = {"at": datetime.now(timezone.utc).isoformat(), "verborgen_n": 2, "origin_text": "Poort 443 staat open."}
+    await _put_state(ex.SUMMARY_KEY, {**base, "verborgen": ["a.jbogaert.be", "b.jbogaert.be"]})
+    sig = (await _attention_keys(authed))["pub:verborgen"]["sig"]
+    await _put_state(ex.SUMMARY_KEY, {**base, "verborgen": ["a.jbogaert.be", "pve.jbogaert.be"]})
+    assert (await _attention_keys(authed))["pub:verborgen"]["sig"] != sig
 
 
 async def test_checklist_optioneel(authed, pub):

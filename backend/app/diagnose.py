@@ -188,6 +188,8 @@ async def known_secrets(db: AsyncSession, counts: Counter | None = None) -> list
     bc = await _value(db, "buitencheck")
     out.append(dec(bc.get("token")) or "")
     out.append(dec(bc.get("token_next")) or "")
+    # De naam van de Worker (en dus zijn workers.dev-adres): wie die kent, kan de dagelijkse limiet opgebruiken.
+    out.append(str(bc.get("name") or ""))
     s = get_settings()
     for f in (s.secret_key_file, s.setup_token_file):
         try:

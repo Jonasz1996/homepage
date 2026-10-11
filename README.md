@@ -340,8 +340,9 @@ Later, deel 2 (internet, Wake-on-LAN en stroom):
      je thuis-IP voor iedereen naar NPM gaat of alleen voor Cloudflare. Zonder kopie gaat het ervan uit dat hij open
      staat zodra een record naar je thuis-IP wijst
   4. Lees eerst het kader *hoe het binnenkomt*. Staat daar *rechtstreeks naar NPM: open voor iedereen*, beperk de
-     doorverwijzing van 443 dan tot Cloudflare (een alias met `https://www.cloudflare.com/ips-v4`), gebruik alleen de
-     tunnel, of laat NPM het certificaat van Cloudflare eisen (Authenticated Origin Pulls met `ssl_verify_client on`).
+     doorverwijzing van 443 dan tot Cloudflare (een alias met `https://www.cloudflare.com/ips-v4` als bron, in de
+     NAT-regel of in de WAN-filterregel die hem doorlaat), gebruik alleen de tunnel, of laat NPM het certificaat van
+     Cloudflare eisen (Authenticated Origin Pulls met `ssl_verify_client on`).
      Werk daarna de rode namen af: Cloudflare Access met een echte regel (niet "iedereen"), Authentik of een access
      list met wachtwoord, of *bewust open*. Een IP-lijst die je LAN toelaat, houdt via de tunnel niemand tegen:
      cloudflared komt zelf van je LAN
@@ -665,8 +666,9 @@ Monitoring**:
 - **melden**: hier en op je gsm, alleen hier (🔔), of niet (alleen de tijdlijn). Zolang hij down is: nooit, elk uur,
   elke 4 uur of elke dag een herinnering. De melding over het certificaat kan per tegel uit
 - **pauzeren** (in het mini dashboard, of in bewerken): de check loopt niet en meldt niets. Pauzeren, de meldingen
-  uitzetten, de check weghalen of een tegel (groep, pagina) met een lopende check verwijderen vraagt je 2FA en geeft
-  een melding, zodat wie je sessie steelt niet stilletjes de bewaking uitzet. Hetzelfde geldt voor onderhoud
+  uitzetten, de check weghalen of een tegel (groep, pagina) met een lopende check verwijderen (ook als alleen de
+  check van buitenaf loopt) vraagt je 2FA en geeft een melding, zodat wie je sessie steelt niet stilletjes de
+  bewaking uitzet. Hetzelfde geldt voor onderhoud
   beginnen of verlengen, gepland onderhoud aanzetten of verschuiven, een cronjob dempen, een webhook uitzetten,
   vernieuwen of weghalen, een logregel uitzetten, lager zetten of weghalen, een beveiligingspunt in **!** negeren,
   de meldingen over een certificaat uitzetten, een check onder een ouder hangen die down of in onderhoud is, of een
@@ -778,8 +780,9 @@ Instellen in **Infrastructuur → Netwerk → check van buitenaf**, op een van t
 
 - **via Cloudflare zetten** (aanbevolen): maak in Cloudflare (My Profile → API Tokens → Create Token → Custom token)
   een apart API-token met alleen *Account → Workers Scripts → Edit*, voor je account. Zet het in API-beheer bij je
-  Cloudflare-API (soort *Cloudflare Tunnel*, adres `https://api.cloudflare.com/client/v4`, instelling `account` =
-  account-id) als geheim `workers_token`, naast het leestoken voor de tunnels. Gebruikte je nog nooit Workers, open
+  Cloudflare-API (soort *Cloudflare Tunnel*, adres `https://api.cloudflare.com/client/v4`, zonder *zelfondertekend
+  certificaat toestaan*, instelling `account` = account-id) als geheim `workers_token`, naast het leestoken voor de
+  tunnels. Gebruikte je nog nooit Workers, open
   dan in Cloudflare één keer *Workers & Pages* en kies een naam onder workers.dev (bv. `jonas`). Vul in het venster
   de domeinen in (`jbogaert.be`), kies onder *voorstel* de tegels (aangevinkt zijn de namen die NPM kent zonder
   toegangslijst), bekijk de **proef** (welke calls, met welk token, het volledige script) en klik **In Cloudflare
