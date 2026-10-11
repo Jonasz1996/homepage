@@ -65,6 +65,8 @@
   let snaps = $derived(data?.snapshots?.items || [])
   let oldSnaps = $derived(snaps.filter((s) => (s.age_days || 0) >= (data?.settings?.snapshot_days || 14)))
   let sc = $derived(data?.selfcheck || {})
+  let rt = $derived(sc.restore || {})
+  let rtTables = $derived(Object.entries(rt.tables || {}))
   let s = $derived(data?.summary)
 
   async function delSnap(x) {
@@ -325,7 +327,7 @@
       <SecurityCheck onfix={(fix) => (fix.window === 'health' ? (tab = fix.tab) : onfix?.(fix))} />
     {:else}
       <div class="head">
-        <span class="hint">Leeft de worker, is er een recente en leesbare back-up, en staat er een kopie buiten de container?</span>
+        <span class="hint">Leeft de worker, is er een recente en leesbare back-up, lukt het terugzetten, en staat er een kopie buiten de container?</span>
         <span class="when">{running.has('selfcheck') ? 'bezig…' : sc.checked_at ? `bekeken ${ago(sc.checked_at)}` : ''}</span>
         <button class="mini" disabled={running.has('selfcheck')} onclick={() => scan('selfcheck')}>⟳ nu</button>
       </div>
@@ -335,12 +337,27 @@
           <p class="small">{data?.worker?.ok ? `gestart ${ago(data.worker.started)}, laatste teken van leven ${ago(data.worker.at)}` : data?.worker?.why}</p>
           {#if !data?.worker?.ok}<p class="dim small">Op de container: <code>systemctl status homepage-worker</code></p>{/if}
         </div>
-        <div class="host lv-{!sc.checked_at ? 'unknown' : sc.stale || sc.verified?.ok === false ? 'err' : 'ok'}">
+        <div class="host lv-{!sc.checked_at ? 'unknown' : sc.stale || sc.verified?.ok === false || rt.status === 'fout' ? 'err' : rt.status === 'overgeslagen' ? 'warn' : 'ok'}">
           <div class="hh"><b>back-up</b><small>{sc.backup_dir}</small>
             {#if sc.checked_at}<span class="right"><span class="pill lv-{sc.stale ? 'err' : 'ok'}">{sc.stale ? 'te oud' : 'recent'}</span></span>{/if}</div>
           {#if !sc.checked_at}<p class="dim small">nog niet bekeken</p>{/if}
           {#if sc.verified?.name}
             <p class="small">{sc.verified.name}: {sc.verified.ok ? `leesbaar (${sc.verified.why})` : sc.verified.ok === false ? `onleesbaar — ${sc.verified.why}` : `niet nagekeken (${sc.verified.why})`}</p>
+          {/if}
+          <!-- De maandelijkse test: de nieuwste dump terugzetten in een testdatabase (deploy/homepage-backuptest.sh). -->
+          {#if rt.status === 'ok'}
+            <p class="small">terugzetten getest {ago(rt.at)}: {rt.tables?.services ?? '?'} services, {rt.tables?.users ?? '?'} gebruiker{rt.tables?.users === 1 ? '' : 's'}, migratie {rt.alembic} · {rt.seconds} s</p>
+          {:else if rt.status === 'fout'}
+            <p class="small e">terugzetten mislukt {ago(rt.at)} — {rt.why}</p>
+          {:else if rt.status === 'overgeslagen'}
+            <p class="small w">terugzetten overgeslagen {ago(rt.at)} — {rt.why}</p>
+          {:else if sc.checked_at}
+            <p class="dim small">terugzetten nog niet getest (elke 1e van de maand om 04:15); nu: <code>systemctl start homepage-backuptest</code></p>
+          {/if}
+          {#if rtTables.length}
+            <details class="small tbls"><summary class="dim">{rt.dump} · {rtTables.length} tabellen nagekeken{rt.timescaledb ? ` · TimescaleDB ${rt.timescaledb}` : ''}{rt.postgresql ? ` · PostgreSQL ${rt.postgresql}` : ''}</summary>
+              {#each rtTables as [t, n]}<p class="dim small row2"><span>{t}</span><span>{n.toLocaleString('nl-BE')}</span></p>{/each}
+            </details>
           {/if}
           {#each (sc.backups || []).slice(0, 5) as b}<p class="dim small">{b.name} · {bytes(b.size)} · {ago(b.at)}</p>{/each}
           {#if sc.checked_at && !(sc.backups || []).length}<p class="small e">Geen dumps gevonden. Elke nacht om 03:30 maakt homepage-backup.timer er één.</p>{/if}
@@ -350,14 +367,15 @@
           {#each sc.db?.tables || [] as t}<p class="dim small row2"><span>{t.name}</span><span>{bytes(t.size)}</span></p>{/each}
           {#each sc.disks || [] as d}<p class="small row2" class:w={d.pct >= 75 && d.pct < 90} class:e={d.pct >= 90}><span>schijf {d.path}</span><span>{d.pct}% · {bytes(d.free)} vrij</span></p>{/each}
         </div>
-        <div class="host wide lv-{!data?.settings?.offsite ? 'unknown' : sc.offsite?.error ? 'warn' : 'ok'}">
+        <div class="host wide lv-{!data?.settings?.offsite ? 'unknown' : sc.offsite?.key_stale ? 'err' : sc.offsite?.error ? 'warn' : 'ok'}">
           <div class="hh"><b>kopie buiten de container</b><small>{data?.offsite_dir}</small></div>
           {#if form}
             <label class="chk"><input type="checkbox" bind:checked={form.offsite} onchange={save} /> elk uur de nieuwste dumps en de versleutelde sleutel kopiëren</label>
           {/if}
           {#if data?.settings?.offsite}
             {#if sc.offsite?.error}<p class="small w">{sc.offsite.error}</p>{/if}
-            {#if sc.offsite?.latest}<p class="small">{sc.offsite.count} dump{sc.offsite.count === 1 ? '' : 's'} daar, nieuwste {sc.offsite.latest.name}{sc.offsite.key ? ' · sleutel ✓' : ''}</p>{/if}
+            {#if sc.offsite?.latest}<p class="small">{sc.offsite.count} dump{sc.offsite.count === 1 ? '' : 's'} daar, nieuwste {sc.offsite.latest.name}{sc.offsite.key && !sc.offsite.key_stale ? ' · sleutel ✓' : ''}</p>{/if}
+            {#if sc.offsite?.key_stale}<p class="small e">De sleutel daar is verouderd: secret.key veranderde nadat je de wachtzin instelde. Stel de wachtzin hieronder opnieuw in.</p>{/if}
           {/if}
           <p class="dim small">Koppel een NAS-share, PBS-opslag of USB-schijf op {data?.offsite_dir} (bv. <code>pct set &lt;id&gt; -mp0 /mnt/nas/homepage,mp={data?.offsite_dir}</code>) en geef gebruiker homepage schrijfrechten. Zonder secret.key zijn de wachtwoorden en API-sleutels in een back-up onleesbaar; daarom gaat hij mee, versleuteld met een wachtzin die nergens bewaard wordt.</p>
           <p class="small">{data?.offsite_key?.set ? `wachtzin ingesteld ${ago(data.offsite_key.at)}` : 'nog geen wachtzin'}</p>
@@ -418,6 +436,7 @@
   .small { font-size: 12px; margin: 3px 0 }
   .block { display: block }
   .row2 { display: flex; justify-content: space-between; gap: 10px }
+  .tbls summary { cursor: pointer }
   code { font-size: 11.5px }
   .chart { width: 100%; height: 260px; display: block }
   .grid-l { stroke: var(--line); stroke-width: 1 }

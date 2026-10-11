@@ -377,7 +377,7 @@ async def test_selfcheck_copies_offsite_without_open_transaction(client, tmp_pat
     monkeypatch.setattr(sc, "disk", lambda p: {"path": str(p), "total": 100, "used": 80, "free": 20, "pct": 80.0})
     seen = []
 
-    def copy(src, dst, blob, now):
+    def copy(src, dst, blob, now, versions):
         seen.append(asyncio.run_coroutine_threadsafe(_idle_in_transaction(), loop).result(10))
         return {"copied": [], "latest": None, "count": 0, "key": False}
     loop = asyncio.get_running_loop()

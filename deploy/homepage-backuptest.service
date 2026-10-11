@@ -1,0 +1,19 @@
+[Unit]
+Description=homepage: de back-up terugzetten in een testdatabase
+After=postgresql.service homepage-backup.service
+
+[Service]
+Type=oneshot
+User=postgres
+# Groep homepage: de worker leest het resultaat (backuptest) en toont het in hw → homepage zelf.
+Group=homepage
+UMask=0027
+# Nieuwste dump in homepage_backuptest, nakijken, weer weg (deploy/homepage-backuptest.sh). Het script stopt zelf na
+# een uur; dit is het vangnet daarboven.
+ExecStart=/usr/local/sbin/homepage-backuptest
+TimeoutStartSec=75min
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/backups/homepage

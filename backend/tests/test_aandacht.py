@@ -6,6 +6,7 @@ import httpx
 from sqlalchemy import select
 
 from app import attention
+from app.config import get_settings
 from app.db import get_db
 from app.health import selfcheck as sc
 from app.main import app
@@ -40,9 +41,85 @@ def _state(db, key, value):
 
 async def test_zonder_worker_staat_dat_bovenaan(authed):
     r = (await authed.get("/api/attention")).json()
-    assert [i["key"] for i in r["items"]] == ["worker"]
-    assert r["items"][0]["level"] == "err" and r["counts"] == {"err": 1, "warn": 0, "info": 0}
+    # Een nieuwe installatie: daarnaast alleen het voorstel voor een kopie buiten de container.
+    assert [i["key"] for i in r["items"]] == ["worker", "offsite-voorstel"]
+    assert r["items"][0]["level"] == "err" and r["counts"] == {"err": 1, "warn": 1, "info": 0}
     assert r["items"][0]["fix"] == {"window": "health", "tab": "homepage"}
+
+
+async def test_kopie_buiten_de_container_voorgesteld(authed):
+    async def voorstel():
+        r = (await authed.get("/api/attention")).json()
+        return next((i for i in r["items"] + r["ignored"] if i["key"] == "offsite-voorstel"), None)
+
+    # Nergens een kopie van secret.key: oranje, met wat een back-up van de CT in PBS al doet.
+    v = await voorstel()
+    assert v["level"] == "warn" and v["title"] == "Back-up van het dashboard staat alleen in de container"
+    assert "secret.key" in v["text"] and "PBS" in v["text"] and "negeren" in v["text"]
+    assert str(get_settings().offsite_dir) in v["text"]
+    assert v["fix"] == {"window": "health", "tab": "homepage"}
+    # Negeren blijft tot het niveau verandert.
+    r = (await authed.put("/api/attention/ignore", json={"key": v["key"], "sig": v["sig"]})).json()
+    assert "offsite-voorstel" in {i["key"] for i in r["ignored"]}
+    # Een kopie van de sleutel bevestigd: nog ter info (telt niet mee in de knop), en weer zichtbaar.
+    assert (await authed.post("/api/security/secret-key-saved")).status_code == 200
+    r = (await authed.get("/api/attention")).json()
+    v = next(i for i in r["items"] if i["key"] == "offsite-voorstel")
+    assert v["level"] == "info" and "onleesbaar" not in v["text"] and r["counts"]["warn"] == 0
+    # Kopie buiten de container aan: geen voorstel meer.
+    r = await authed.put("/api/health/settings", json={"cpu_warn": 85, "disk_warn": 55, "snapshot_days": 14,
+                                                      "offsite": True})
+    assert r.status_code == 200
+    assert await voorstel() is None
+
+
+async def test_zelfcontrole_van_de_back_up(authed):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    agen, db = await _db()
+    _state(db, sc.HEARTBEAT_KEY, {"at": NOW.isoformat(), "started": NOW.isoformat()})
+    _state(db, sc.STATE_KEY, {
+        "verified": {"name": "homepage-2026-10-04.dump", "ok": False, "why": "pg_restore: input file is too short"},
+        "restore": {"status": "fout", "at": now.isoformat(), "dump": "homepage-2026-10-01.dump",
+                    "why": "pg_restore: COPY failed for table \"users\": ERROR:  kapot", "last_ok": None},
+        "offsite": {"enabled": True, "key": True, "key_stale": True, "dir": "/mnt/homepage-backup", "error": None}})
+    await db.commit()
+
+    async def items():
+        return {i["key"]: i for i in (await authed.get("/api/attention")).json()["items"]}
+
+    by = await items()
+    # Onleesbaar: met de reden erbij (vroeger bleef de tekst leeg).
+    assert by["selfverify"]["text"] == "pg_restore: input file is too short"
+    assert by["selfrestore"]["level"] == "err"
+    assert by["selfrestore"]["title"] == "De back-up van het dashboard lukt niet terug te zetten"
+    assert 'COPY failed for table "users"' in by["selfrestore"]["text"]
+    assert "systemctl start homepage-backuptest" in by["selfrestore"]["text"]
+    assert by["offsite-sleutel"]["level"] == "err" and "wachtzin opnieuw" in by["offsite-sleutel"]["text"]
+
+    async def restore(r):
+        st = await db.get(AppState, sc.STATE_KEY, populate_existing=True)
+        st.value = {**st.value, "restore": r}
+        await db.commit()
+        return (await items()).get("selfrestore")
+
+    # Gelukt, een week geleden: niets.
+    week = (now - timedelta(days=7)).isoformat()
+    assert await restore({"status": "ok", "at": week, "last_ok": week}) is None
+    # Overgeslagen (te weinig plaats), maar de laatste geslaagde test is recent: oranje, met de reden.
+    i = await restore({"status": "overgeslagen", "at": now.isoformat(), "why": "te weinig plaats", "last_ok": week})
+    assert i["level"] == "warn" and i["text"] == "te weinig plaats"
+    # De laatste geslaagde test is 45 dagen oud (de timer loopt niet).
+    old = (now - timedelta(days=45)).isoformat()
+    i = await restore({"status": "ok", "at": old, "last_ok": old})
+    assert i["level"] == "warn" and "al 45 dagen niet op een testdatabase teruggezet" in i["title"]
+    assert "systemctl start homepage-backuptest" in i["text"]
+    i2 = await restore({"status": "overgeslagen", "at": now.isoformat(), "why": "te weinig plaats", "last_ok": old})
+    assert i2["sig"] == i["sig"] and "overgeslagen: te weinig plaats" in i2["text"]
+    # Nog nooit getest: pas na 40 dagen een punt.
+    assert await restore({"status": None, "missing_since": (now - timedelta(days=10)).isoformat()}) is None
+    i = await restore({"status": None, "missing_since": (now - timedelta(days=41)).isoformat()})
+    assert i["level"] == "warn" and "41 dagen" in i["title"]
+    await agen.aclose()
 
 
 async def _seed(authed) -> dict[str, int]:
