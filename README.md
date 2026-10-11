@@ -327,8 +327,9 @@ Later, deel 3 (Authentik en gsm):
   prune-job, anders blijft de kopie groeien
 - **gepland onderhoud**: in het mini dashboard van een service (of `Ctrl+K` → "gepland onderhoud" voor groepen)
   onderhoud vooraf plannen: eenmalig, elke dag of op vaste weekdagen (bv. elke zondag 3:00 tot 4:00 tijdens de
-  back-up). Een herhalend venster duurt hoogstens 12 uur per keer. Tijdens het venster geen meldingen en telt de
-  uptime het niet mee; het begin komt op de tijdlijn
+  back-up). Een herhalend venster duurt hoogstens 12 uur per keer; een ouder venster dat langer bewaard was, loopt
+  ook maar 12 uur en kan gewoon uit. Tijdens het venster geen meldingen en telt de uptime het niet mee; het begin komt
+  op de tijdlijn
 - **incidentnotities**: bij een storing op de tijdlijn of in het mini dashboard noteer je de oorzaak en de oplossing.
   Gaat dezelfde service later weer down, dan toont het mini dashboard die notities meteen bovenaan
 - **overal zoeken** met `Ctrl+K`: naast tegels en acties ook notities, cronjobs, SSH-hosts, apparaten,
@@ -511,7 +512,8 @@ Monitoring**:
   een melding, zodat wie je sessie steelt niet stilletjes de bewaking uitzet. Hetzelfde geldt voor onderhoud
   beginnen of verlengen, gepland onderhoud aanzetten of verschuiven, een cronjob dempen, een webhook uitzetten,
   vernieuwen of weghalen, een logregel uitzetten, lager zetten of weghalen, een beveiligingspunt in **!** negeren,
-  de meldingen over een certificaat uitzetten en een check onder een ouder hangen die down of in onderhoud is. Een
+  de meldingen over een certificaat uitzetten, een check onder een ouder hangen die down of in onderhoud is, of een
+  tegel naar een groep slepen of verplaatsen waar nu gepland onderhoud loopt (ook via een oude versie terugzetten). Een
   cronjob niet meer bewaken geeft alleen een melding. Een gepauzeerde check staat ter info in **!**, net als
   onderhoud dat met de hand gezet is en meer dan een dag loopt of voor veel services tegelijk geldt
 - **uptime** over 24 u, 7 d, 30 d en 1 jaar in het mini dashboard; op de tegel als hij onder 99,9 % zakt
