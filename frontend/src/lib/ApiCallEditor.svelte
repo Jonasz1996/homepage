@@ -124,7 +124,11 @@
       {#each ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as m}<option>{m}</option>{/each}
     </select>
     <span class="base" title={conn.url + prefix}>{conn.url.replace(/^https?:\/\//, '')}{prefix}</span>
-    <input class="path" bind:value={path} placeholder="/api/v3/queue" aria-label="Pad" onkeydown={(e) => e.key === 'Enter' && tryIt()} />
+    <input class="path" bind:value={path} placeholder="/api/v3/queue" aria-label="Pad"
+           onkeydown={(e) => {
+             // Zonder preventDefault klikt dezelfde Enter meteen de knop van de vraag die tryIt() opent.
+             if (e.key === 'Enter') { e.preventDefault(); tryIt() }
+           }} />
     <button class="btn" onclick={tryIt} disabled={busy}>▶ probeer</button>
   </div>
   <p class="hint">Pad achter het adres van de API. <code>{'{node}'}</code> en andere <code>{'{namen}'}</code> komen uit de instellingen van de tegel.

@@ -250,6 +250,7 @@ test('kuma vervangen: push-check, foute header en pauzeren', async () => {
   await page.getByRole('button', { name: 'push-adres maken' }).click()
   await expect(page.locator('.pm code').first()).toContainText('/api/push/')
   await page.getByRole('button', { name: '⏸ pauzeren' }).click()
+  await page.getByRole('dialog', { name: 'bevestigen' }).getByRole('button', { name: 'Pauzeren' }).click()
   await expect(page.getByRole('button', { name: '▶ hervatten' }).first()).toBeVisible()
   await expect(page.getByText('De check staat gepauzeerd')).toBeVisible()
   // Bewerken vanuit het detailvenster laat de pauze staan.
