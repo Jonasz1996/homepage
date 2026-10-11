@@ -37,8 +37,9 @@ class AdGuard(Integration):
         """De call die een rewrite toevoegt of weghaalt: de proefmodus toont precies deze."""
         return "POST", "/control/rewrite/add" if add else "/control/rewrite/delete", {"domain": domain, "answer": answer}
 
-    async def send(self, method: str, path: str, body: dict | None = None):
-        return await self.request(method, path, auth=self.auth(), json=body)
+    async def send(self, method: str, path: str, body: dict | None = None) -> str:
+        # Sommige versies antwoorden "OK" als platte tekst: geen JSON verwachten.
+        return await self.text(method, path, auth=self.auth(), json=body)
 
     async def summary(self) -> list[dict]:
         stats = await self.get("/stats")
