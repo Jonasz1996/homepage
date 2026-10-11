@@ -34,6 +34,9 @@ TOO_SLOW = ("Zoeken duurde te lang; kies een kortere periode of één machine (e
 # 504 van de proxy ervoor. Live meekijken en de lijst met machines horen altijd snel te zijn.
 SEARCH_SECONDS = 20
 QUICK_SECONDS = 5
+# Live meekijken toont alleen wat in het laatste uur valt: zo blijft het snel (op TimescaleDB alleen de nieuwste
+# chunk, niet gecomprimeerd).
+LIVE = timedelta(hours=1)
 
 
 def _row(e: LogEntry) -> dict:
@@ -84,19 +87,28 @@ async def search(host: list[str] | None = Query(default=None), app: str | None =
                  user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     conds = _filters(host, app, sev, q)
     if after_id is not None:
-        # Live meekijken: alles wat nieuw is sinds de laatste regel die de browser heeft.
+        # Live meekijken: alles wat binnenkwam na after_id (last_id van het zoeken, daarna de grootste id die de
+        # browser live kreeg). Op id, niet op tijd: een regel die rsyslog vasthield, komt later binnen met een oudere
+        # tijd. Valt die buiten LIVE, dan staat hij er pas bij na een nieuwe zoekopdracht.
         stmt = (select(LogEntry).where(LogEntry.id > after_id, *conds)
-                .where(LogEntry.ts > datetime.now(timezone.utc) - timedelta(hours=1))
+                .where(LogEntry.ts > datetime.now(timezone.utc) - LIVE)
                 .order_by(LogEntry.id).limit(limit))
         rows = (await _execute(db, stmt, QUICK_SECONDS)).scalars().all()
         return {"items": [_row(e) for e in reversed(rows)]}
     span = RANGES.get(span_key, RANGES["24h"])
     conds.append(LogEntry.ts >= datetime.now(timezone.utc) - span)
+    out = {}
     if before_ts is not None and before_id is not None:
         conds.append(or_(LogEntry.ts < before_ts, and_(LogEntry.ts == before_ts, LogEntry.id < before_id)))
+    else:
+        # Waar live meekijken verder gaat: de grootste id van nu, niet die van de bovenste regels (de lijst staat op
+        # tijd, en die volgt de id's niet meer). Vóór het zoeken: wat ertussen binnenkomt, krijgt de browser hooguit
+        # twee keer, en dubbele laat hij weg. Alleen binnen LIVE: ouder toont live meekijken toch niet.
+        last = select(func.max(LogEntry.id)).where(LogEntry.ts > datetime.now(timezone.utc) - LIVE)
+        out["last_id"] = (await _execute(db, last, SEARCH_SECONDS)).scalar() or 0
     stmt = select(LogEntry).where(*conds).order_by(LogEntry.ts.desc(), LogEntry.id.desc()).limit(limit)
     rows = (await _execute(db, stmt, SEARCH_SECONDS)).scalars().all()
-    return {"items": [_row(e) for e in rows], "more": len(rows) == limit}
+    return {"items": [_row(e) for e in rows], "more": len(rows) == limit, **out}
 
 
 @router.get("/hosts")

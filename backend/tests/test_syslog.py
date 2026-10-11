@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import asyncssh
 import pytest
-from sqlalchemy import event, func, select, text
+from sqlalchemy import delete, event, func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.attention import syslog_items
@@ -617,6 +617,43 @@ async def test_search_pagination_hosts_histogram(receiver, authed):
     await db.commit()
     live = (await authed.get("/api/logs", params={"after_id": max(newest, 31)})).json()["items"]
     assert [i["msg"] for i in live] == ["live"]
+
+
+async def test_live_tail_continues_from_the_largest_id_at_search_time(receiver, authed):
+    """Een regel die rsyslog vasthield, komt later binnen met zijn eigen, oudere tijd: de id's volgen de tijd niet meer.
+    Live meekijken ging verder vanaf de grootste id van de bovenste 50 regels; een regel die verder in de lijst stond,
+    kwam dan nog eens, en de logviewer liep vast. Nu geeft het zoeken last_id mee: de grootste id van dat moment."""
+    _, db = receiver
+    now = datetime.now(timezone.utc)
+    db.add_all([LogEntry(ts=now - timedelta(minutes=i), host="pve50", severity=6, msg=f"bericht {i}")
+                for i in range(60)])
+    await db.commit()
+    held =LogEntry(ts=now - timedelta(minutes=50, seconds=30), host="pve50", severity=6, msg="vastgehouden")
+    db.add(held)
+    await db.commit()
+    # Nog ouder dan het uur dat live meekijken toont: telt niet mee voor last_id.
+    db.add(LogEntry(ts=now - timedelta(hours=3), host="pve50", severity=6, msg="drie uur vastgehouden"))
+    await db.commit()
+
+    r = (await authed.get("/api/logs", params={"limit": 300})).json()
+    ids = [i["id"] for i in r["items"]]
+    assert ids.index(held.id) == 51 and max(ids[:50]) < held.id
+    assert r["last_id"] == held.id
+    assert (await authed.get("/api/logs", params={"after_id": r["last_id"]})).json()["items"] == []
+    db.add(LogEntry(host="pve50", severity=6, msg="live"))
+    await db.commit()
+    live = (await authed.get("/api/logs", params={"after_id": r["last_id"]})).json()
+    assert [i["msg"] for i in live["items"]] == ["live"] and "last_id" not in live
+    # Meer laden heeft geen last_id nodig.
+    more = await authed.get("/api/logs", params={"limit": 10, "before_ts": r["items"][-1]["ts"],
+                                                 "before_id": r["items"][-1]["id"]})
+    assert more.json()["items"] == [] and "last_id" not in more.json()
+    # Los van de filter: wat die niet toont, toont live meekijken ook niet.
+    assert (await authed.get("/api/logs", params={"host": "ander"})).json()["last_id"] > held.id
+    # Niets in het laatste uur: 0, en live meekijken toont alles wat er daarna binnenkomt.
+    await db.execute(delete(LogEntry).where(LogEntry.ts > now - timedelta(hours=2)))
+    await db.commit()
+    assert (await authed.get("/api/logs")).json()["last_id"] == 0
 
 
 async def test_rules_crud(authed):

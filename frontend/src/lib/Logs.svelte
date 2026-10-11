@@ -1,6 +1,7 @@
 <script>
   import { onMount, untrack } from 'svelte'
   import { api, poll } from './api.js'
+  import { advance, append, cursorOf, prepend } from './logtail.js'
   import LogRules from './LogRules.svelte'
   import LogSetup from './LogSetup.svelte'
 
@@ -39,6 +40,9 @@
   // loopt op de server toch door (tot 20 s), dus niet stapelen.
   let gen = 0
   let running = false
+  // Live meekijken gaat verder na deze id (zie logtail.js). Null zolang er gezocht wordt: dan geen nieuwe regels van de
+  // nieuwe filter boven de lijst van de vorige.
+  let cursor = null
   async function load() {
     gen++
     if (running) return
@@ -61,6 +65,7 @@
   // zodra de nieuwe regels er zijn, niet pas als de nieuwe grafiek er is (tot 20 s later).
   async function search(my) {
     const p = params()
+    cursor = null
     let r
     try {
       r = await api('/logs?' + params({ limit: 300 }))
@@ -70,6 +75,7 @@
     }
     if (my !== gen) return
     items = r.items
+    cursor = cursorOf(r)
     more = r.more
     error = ''
     hist = null
@@ -94,17 +100,21 @@
     try {
       const r = await api('/logs?' + params({ limit: 300, before_ts: last.ts, before_id: last.id }))
       if (my !== gen) return
-      items = [...items, ...r.items]
+      items = append(items, r.items)
       more = r.more
     } catch (e) { error = e.message }
   }
 
   async function tail() {
-    if (!open || !live || !items.length) return
+    if (!open || !live || cursor === null) return
     const my = gen
+    const from = cursor
     try {
-      const r = await api('/logs?' + params({ after_id: Math.max(...items.slice(0, 50).map((i) => i.id)) }))
-      if (my === gen && r.items.length) items = [...r.items, ...items].slice(0, 3000)
+      const r = await api('/logs?' + params({ after_id: from }))
+      // Intussen opnieuw gezocht, of een andere poging was al verder: die geldt.
+      if (my !== gen || from !== cursor) return
+      items = prepend(items, r.items)
+      cursor = advance(from, r.items)
     } catch { /* volgende poging */ }
   }
 
