@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import { api, withReauth } from './api.js'
   import Modal from './Modal.svelte'
+  import Tabs from './Tabs.svelte'
 
   // Configuratiewijzigingen: elke nacht een kopie van OPNsense, NPM, Proxmox en gekozen bestanden, met een diff.
   let { onclose, initialItem = null } = $props()
@@ -17,6 +18,7 @@
   let msg = $state('')
   let busy = $state(false)
 
+  const TABS = [{ key: 'lijst', label: 'configuraties' }, { key: 'instellingen', label: 'instellingen' }]
   const KIND = { opnsense: 'OPNsense', npm: 'Nginx Proxy Manager', pve: 'Proxmox: VM en CT', file: 'Bestanden' }
 
   async function load() {
@@ -96,12 +98,11 @@
 </script>
 
 <Modal title="git log -p /etc" {onclose} wide>
-  <div class="tabs">
-    <button class="mini" class:on={tab === 'lijst'} onclick={() => (tab = 'lijst')}>configuraties</button>
-    <button class="mini" class:on={tab === 'instellingen'} onclick={openSettings}>instellingen</button>
-    <span class="sp"></span>
-    <button class="mini" disabled={busy || data?.running} onclick={runNow}>{busy || data?.running ? 'ophalen…' : 'nu ophalen'}</button>
-  </div>
+  <Tabs items={TABS} bind:value={tab} onselect={(k) => k === 'instellingen' && openSettings()}>
+    {#snippet extra()}
+      <button class="mini" disabled={busy || data?.running} onclick={runNow}>{busy || data?.running ? 'ophalen…' : 'nu ophalen'}</button>
+    {/snippet}
+  </Tabs>
   {#if error}<p class="err">{error}</p>{/if}
   {#if msg}<p class="small" class:e={msg.startsWith('✕')} class:g={msg.startsWith('✓')}>{msg}</p>{/if}
   {#if data?.last?.errors?.length}{#each data.last.errors as e}<p class="e small">{e.source}: {e.error}</p>{/each}{/if}
@@ -182,7 +183,6 @@
 </Modal>
 
 <style>
-  .tabs { display: flex; gap: 6px; margin-bottom: 12px; align-items: center }
   .sp { flex: 1 }
   .split { display: grid; grid-template-columns: minmax(200px, 280px) 1fr; gap: 14px }
   .list { display: flex; flex-direction: column; gap: 2px; max-height: 68vh; overflow: auto }

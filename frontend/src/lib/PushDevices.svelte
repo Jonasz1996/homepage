@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte'
   import { api, withReauth } from './api.js'
+  import { ask } from './dialog.svelte.js'
   import Modal from './Modal.svelte'
 
   // Meldingen op je gsm (web push): dit toestel aanmelden en de toestellen beheren. Het dashboard stuurt zelf,
@@ -127,7 +128,7 @@
   }
 
   async function remove(d) {
-    if (!confirm(`${d.label} krijgt dan geen meldingen meer. Verwijderen?`)) return
+    if (!(await ask(`${d.label} krijgt dan geen meldingen meer. Verwijderen?`, { ok: 'Verwijderen', danger: true }))) return
     try {
       await withReauth(() => api(`/webpush/subscriptions/${d.id}`, { method: 'DELETE' }))
       if (d.id === mine) {

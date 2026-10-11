@@ -1,6 +1,7 @@
 <script>
   import { onMount, untrack } from 'svelte'
   import { api } from './api.js'
+  import { ask } from './dialog.svelte.js'
 
   // Apparaten op het netwerk (ARP en DHCP van OPNsense). Onbekende staan bovenaan; geef ze een naam.
   let data = $state(null)
@@ -29,7 +30,7 @@
   // Onbekende apparaten en het oude adres van een toestel met een privé-adres verdwijnen na 30 dagen vanzelf, tenzij ze
   // een naam, notitie of "volgen" hebben; een ander gekend apparaat niet.
   async function forget(d) {
-    if (!confirm(`${d.name || d.hostname || d.mac} vergeten? Komt het terug op je netwerk, dan krijg je opnieuw een melding.`)) return
+    if (!(await ask(`${d.name || d.hostname || d.mac} vergeten? Komt het terug op je netwerk, dan krijg je opnieuw een melding.`, { ok: 'Vergeten', danger: true }))) return
     try { await api(`/devices/${d.mac}`, { method: 'DELETE' }); edit = null; await load() } catch (e) { error = e.message }
   }
   const PRIVATE = 'Willekeurig MAC-adres (gsm of laptop met een privé-adres, of een VM/container): de fabrikant is niet te zien. Neemt een toestel met een naam een nieuw adres met dezelfde hostnaam op dezelfde interface, en verdwijnt het oude adres binnen een halfuur uit de ARP-tabel, dan houdt het zijn naam.'
