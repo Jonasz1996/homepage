@@ -1,7 +1,12 @@
 """De headers van Cloudflare in nginx (deploy/nginx-map.conf): alleen geloofd als NPM het verzoek van Cloudflare of
 een tunnel kreeg. Draait een echte nginx met de configuratie uit deploy/, met 127.0.0.1 als NPM, voor een kleine
-echo-server die de headers teruggeeft die de API zou krijgen. Zonder nginx (of zonder 127.0.0.2) overgeslagen."""
+echo-server die de headers teruggeeft die de API zou krijgen. Zonder nginx (of zonder 127.0.0.2) overgeslagen.
 
+Daarna wie er rechtstreeks bij mag ($homepage_blocked): NPM en de container zelf alles, het LAN alleen push,
+webhooks en /api/healthz (of alles met HOMEPAGE_LAN_OPEN=1), een publiek IP niets. Een netwerk dat install.sh als LAN
+invult (het IPv6-netwerk van de container, HOMEPAGE_LAN_NETS) telt als LAN."""
+
+import contextlib
 import http.client
 import json
 import shutil
@@ -43,14 +48,23 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def render(tmp: Path, port: int, api_port: int) -> Path:
-    """De configuratie zoals install.sh ze neerzet, met andere poorten en paden."""
+def render(tmp: Path, port: int, api_port: int, npm: str = NPM, lan_dicht: str = "1", host: str = "127.0.0.1",
+           peers: str = "", lan_nets: str = "") -> Path:
+    """De configuratie zoals install.sh ze neerzet, met andere poorten en paden. lan_dicht: wat install.sh invult ("0"
+    met HOMEPAGE_LAN_OPEN=1). peers: extra regels voor de geo $homepage_peer, om een 127.0.0.x als toestel op het LAN
+    of als publiek IP te laten tellen (andere afzenders heeft een test niet). lan_nets: wat install.sh invult voor
+    __LAN_NETS__ ("net lan; net lan; ", of niets)."""
     (tmp / "snippets").mkdir(parents=True, exist_ok=True)
     shutil.copy(DEPLOY / "nginx-headers.conf", tmp / "snippets" / "homepage-headers.conf")
-    (tmp / "homepage-map.conf").write_text(
-        (DEPLOY / "nginx-map.conf").read_text().replace("__NPM_IP_RE__", NPM.replace(".", "\\.")))
+    maps = (DEPLOY / "nginx-map.conf").read_text()
+    for old, new in (("__NPM_IP_RE__", npm.replace(".", "\\.")), ("__LAN_DICHT__", lan_dicht),
+                     ("__LAN_NETS__", lan_nets),
+                     ("    default          buiten;\n", f"    default          buiten;\n{peers}")):
+        assert old in maps, old
+        maps = maps.replace(old, new)
+    (tmp / "homepage-map.conf").write_text(maps)
     site = (DEPLOY / "nginx.conf").read_text()
-    for old, new in (("__NPM_IP__", NPM), ("listen 80 default_server;", f"listen 127.0.0.1:{port};"),
+    for old, new in (("__NPM_IP__", npm), ("listen 80 default_server;", f"listen {host}:{port};"),
                      ("listen [::]:80 default_server;", ""), ("127.0.0.1:8000", f"127.0.0.1:{api_port}"),
                      ("/var/log/nginx/error.log", str(tmp / "error.log")), ("/opt/homepage/frontend/dist", str(tmp))):
         assert old in site, old
@@ -72,18 +86,22 @@ http {{
     return main
 
 
-@pytest.fixture(scope="module")
-def nginx(tmp_path_factory):
-    try:
-        with socket.socket() as s:
-            s.bind((OTHER, 0))
-    except OSError:
-        pytest.skip(f"{OTHER} niet bruikbaar als bronadres")
-    tmp = tmp_path_factory.mktemp("nginx")
+def _bindable(*addrs: str) -> None:
+    for addr in addrs:
+        try:
+            with socket.socket() as s:
+                s.bind((addr, 0))
+        except OSError:
+            pytest.skip(f"{addr} niet bruikbaar als bronadres")
+
+
+@contextlib.contextmanager
+def _running(tmp: Path, host: str = "127.0.0.1", **kw):
+    """nginx met de configuratie uit deploy/ (render) voor de echo-server; geeft de poort."""
     echo = ThreadingHTTPServer(("127.0.0.1", 0), _Echo)
     threading.Thread(target=echo.serve_forever, daemon=True).start()
     port = _free_port()
-    conf = render(tmp, port, echo.server_address[1])
+    conf = render(tmp, port, echo.server_address[1], host=host, **kw)
     test = subprocess.run([NGINX, "-t", "-p", str(tmp), "-c", str(conf)], capture_output=True, text=True)
     assert test.returncode == 0, test.stderr
     proc = subprocess.Popen([NGINX, "-p", str(tmp), "-c", str(conf)], stdout=subprocess.DEVNULL,
@@ -91,7 +109,7 @@ def nginx(tmp_path_factory):
     try:
         for _ in range(100):
             try:
-                socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+                socket.create_connection((host, port), timeout=0.2).close()
                 break
             except OSError:
                 if proc.poll() is not None:
@@ -104,6 +122,13 @@ def nginx(tmp_path_factory):
         proc.wait(10)
         echo.shutdown()
         echo.server_close()
+
+
+@pytest.fixture(scope="module")
+def nginx(tmp_path_factory):
+    _bindable(OTHER)
+    with _running(tmp_path_factory.mktemp("nginx")) as port:
+        yield port
 
 
 def _get(port: int, headers: dict, source: str = NPM, path: str = "/api/outside") -> dict:
@@ -207,3 +232,95 @@ def test_elke_locatie(nginx, path):
     """Ook de push-monitors en webhooks (eigen location) krijgen de vlag."""
     assert _get(nginx, {"X-Forwarded-For": "203.0.113.9", **CF_IP}, path=path) == _want("203.0.113.9", forged="1")
     assert _get(nginx, {"X-Forwarded-For": "172.70.1.2", **CF_IP}, path=path) == _want("94.224.1.7", via="1")
+
+
+# --- wie mag er rechtstreeks bij ($homepage_blocked) ------------------------------------------------------------------
+
+# Een eigen nginx: NPM op 127.0.0.4 en de container op 127.0.0.5. Alle 127.0.0.x tellen voor nginx als de container
+# zelf (loopback); peers laat er een paar als toestel op het LAN of als publiek IP tellen. NPM en het eigen adres van
+# de container staan daarbij als publiek en LAN: werden ze niet herkend, dan zou (bijna) alles geweigerd worden.
+# 127.0.0.6/31 is publiek, maar 127.0.0.6 staat in het netwerk dat install.sh als LAN invult (zoals het IPv6-netwerk
+# van de container of HOMEPAGE_LAN_NETS); 127.0.0.7 ernaast blijft publiek.
+G_NPM, G_SELF, G_LAN, G_PUBLIC = "127.0.0.4", "127.0.0.5", "127.0.0.2", "127.0.0.3"
+G_EXTRA, G_NEXT = "127.0.0.6", "127.0.0.7"
+PEERS = "".join(f"    {ip}     {kind};\n" for ip, kind in ((f"{G_LAN}/32", "lan"), (f"{G_PUBLIC}/32", "buiten"),
+                                                           (f"{G_NPM}/32", "buiten"), (f"{G_SELF}/32", "lan"),
+                                                           (f"{G_EXTRA}/31", "buiten")))
+LAN_NETS = f"{G_EXTRA}/32 lan; 2001:db8:1::/48 lan; "
+
+
+@pytest.fixture(scope="module", params=["dicht", "open"])
+def gate(request, tmp_path_factory):
+    """(poort, "dicht" of "open"): zonder en met HOMEPAGE_LAN_OPEN=1."""
+    _bindable(G_NPM, G_SELF, G_LAN, G_PUBLIC, G_EXTRA, G_NEXT)
+    tmp = tmp_path_factory.mktemp(f"gate-{request.param}")
+    with _running(tmp, host=G_SELF, npm=G_NPM, peers=PEERS, lan_nets=LAN_NETS,
+                  lan_dicht="1" if request.param == "dicht" else "0") as port:
+        yield port, request.param
+
+
+def _request(port: int, source: str, path: str) -> tuple[int, str]:
+    conn = http.client.HTTPConnection(G_SELF, port, timeout=5, source_address=(source, 0))
+    try:
+        conn.request("GET", path, headers={"X-Forwarded-For": "192.168.0.20"})
+        r = conn.getresponse()
+        return r.status, r.read().decode(errors="replace")
+    finally:
+        conn.close()
+
+
+def _blocked(port: int, source: str, path: str) -> bool:
+    """Geweigerd door de toegang in nginx (403 met uitleg)? Anders antwoordt voor /api/ de API (hier de echo; /api/push
+    zonder / stuurt nginx door naar /api/push/); voor de app hangt de status af van de map (geen index.html, en als
+    root lezen de workers als nobody)."""
+    status, body = _request(port, source, path)
+    if status == 403 and "HOMEPAGE_LAN_OPEN=1" in body:
+        return True
+    if path.startswith("/api/") and path != "/api/push":
+        assert status == 200 and json.loads(body)["path"] == path, (status, body)
+    return False
+
+
+ALWAYS = ["/api/outside", "/api/auth/login", "/api/ssh/ws", "/"]
+LAN_OK = ["/api/healthz", "/api/healthz?x=1", "/api/push/geheim", "/api/push/geheim?status=up", "/api/hooks/geheim"]
+# Ook met omwegen in het pad: nginx kijkt naar het opgeschoonde pad ($uri), net als de locations.
+LAN_NOT = ["/", "/index.html", "/assets/x.js", "/api/outside", "/api/auth/login", "/api/ssh/ws", "/api/healthz/",
+           "/api/healthzx", "/api/push", "/api/push/../auth/login", "/api/push/%2e%2e/auth/login",
+           "/api/hooks/x/../../auth/login", "//api/auth/login", "/api/./push/../outside"]
+
+
+@pytest.mark.parametrize("source", ["127.0.0.1", G_NPM, G_SELF])
+def test_npm_en_de_container_zelf_mogen_alles(gate, source):
+    port, _ = gate
+    for path in ALWAYS + LAN_OK:
+        assert not _blocked(port, source, path), (source, path)
+
+
+@pytest.mark.parametrize("source", [G_LAN, G_EXTRA])
+def test_lan_alleen_push_webhooks_en_healthz(gate, source):
+    """Een privé-adres, en een adres in een netwerk dat install.sh als LAN invult."""
+    port, mode = gate
+    for path in LAN_OK:
+        assert not _blocked(port, source, path), path
+    for path in LAN_NOT:
+        assert _blocked(port, source, path) is (mode == "dicht"), path
+
+
+@pytest.mark.parametrize("source", [G_PUBLIC, G_NEXT])
+def test_publiek_ip_zonder_npm_niets(gate, source):
+    port, _ = gate
+    for path in ALWAYS + LAN_OK:
+        assert _blocked(port, source, path), path
+
+
+def test_geweigerd_met_uitleg(gate):
+    port, mode = gate
+    status, body = _request(port, G_LAN, "/api/outside")
+    if mode == "dicht":
+        assert status == 403 and "Nginx Proxy Manager" in body and "/etc/homepage/homepage.env" in body
+        # Kom je al via NPM: dan klopt HOMEPAGE_NPM_IP niet (met het adres waarvan het verzoek kwam). Een toestel met
+        # een publiek IPv6-adres: HOMEPAGE_LAN_NETS.
+        assert f"HOMEPAGE_NPM_IP in /etc/homepage/homepage.env niet (dit verzoek\nkwam van {G_LAN})" in body
+        assert "HOMEPAGE_LAN_NETS" in body
+    else:
+        assert status == 200

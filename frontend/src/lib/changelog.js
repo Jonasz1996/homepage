@@ -3,6 +3,27 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 33,
+    datum: '2026-10-11',
+    titel: 'Veiligheid',
+    items: [
+      'Een gevaarlijke actie bevestigen kan alleen nog met je 2FA-code, niet meer met je wachtwoord. Je wachtwoord wijzigen vraagt ook je 2FA-code en geeft een melding.',
+      'Toestellen waarop je al met 2FA inlogde, worden onthouden: vult iemand de limiet op je gebruikersnaam met foute wachtwoorden, dan log je daar gewoon in, en je krijgt één melding "Inloggen dicht voor nieuwe toestellen". De melding over een login vanaf een nieuw IP zegt of het een bekend toestel is.',
+      'Wachtwoorden worden naast de hoofdlus gecontroleerd, zodat een reeks loginpogingen het dashboard en de terminal niet trager maakt. Verzoeken tegelijk omzeilen de limieten niet meer, dezelfde 2FA-code werkt maar één keer, en de gebruikersnaam is niet meer hoofdlettergevoelig.',
+      'Inloggen via Authentik herkent je account aan zijn vaste ID bij Authentik (sub) en niet meer aan de naam: een ander Authentik-account met dezelfde naam komt er niet meer in.',
+      'Van buitenaf valt een API instellen, een call uitproberen of een tegel met integratie een ander adres geven onder acties, en dat vraagt je 2FA-code. Tegels bekijken werkt gewoon.',
+      'Onderhoud beginnen of verlengen, gepland onderhoud aanzetten, een cronjob dempen, een webhook of logregel uitzetten en een beveiligingspunt negeren vragen nu je 2FA-code en geven een melding op je gsm, net als een check pauzeren. Dat geldt ook voor een tegel met een lopende check naar een groep slepen met gepland onderhoud, ook als dat pas later begint (de melding zegt wanneer), en voor een tegel zonder check verplaatsen of ergens onder hangen als er een tegel met een lopende check onder hangt. Een herhalend onderhoudsvenster duurt hoogstens 12 uur per keer; een ouder venster dat langer bewaard was, loopt ook maar 12 uur en kun je gewoon uitzetten, bewerken of verwijderen. Een venster uitzetten of verwijderen stopt alleen het onderhoud dat het zelf zette: wat je met de hand verlengde, blijft staan.',
+      '"Wis gelezen" laat meldingen staan die nog niet naar je gsm gestuurd zijn. In ! zie je onderhoud dat met de hand gezet is en meer dan een dag loopt, of voor veel services tegelijk. Op de tijdlijn staat elke actie nog maar één keer; onderhoud, verwijderde logregels en wachtwoordwijzigingen van vóór de update blijven er staan.',
+      'Rechtstreeks op http://IP laat nginx het dashboard alleen nog open vanuit de container zelf, en van het LAN alleen push-monitors, webhooks en /api/healthz. Na deze update blijft het hele LAN wel open tot je zelf HOMEPAGE_LAN_OPEN=0 zet; ! → instellingen → "Dashboard alleen via NPM" zegt hoe. Een toestel met een publiek IPv6-adres in het netwerk van de container telt als LAN, andere netwerken zet je in HOMEPAGE_LAN_NETS. De 403-pagina zegt van welk adres het verzoek kwam.',
+      'SSH-sleutel vastzetten zet alleen nog losse IP-adressen in from=, en een from= met een patroon of netwerk telt als "elk IP". Een link in een notitie kan geen eigen attributen meer krijgen.',
+    ],
+    instellen: [
+      'Open het dashboard na de update via zijn naam in NPM. Werkt dat, zet dan in de container HOMEPAGE_LAN_OPEN=0 in /etc/homepage/homepage.env en voer bash /opt/homepage/deploy/install.sh uit. Krijg je daarna via NPM een 403, dan klopt HOMEPAGE_NPM_IP daar niet: zet het juiste IP en voer het opnieuw uit.',
+      'Log je in via Authentik? Koppel je account één keer onder ⚿ → authentik → Koppel Authentik-account, en zet in Authentik bij de provider Subject mode op "Based on the User\'s hashed ID". Tot dan werkt alleen wachtwoord met 2FA.',
+      'Open het dashboard één keer op elk toestel waarop je al ingelogd bent: dan is het een bekend toestel.',
+    ],
+  },
+  {
     nr: 32,
     datum: '2026-10-11',
     titel: 'Proefmodus en diagnose',

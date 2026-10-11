@@ -80,6 +80,8 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run check
+      # Losse functies zoals de Markdown van de notities (node --test, zonder extra pakketten).
+      - run: npm test
       - run: npm run build
 
   browser:
@@ -143,3 +145,81 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: shellcheck deploy/*.sh
+      # De nginx-configuratie zoals install.sh ze invult (dezelfde sed), in een eigen map op poort 8080 met een nep-API
+      # op 18000. Afzenders op lo: NPM (een adres dat niet privé is: mag dus alleen als NPM), een toestel op het LAN,
+      # het eigen LAN-adres van de container, een publiek IP en een publiek IP in een netwerk dat install.sh als LAN
+      # invult (het IPv6-netwerk van de container, HOMEPAGE_LAN_NETS). Wie wat mag: zie $homepage_blocked in
+      # nginx-map.conf.
+      - name: nginx-configuratie en wie er rechtstreeks bij mag
+        run: |
+          command -v nginx >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q nginx; }
+          NPM_IP=192.0.2.10 LAN=192.168.77.2 SELF=192.168.77.1 PUB=203.0.113.9 EXTRA=198.51.100.7
+          for a in $NPM_IP $LAN $SELF $PUB $EXTRA; do sudo ip addr replace "$a/32" dev lo; done
+          d=$(mktemp -d) && chmod 755 "$d"
+          mkdir -p "$d/dist" "$d/snippets" "$d/api/api/push" "$d/api/api/hooks" "$d/tmp"
+          echo app > "$d/dist/index.html"
+          for p in healthz outside push/x hooks/x; do echo api > "$d/api/api/$p"; done
+          python3 -m http.server 18000 --bind 127.0.0.1 --directory "$d/api" >/dev/null 2>&1 &
+          for _ in $(seq 50); do curl -fso /dev/null http://127.0.0.1:18000/ && break; sleep 0.1; done
+          cat > "$d/nginx.conf" <<EOF
+          pid $d/nginx.pid;
+          error_log $d/error.log;
+          events {}
+          http {
+              access_log off;
+              client_body_temp_path $d/tmp/body;
+              proxy_temp_path $d/tmp/proxy;
+              fastcgi_temp_path $d/tmp/fastcgi;
+              uwsgi_temp_path $d/tmp/uwsgi;
+              scgi_temp_path $d/tmp/scgi;
+              include $d/homepage-map.conf;
+              include $d/homepage.conf;
+          }
+          EOF
+          ngx() { nginx -e "$d/error.log" -p "$d" -c "$d/nginx.conf" "$@"; }
+          start() {  # $1: wat install.sh invult voor __LAN_DICHT__ (0 met HOMEPAGE_LAN_OPEN=1), $2 voor __LAN_NETS__
+            NPM_IP_RE="${NPM_IP//./\\\\.}"
+            sed "s/__NPM_IP_RE__/$NPM_IP_RE/; s/__LAN_DICHT__/$1/; s#__LAN_NETS__#${2:-}#" deploy/nginx-map.conf \
+              > "$d/homepage-map.conf"
+            cp deploy/nginx-headers.conf "$d/snippets/homepage-headers.conf"
+            sed "s/__NPM_IP__/$NPM_IP/; s/listen 80 /listen 8080 /; s/listen \[::\]:80 /listen [::]:8080 /;
+              s#127.0.0.1:8000#127.0.0.1:18000#; s#/var/log/nginx/#$d/#; s#/opt/homepage/frontend/dist#$d/dist#" \
+              deploy/nginx.conf > "$d/homepage.conf"
+            [ -e /proc/net/if_inet6 ] || sed -i '/listen \[::\]/d' "$d/homepage.conf"
+            [ ! -e "$d/nginx.pid" ] || { ngx -s stop; while [ -e "$d/nginx.pid" ]; do sleep 0.1; done; }
+            ngx -t -q
+            ngx
+            for _ in $(seq 50); do curl -so /dev/null "http://$SELF:8080/" && break; sleep 0.1; done
+          }
+          fout=0
+          check() {  # afzender pad verwachte-status
+            local naar=$SELF got
+            [ "$1" != 127.0.0.1 ] || naar=127.0.0.1
+            got=$(curl -s --path-as-is -o "$d/body" -w '%{http_code}' --interface "$1" "http://$naar:8080$2")
+            echo "van $1 naar $2: $got"
+            if [ "$got" != "$3" ]; then echo "::error::van $1 naar $2: $got, verwacht $3"; fout=1; fi
+          }
+          start 1 "198.51.100.0/24 lan; 2001:db8:1::/48 lan; "
+          for p in / /api/outside /api/healthz /api/push/x; do
+            check 127.0.0.1 "$p" 200; check "$NPM_IP" "$p" 200; check "$SELF" "$p" 200
+          done
+          for p in /api/healthz /api/push/x /api/hooks/x /api/healthz?x=1; do check "$LAN" "$p" 200; done
+          for p in / /index.html /api/outside /api/healthz/ /api/push/../outside /api/push/%2e%2e/outside //api/outside; do
+            check "$LAN" "$p" 403
+          done
+          check "$LAN" / 403
+          for w in HOMEPAGE_LAN_OPEN HOMEPAGE_NPM_IP HOMEPAGE_LAN_NETS "kwam van $LAN"; do
+            grep -q "$w" "$d/body" || { echo "::error::geen uitleg bij de 403 ($w)"; fout=1; }
+          done
+          for p in / /api/healthz /api/push/x /api/hooks/x; do check "$PUB" "$p" 403; done
+          # Een publiek IP in een netwerk dat install.sh als LAN invult: net als het LAN.
+          for p in /api/healthz /api/push/x /api/hooks/x; do check "$EXTRA" "$p" 200; done
+          for p in / /api/outside; do check "$EXTRA" "$p" 403; done
+          # HOMEPAGE_LAN_OPEN=1: het LAN mag alles, een publiek IP nog altijd niets. Zonder extra netwerken is EXTRA
+          # gewoon een publiek IP.
+          start 0
+          for p in / /api/outside /api/healthz; do
+            check "$LAN" "$p" 200; check "$PUB" "$p" 403; check "$EXTRA" "$p" 403
+          done
+          ngx -s stop
+          exit "$fout"

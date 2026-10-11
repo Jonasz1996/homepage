@@ -11,8 +11,8 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..deps import audit, current_user
-from ..models import AppState, Group, MaintenanceWindow, Service, User
+from ..deps import audit, confirm_silence, current_session, current_user
+from ..models import AppState, Group, MaintenanceWindow, Service, Session, User
 from ..monitoring import cluster, planned
 from .integrations import clients
 
@@ -60,6 +60,11 @@ class WindowIn(BaseModel):
             raise ValueError("Weekdag 0 (maandag) tot 6 (zondag)")
         if self.repeat == "weekly" and not self.weekdays:
             raise ValueError("Kies minstens één weekdag")
+        # Elke dag 24 uur (of elke weekdag een hele dag) is altijd onderhoud: dan meldt die service nooit meer iets.
+        # Alleen voor een venster dat aan staat: een ouder venster dat nog langer bewaard is, kan altijd uit.
+        if self.enabled and self.repeat != "once" and self.minutes > planned.REPEAT_MAX:
+            raise ValueError(f"Een herhalend venster duurt hoogstens {planned.REPEAT_MAX // 60} uur per keer; "
+                             "langer kan eenmalig")
         if self.start.tzinfo is None:
             self.start = self.start.astimezone()
         return self
@@ -77,16 +82,42 @@ async def _apply_now(db: AsyncSession) -> None:
     await planned.apply(db)
 
 
+async def _target_name(db: AsyncSession, body: WindowIn) -> str:
+    if body.service_id:
+        return (await db.get(Service, body.service_id)).name
+    return f"groep {(await db.get(Group, body.group_id)).name}"
+
+
+def _schedule(w: MaintenanceWindow | WindowIn) -> tuple:
+    """Wanneer en voor wie het venster loopt (de naam telt niet). Een herhalend venster telt alleen het uur, en de duur
+    zoals het echt loopt: een ouder venster van 24 uur dat de editor op 12 uur zet, is niet anders gepland."""
+    start = planned._local(w.start)
+    when = start if w.repeat == "once" else start.strftime("%H:%M")
+    return w.service_id, w.group_id, w.repeat, when, planned.run_minutes(w), sorted(set(w.weekdays or []))
+
+
+async def _confirm(db: AsyncSession, request: Request, sess: Session, user: User, body: WindowIn) -> None:
+    """Een venster dat aan staat, zet zolang de meldingen (en zelfherstel) uit: zoals onderhoud zelf vraagt aanzetten
+    of anders plannen een recente 2FA en geeft het een melding. Vóór er iets verandert (ook planned.stop)."""
+    w = MaintenanceWindow(**body.model_dump())
+    await confirm_silence(db, request, sess, user,
+                          f"Gepland onderhoud: {body.name} ({await _target_name(db, body)}, {planned.describe(w)})",
+                          "maintenance_planned", name=body.name, when=planned.describe(w))
+
+
 @router.post("/maintenance/windows", status_code=status.HTTP_201_CREATED)
-async def create_window(body: WindowIn, request: Request, user: User = Depends(current_user),
-                        db: AsyncSession = Depends(get_db)):
+async def create_window(body: WindowIn, request: Request, sess: Session = Depends(current_session),
+                        user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     await _check(db, body)
+    if body.enabled:
+        await _confirm(db, request, sess, user, body)
     w = MaintenanceWindow(**body.model_dump(), created_at=datetime.now(timezone.utc))
     w.weekdays = sorted(set(body.weekdays))
     db.add(w)
     await db.flush()
     await _apply_now(db)
-    await audit(db, request, user, "maintenance_planned", name=w.name, when=planned.describe(w))
+    if not body.enabled:
+        await audit(db, request, user, "maintenance_planned", name=w.name, when=planned.describe(w))
     await db.commit()
     return await _out(db, w, datetime.now(timezone.utc))
 
@@ -99,17 +130,22 @@ async def _window(db: AsyncSession, wid: int) -> MaintenanceWindow:
 
 
 @router.put("/maintenance/windows/{wid}")
-async def update_window(wid: int, body: WindowIn, request: Request, user: User = Depends(current_user),
-                        db: AsyncSession = Depends(get_db)):
+async def update_window(wid: int, body: WindowIn, request: Request, sess: Session = Depends(current_session),
+                        user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     w = await _window(db, wid)
     await _check(db, body)
+    # Aanzetten of anders plannen; alleen de naam wijzigen of uitzetten blijft vrij.
+    confirm = body.enabled and (not w.enabled or _schedule(w) != _schedule(body))
+    if confirm:
+        await _confirm(db, request, sess, user, body)
     await planned.stop(db, w)
     for k, v in body.model_dump().items():
         setattr(w, k, v)
     w.weekdays = sorted(set(body.weekdays))
     await db.flush()
     await _apply_now(db)
-    await audit(db, request, user, "maintenance_planned", name=w.name, when=planned.describe(w))
+    if not confirm:
+        await audit(db, request, user, "maintenance_planned", name=w.name, when=planned.describe(w))
     await db.commit()
     return await _out(db, w, datetime.now(timezone.utc))
 

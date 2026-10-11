@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte'
-  import { api } from './api.js'
+  import { api, withReauth } from './api.js'
   import Modal from './Modal.svelte'
 
   // Webhooks: Proxmox, PBS, Uptime Kuma, Home Assistant en andere tools sturen hun meldingen naar het meldingencentrum.
@@ -53,7 +53,8 @@
     try {
       const body = { name: form.name.trim(), kind: form.kind, service_id: form.service_id ? Number(form.service_id) : null,
                      enabled: form.enabled }
-      const w = await api('/webhooks' + (form.id ? `/${form.id}` : ''), { method: form.id ? 'PATCH' : 'POST', body })
+      // Een webhook die aan staat uitzetten, een nieuw adres geven of verwijderen legt meldingen stil: dat vraagt je 2FA.
+      const w = await withReauth(() => api('/webhooks' + (form.id ? `/${form.id}` : ''), { method: form.id ? 'PATCH' : 'POST', body }))
       form = null
       await load()
       open = w.id
@@ -61,11 +62,11 @@
   }
   async function rotate(w) {
     if (!confirm(`Nieuw adres voor ${w.name}? Het oude werkt meteen niet meer; pas het aan in ${KINDS[w.kind]}.`)) return
-    try { await api(`/webhooks/${w.id}/rotate`, { method: 'POST' }); await load() } catch (e) { error = e.message }
+    try { await withReauth(() => api(`/webhooks/${w.id}/rotate`, { method: 'POST' })); await load() } catch (e) { error = e.message }
   }
   async function remove(w) {
     if (!confirm(`Webhook ${w.name} verwijderen?`)) return
-    try { await api(`/webhooks/${w.id}`, { method: 'DELETE' }); await load() } catch (e) { error = e.message }
+    try { await withReauth(() => api(`/webhooks/${w.id}`, { method: 'DELETE' })); await load() } catch (e) { error = e.message }
   }
   async function test(w) {
     try {

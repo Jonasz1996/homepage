@@ -24,6 +24,7 @@ from app.routers import integrations as integrations_router
 from app.routers import push as pushroute
 
 from .conftest import PASSWORD
+from .test_beveiliging import _reauth
 from .test_ssh import WS, _cookie
 
 CF = {"X-Homepage-Via-Cf": "1"}
@@ -69,11 +70,17 @@ def test_welke_routes_van_buitenaf_uit_staan():
         "PUT /api/updates/settings": "updates",
         "POST /api/services/{service_id}/integration/action": "acties", "POST /api/services/{service_id}/wol": "acties",
         "POST /api/heal": "acties", "PUT /api/heal/{rule_id}": "acties", "POST /api/heal/{rule_id}/test": "acties",
+        "DELETE /api/heal/{rule_id}": "acties",
         # De proef van zelfherstel kijkt met de bewaarde login via SSH op de machine.
         "POST /api/heal/proef": "acties", "POST /api/heal/{rule_id}/proef": "acties",
         "POST /api/health/snapshots/delete": "acties",
         "PUT /api/restoretest/settings": "acties", "POST /api/restoretest/run": "acties",
         "POST /api/devices/{mac}/scan": "acties",
+        # API-beheer: alles waarmee de server een nieuw adres of pad ophaalt (van buitenaf ook met een verse 2FA). Een
+        # tegel met integratie die een ander adres krijgt (layout, import) controleert dat zelf: outside.require.
+        "POST /api/apis": "acties", "PATCH /api/apis/{api_id}": "acties", "POST /api/apis/{api_id}/calls": "acties",
+        "PATCH /api/apis/calls/{call_id}": "acties", "POST /api/apis/{api_id}/try": "acties",
+        "POST /api/apis/bulk": "acties",
         "GET /api/configs/versions/{vid}/download": "downloads", "GET /api/diagnose": "downloads",
         "POST /api/cron/jobs/{job_id}/monitor": "terminal", "POST /api/logs/rollout": "terminal",
         "GET /api/ssh/ready": "terminal", "POST /api/ssh/pin/check": "terminal", "POST /api/ssh/pin": "terminal",
@@ -330,12 +337,67 @@ async def test_terminal_websocket_van_buitenaf(authed, monkeypatch):
     await ws.close()
 
 
-async def test_api_proberen_van_buitenaf(authed):
+async def test_api_proberen_van_buitenaf(authed, monkeypatch):
+    seen = []
+
+    def handler(req: httpx.Request):
+        seen.append(str(req.url))
+        return httpx.Response(200, json={"version": "5.0"})
+    monkeypatch.setattr(integrations_router, "clients", HttpClients(httpx.MockTransport(handler)))
     r = await authed.post("/api/apis", json={"name": "Radarr", "kind": "rest", "url": "http://radarr.lan"})
     aid = r.json()["id"]
-    r = await authed.post(f"/api/apis/{aid}/try", json={"call": {"name": "x", "method": "POST", "path": "/api/x"}},
-                          headers=CF)
-    assert r.status_code == 403 and r.json()["detail"] == "buiten:acties"
+    get = {"call": {"name": "x", "path": "/api/v3/system/status"}}
+    post = {"call": {"name": "x", "method": "POST", "path": "/api/x"}}
+    cid = (await authed.post(f"/api/apis/{aid}/calls", json=get["call"])).json()["id"]
+    page = (await authed.post("/api/pages", json={"name": "P"})).json()["id"]
+    g = (await authed.post("/api/groups", json={"page_id": page, "name": "G"})).json()["id"]
+    tile = {"group_id": g, "name": "Intern", "type": "json", "url": "http://intern.lan",
+            "config": {"url": "http://10.0.0.1:8080/status"}}
+    imp = ("pages:\n- name: P2\n  groups:\n  - name: G\n    services:\n"
+           "    - name: pve\n      type: proxmox\n      url: https://10.0.0.2:8006\n")
+
+    # Van buitenaf, zonder acties: niets dat de server een nieuw adres of pad laat ophalen, ook geen GET.
+    for method, path, body in (("post", f"/api/apis/{aid}/try", get), ("post", f"/api/apis/{aid}/try", post),
+                               ("post", "/api/apis", {"name": "x", "kind": "rest", "url": "http://10.0.0.1"}),
+                               ("patch", f"/api/apis/{aid}", {"name": "Radarr", "kind": "rest", "url": "http://10.0.0.1"}),
+                               ("post", f"/api/apis/{aid}/calls", get["call"]),
+                               ("patch", f"/api/apis/calls/{cid}", {**get["call"], "path": "/admin"}),
+                               ("post", "/api/apis/bulk", {"items": [{"service_id": 1, "template": "rest"}]}),
+                               ("post", "/api/services", tile), ("post", "/api/import", {"yaml": imp})):
+        r = await getattr(authed, method)(path, json=body, headers=CF)
+        assert r.status_code == 403 and r.json()["detail"] == "buiten:acties", (path, r.text)
+    assert not seen
+    # Een gewone snelkoppeling en kijken gaan wel; een integratie bewerken zonder ander adres ook.
+    r = await authed.post("/api/services", json={**tile, "type": "link", "config": {}}, headers=CF)
+    assert r.status_code == 201, r.text
+    sid = (await authed.post("/api/services", json=tile)).json()["id"]  # thuis
+    r = await authed.patch(f"/api/services/{sid}", json={**tile, "name": "Intern 2"}, headers=CF)
+    assert r.status_code == 200, r.text
+    r = await authed.patch(f"/api/services/{sid}", json={**tile, "config": {"url": "http://10.0.0.9/"}}, headers=CF)
+    assert r.json()["detail"] == "buiten:acties"
+    assert (await authed.get("/api/apis", headers=CF)).status_code == 200
+
+    # Een uur aanzetten (dat vraagt zelf al de 2FA-code); met een oude bevestiging vraagt elke stap opnieuw 2FA.
+    assert (await authed.put("/api/outside/features/acties", json={"mode": "uur"}, headers=CF)).status_code == 200
+    await _stale(authed)
+    new = {"name": "x", "kind": "rest", "url": "http://10.0.0.1"}
+    for method, path, body in (("post", f"/api/apis/{aid}/try", get), ("post", "/api/apis", new),
+                               ("post", "/api/services", tile), ("post", "/api/import", {"yaml": imp})):
+        r = await getattr(authed, method)(path, json=body, headers=CF)
+        assert r.status_code == 403 and r.json()["detail"] == "reauth_required", (path, r.text)
+    await _reauth(authed)
+    r = await authed.post(f"/api/apis/{aid}/try", json=get, headers=CF)
+    assert r.status_code == 200 and r.json()["ok"] and r.json()["data"] == {"version": "5.0"}
+    assert (await authed.post("/api/services", json=tile, headers=CF)).status_code == 201
+    assert (await authed.post("/api/import", json={"yaml": imp}, headers=CF)).status_code == 200
+
+    # Thuis zoals vroeger: een GET proberen zonder 2FA, iets dat verandert met.
+    await _stale(authed)
+    r = await authed.post(f"/api/apis/{aid}/try", json=get)
+    assert r.status_code == 200 and r.json()["ok"]
+    r = await authed.post(f"/api/apis/{aid}/try", json=post)
+    assert r.status_code == 403 and r.json()["detail"] == "reauth_required"
+    assert (await authed.post("/api/apis", json=new)).status_code == 201
 
 
 # --- twee Proxmox-tokens -------------------------------------------------------------------------------------
@@ -385,6 +447,33 @@ def test_regels_herschrijven():
     assert back.splitlines()[1] == f"ssh-ed25519 {BLOB} homepage-homepage"
     assert back.splitlines()[2] == f'command="echo hi there",no-pty ssh-ed25519 {BLOB} met opties'
     assert new.endswith("\n")
+
+
+def test_alleen_een_los_ip_adres():
+    """Het IP komt van de machine zelf (SSH_CLIENT): alleen een los IPv4- of IPv6-adres mag in from=."""
+    assert ssh_pin.ip_literal("192.168.10.156") == "192.168.10.156"
+    assert ssh_pin.ip_literal(" fd00:0::1 ") == "fd00::1"
+    for bad in ("", None, "*", "192.168.*", "?", "!10.0.0.1", "192.168.0.0/24", "10.0.0.1,10.0.0.2", "pve50.lan",
+                '10.0.0.1"', '10.0.0.1",command="sh', 'fe80::1%x",command="sh', "fe80::1%eth0", "010.0.0.1"):
+        assert ssh_pin.ip_literal(bad) is None, bad
+
+
+def test_status_een_patroon_is_niet_vast():
+    """from= met een patroon, een netwerk of een naam: werkt ook vanaf andere IP's, dus los (de veiligheidscheck
+    toont het niet als groen)."""
+    path = "/root/.ssh/authorized_keys"
+
+    def state(frm: str, ip: str | None) -> dict:
+        return ssh_pin._host_status(BLOB, ip, path, f'from="{frm}" ssh-ed25519 {BLOB} homepage\n')
+
+    assert state("192.168.10.156", "192.168.10.156")["state"] == "vast"
+    assert state("192.168.10.156,10.0.0.5", "10.0.0.5")["state"] == "vast"
+    assert state("10.0.0.5", "192.168.10.156")["state"] == "anders"
+    for frm in ("*", "192.168.10.*", "192.168.10.0/24", "192.168.10.156,*", "dashboard.lan", "!10.0.0.1,192.168.10.156"):
+        st = state(frm, frm.split(",")[-1])
+        assert st["state"] == "los" and "geen los IP-adres" in st["text"], (frm, st)
+    st = state("10.0.0.5", None)
+    assert st["state"] == "anders" and "geen geldig IP" in st["text"]
 
 
 class PinServer(asyncssh.SSHServer):
@@ -485,6 +574,53 @@ async def test_vastzetten_zet_terug_als_het_dashboard_er_niet_meer_in_kan(authed
     res = r.json()["results"][str(hid)]
     assert res["error"].startswith("Teruggezet"), res
     assert pin_sshd["ak"].read_text() == before
+
+
+@pytest.mark.parametrize("sender", ["*", "127.0.0.0/8", "127.0.0.1,*", '127.0.0.1",command="touch${{IFS}}{pwnd}',
+                                    "dashboard.lan"])
+async def test_vastzetten_weigert_een_ip_dat_geen_ip_is(authed, pin_sshd, sender):
+    """Een overgenomen machine meldt een patroon, een netwerk of een eigen optie als afzender: niet vastzetten, en
+    niets in authorized_keys veranderen."""
+    hid = await _pin_host(authed, pin_sshd)
+    before = pin_sshd["ak"].read_text()
+    pwnd = pin_sshd["ak"].parent.parent / "gepwnd"
+    pin_sshd["state"]["client"] = sender.format(pwnd=pwnd)
+    r = await authed.post("/api/ssh/pin", json={"host_ids": [hid]})
+    assert r.status_code == 200, r.text
+    res = r.json()["results"][str(hid)]
+    assert res["error"] == "De machine gaf geen geldig IP door (SSH_CLIENT): niet vastgezet", res
+    assert res["state"] != "vast" and not res.get("changed")
+    assert pin_sshd["ak"].read_text() == before
+    assert not pwnd.exists()
+    # Ook niet bewaard als IP van het dashboard, voor de from= van de andere machines.
+    agen, db = await _db()
+    assert await ssh_pin.seen_ips(db) == set()
+    assert (await db.get(AppState, ssh_pin.STATE_KEY)).value["hosts"][str(hid)].get("ip") is None
+    await agen.aclose()
+
+
+async def test_vastzetten_met_het_eigen_ip_van_de_container(authed, pin_sshd, monkeypatch):
+    """Altijd ook syslog_target (het IP van de container), en van de andere machines alleen losse IP's."""
+    from app.config import get_settings
+    monkeypatch.setattr(get_settings(), "syslog_target", "192.168.10.156")
+    hid = await _pin_host(authed, pin_sshd)
+    agen, db = await _db()
+    # Wat een machine vroeger (voor deze controle) als afzender meldde, en een andere machine die 10.0.0.7 zag.
+    db.add(AppState(key=ssh_pin.STATE_KEY, value={"hosts": {"998": {"state": "los", "ip": '*",command="sh'},
+                                                            "999": {"state": "vast", "ip": "10.0.0.7"}}}))
+    await db.commit()
+    assert await ssh_pin.seen_ips(db) == {"10.0.0.7"}
+    await agen.aclose()
+
+    r = await authed.post("/api/ssh/pin", json={"host_ids": [hid]})
+    res = r.json()["results"][str(hid)]
+    assert res["state"] == "vast" and res["changed"] == 1, res
+    text = pin_sshd["ak"].read_text()
+    assert f'from="10.0.0.7,127.0.0.1,192.168.10.156" {pin_sshd["key"].export_public_key().decode()}' in text, text
+
+    # Een syslog_target dat geen IP is (bv. een naam), komt er niet in.
+    monkeypatch.setattr(get_settings(), "syslog_target", "homepage.lan")
+    assert ssh_pin._pin_ips("127.0.0.1", {"10.0.0.7"}) == "10.0.0.7,127.0.0.1"
 
 
 async def test_vastzetten_vraagt_herbevestiging_en_mag_niet_van_buitenaf(authed, pin_sshd):

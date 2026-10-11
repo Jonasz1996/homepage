@@ -8,7 +8,7 @@ from sqlalchemy import Integer, and_, case, cast, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..deps import audit, current_session, current_user, notify, recent_auth
+from ..deps import audit, confirm_silence, current_session, current_user, event, notify, recent_auth
 from ..layout import record_revision
 from ..models import CheckResult, Group, Service, ServiceState, Session, User
 from ..monitoring import routes
@@ -249,27 +249,59 @@ def _until(minutes: int) -> datetime | None:
     return datetime.now(timezone.utc) + timedelta(minutes=minutes) if minutes else None
 
 
+def _later(until: datetime | None, cur: datetime | None) -> bool:
+    """Begint of verlengt dit onderhoud (dan staan er langer meldingen uit)? Stoppen of inkorten niet."""
+    return until is not None and (cur is None or _aware(cur) < until)
+
+
+def _when(until: datetime) -> str:
+    return until.astimezone().strftime("%d/%m %H:%M")
+
+
+def _shorter(name: str, minutes: int) -> str:
+    """Stoppen of inkorten op de tijdlijn (beginnen of verlengen staat er al via de melding van confirm_silence)."""
+    return f"Onderhoud {name}: " + (f"{minutes} min" if minutes else "gestopt")
+
+
+# Onderhoud zet de meldingen van de service en alles wat ervan afhangt uit, en ook zelfherstel: beginnen of verlengen
+# vraagt daarom een recente 2FA en geeft een melding (zoals een check pauzeren). Stoppen en inkorten blijven vrij.
 @router.post("/services/{service_id}/maintenance")
 async def service_maintenance(service_id: int, data: MaintenanceIn, request: Request,
-                              user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+                              sess: Session = Depends(current_session), user: User = Depends(current_user),
+                              db: AsyncSession = Depends(get_db)):
     s = await db.get(Service, service_id)
     if s is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Service niet gevonden")
-    s.maintenance_until = _until(data.minutes)
-    await audit(db, request, user, "maintenance", service=s.name, minutes=data.minutes)
+    until = _until(data.minutes)
+    if _later(until, s.maintenance_until):
+        await confirm_silence(db, request, sess, user, f"Onderhoud: {s.name} tot {_when(until)}", "maintenance",
+                              service_id=s.id, service=s.name, minutes=data.minutes)
+    else:
+        await audit(db, request, user, "maintenance", service=s.name, minutes=data.minutes)
+        event(db, "wijziging", _shorter(s.name, data.minutes), service_id=s.id)
+    s.maintenance_until = until
     await db.commit()
     return {"maintenance_until": s.maintenance_until}
 
 
 @router.post("/groups/{group_id}/maintenance")
 async def group_maintenance(group_id: int, data: MaintenanceIn, request: Request,
-                            user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+                            sess: Session = Depends(current_session), user: User = Depends(current_user),
+                            db: AsyncSession = Depends(get_db)):
     g = await db.get(Group, group_id)
     if g is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Groep niet gevonden")
     until = _until(data.minutes)
+    longer = sum(1 for cur in (await db.execute(select(Service.maintenance_until).where(
+        Service.group_id == group_id))).scalars() if _later(until, cur))
+    if longer:
+        await confirm_silence(db, request, sess, user,
+                              f"Onderhoud voor groep {g.name}: {longer} service{'s' if longer != 1 else ''} "
+                              f"tot {_when(until)}", "maintenance", group=g.name, minutes=data.minutes)
+    else:
+        await audit(db, request, user, "maintenance", group=g.name, minutes=data.minutes)
+        event(db, "wijziging", _shorter(g.name, data.minutes))
     await db.execute(update(Service).where(Service.group_id == group_id).values(maintenance_until=until))
-    await audit(db, request, user, "maintenance", group=g.name, minutes=data.minutes)
     await db.commit()
     return {"maintenance_until": until}
 

@@ -1,16 +1,23 @@
 <script>
   import { onMount } from 'svelte'
-  import { api } from './api.js'
+  import { api, withReauth } from './api.js'
 
   // Gepland onderhoud: vooraf vastleggen wanneer een service of groep in onderhoud gaat (eenmalig of herhalend).
   // Met `service` alleen de vensters van die service (en zijn groep); zonder alles, met een keuze van het doel.
   let { service = null, services = [], groups = [] } = $props()
 
   const DAYS = ['ma', 'di', 'wo', 'do', 'vr', 'za', 'zo']
-  const DURATIONS = [[15, '15 min'], [30, '30 min'], [60, '1 u'], [120, '2 u'], [240, '4 u'], [480, '8 u'], [1440, '1 dag']]
+  const DURATIONS = [[15, '15 min'], [30, '30 min'], [60, '1 u'], [120, '2 u'], [240, '4 u'], [480, '8 u'], [720, '12 u'], [1440, '1 dag']]
   let items = $state([])
   let error = $state('')
   let form = $state(null)
+  // Herhalend hoogstens 12 u per keer (elke dag 24 u is altijd onderhoud); eenmalig mag langer. Een ouder venster dat
+  // nog langer bewaard is, loopt ook maar zo lang: de editor en aan/uit sturen dan 12 u, en dat is niet anders plannen.
+  const REPEAT_MAX = 720
+  const runMinutes = (w) => (w.repeat === 'once' ? w.minutes : Math.min(w.minutes, REPEAT_MAX))
+  $effect(() => {
+    if (form && form.repeat !== 'once' && form.minutes > REPEAT_MAX) form.minutes = REPEAT_MAX
+  })
 
   async function load() {
     try { items = await api('/maintenance/windows' + (service ? `?service_id=${service.id}` : '')); error = '' }
@@ -48,15 +55,16 @@
                    service_id: form.target.startsWith('s') ? Number(form.target.slice(1)) : null,
                    group_id: form.target.startsWith('g') ? Number(form.target.slice(1)) : null }
     try {
-      await api('/maintenance/windows' + (form.id ? `/${form.id}` : ''), { method: form.id ? 'PUT' : 'POST', body })
+      // Een venster dat aan staat, zet meldingen en zelfherstel uit: aanzetten of anders plannen vraagt je 2FA.
+      await withReauth(() => api('/maintenance/windows' + (form.id ? `/${form.id}` : ''), { method: form.id ? 'PUT' : 'POST', body }))
       form = null
       await load()
     } catch (e) { error = e.message }
   }
   async function toggle(w) {
     try {
-      await api(`/maintenance/windows/${w.id}`, { method: 'PUT', body: { name: w.name, repeat: w.repeat, start: w.start,
-        minutes: w.minutes, weekdays: w.weekdays, enabled: !w.enabled, service_id: w.service_id, group_id: w.group_id } })
+      await withReauth(() => api(`/maintenance/windows/${w.id}`, { method: 'PUT', body: { name: w.name, repeat: w.repeat, start: w.start,
+        minutes: runMinutes(w), weekdays: w.weekdays, enabled: !w.enabled, service_id: w.service_id, group_id: w.group_id } }))
       await load()
     } catch (e) { error = e.message }
   }
@@ -115,7 +123,7 @@
         </select>
         {#if form.repeat === 'once'}<input type="datetime-local" bind:value={form.when} aria-label="Begin" />
         {:else}<input type="time" bind:value={form.time} aria-label="Uur" />{/if}
-        <select bind:value={form.minutes} aria-label="Duur">{#each DURATIONS as [m, l]}<option value={m}>{l}</option>{/each}</select>
+        <select bind:value={form.minutes} aria-label="Duur">{#each DURATIONS.filter(([m]) => form.repeat === 'once' || m <= REPEAT_MAX) as [m, l]}<option value={m}>{l}</option>{/each}</select>
       </div>
       {#if form.repeat === 'weekly'}
         <div class="days">{#each DAYS as d, i}<button class="mini" class:on={form.weekdays.includes(i)} onclick={() => day(i)}>{d}</button>{/each}</div>

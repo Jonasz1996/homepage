@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     syslog_target: str = ""
     # IP van Nginx Proxy Manager (install.sh vraagt het); voor de firewall-lijst in net.
     npm_ip: str = ""
+    # Wat nginx rechtstreeks toelaat (install.sh schrijft het): alleen NPM, of het hele LAN (HOMEPAGE_LAN_OPEN=1).
+    nginx_file: Path = Path("/etc/homepage/nginx")
     # Elke 5 minuten het publieke IP opvragen bij Cloudflare (1.1.1.1), melding als het verandert.
     public_ip_check: bool = True
     # Zelfcontrole: waar de dagelijkse pg_dump staat, en een gemounte map (NAS, PBS, USB) voor de kopie buiten de
