@@ -46,8 +46,8 @@ FEATURES = {
                          "API-calls die iets veranderen, API's instellen of calls uitproberen, een tegel met "
                          "integratie een ander adres geven, poortscan, de check van buitenaf in Cloudflare zetten, een "
                          "nieuwe service maken of opruimen"),
-    "downloads": ("configuraties en de diagnose downloaden",
-                  "oude configuraties en de diagnose downloaden en eigen bestanden ongemaskeerd bekijken"),
+    "downloads": ("configuraties, diagnose en noodplan downloaden",
+                  "oude configuraties, de diagnose en het noodplan downloaden en eigen bestanden ongemaskeerd bekijken"),
 }
 
 

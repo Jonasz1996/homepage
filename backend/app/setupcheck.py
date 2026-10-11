@@ -18,8 +18,8 @@ from .health import scan as hw, security
 from .integrations import IntegrationError, build
 from .models import (ApiConnection, AppState, CronJob, HealRule, LogEntry, PushMonitor, Service, ServiceState, SshHost,
                      User, WebhookSource)
-from .monitoring import (cluster, configs, coverage, devices, exposure as expo, pbssync, restoretest, routes, upgrade,
-                         watchdog, webpush, zabbix as zbx)
+from .monitoring import (cluster, configs, coverage, devices, exposure as expo, noodplan, pbssync, restoretest, routes,
+                         upgrade, watchdog, webpush, zabbix as zbx)
 from .monitoring import buitencheck as bc
 from .monitoring.containerlogs import logs_on
 from .monitoring.engine import active
@@ -147,6 +147,34 @@ async def restore(db: AsyncSession) -> dict:
                    [f"Bij {last.get('step')}: {last.get('error')}"], fix, optional=True)
     return row("restoretest", "proxmox", title, "ok", f"Aan, {when}; " + ("laatste test geslaagd." if last else
                "nog niet gelopen. Probeer ▶ nu testen."), fix=fix, optional=True)
+
+
+async def noodplan_row(db: AsyncSession) -> dict:
+    """Het noodplan: gemaakt, volledig, en ook buiten de container (anders heb je het niet als het dashboard plat
+    ligt)."""
+    v, cfg = await _state(db, noodplan.STATE_KEY), await hw.settings(db)
+    title, fix = "Noodplan (afdrukbaar, ook buiten de container)", {"window": "noodplan"}
+    if not v.get("at"):
+        return row("noodplan", "proxmox", title, "none", "Nog niet gemaakt.",
+                   ["Infrastructuur → Noodplan → nu bijwerken (daarna elke maandag vanzelf)."], fix)
+    when = _local(datetime.fromisoformat(v["at"]))
+    off = v.get("offsite") or {}
+    if not cfg.get("offsite"):
+        return row("noodplan", "proxmox", title, "half", f"Bijgewerkt {when}, maar alleen in het dashboard: ligt dat "
+                   "plat, dan heb je het noodplan niet.", ["Gezondheid › homepage zelf: zet de kopie buiten de container "
+                   f"aan. Dan staan {' en '.join(noodplan.FILES)} elke week in {get_settings().offsite_dir}."],
+                   {"window": "health", "tab": "homepage"})
+    now = datetime.now(timezone.utc)
+    bad = [f"{s['name']}: {s.get('error') or 'fout'}" for s in v.get("sources") or []
+           if not s.get("ok") and not s.get("covered")]
+    todo = bad + ([off["error"]] if off.get("error") else []) + [t for k, t in noodplan.problems(v, now) if k == "masker"]
+    if todo:
+        return row("noodplan", "proxmox", title, "half", f"Bijgewerkt {when}, maar onvolledig.", todo, fix)
+    if not off.get("enabled"):
+        # De kopie staat sinds kort aan: de volgende run (of nu bijwerken) zet het noodplan erbij.
+        return row("noodplan", "proxmox", title, "half", f"Bijgewerkt {when}, nog niet buiten de container.",
+                   ["Infrastructuur → Noodplan → nu bijwerken: dan staat het ook in de map van de kopie."], fix)
+    return row("noodplan", "proxmox", title, "ok", f"Bijgewerkt {when}; kopie in {off.get('dir')}.", fix=fix)
 
 
 async def homelab_rows(db: AsyncSession, has_pbs: bool) -> list[dict]:
@@ -730,6 +758,7 @@ async def run(db: AsyncSession, clients, results: dict[int, dict]) -> dict:
                      ["Token in PBS (Configuration → Access Control → API Token) met de rol DatastoreAudit, in "
                       "API-beheer (README)."], "Back-ups, verify en sync worden gevolgd."),
         await restore(db),
+        await noodplan_row(db),
         *await homelab_rows(db, bool(of("proxmoxbackupserver"))),
         await opnsense(db, of("opnsense"), results),
         _integration("npm", "netwerk", "Nginx Proxy Manager", of("npm"), results,

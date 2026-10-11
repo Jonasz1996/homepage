@@ -3,6 +3,18 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 39,
+    datum: '2026-10-11',
+    titel: 'Noodplan',
+    items: [
+      'Infrastructuur → Noodplan: één document om af te drukken of als pdf te bewaren, met per node elke VM en CT (ID, IP, MAC, opslag, autostart) en welke schijven niet in de back-up zitten, waar de back-ups staan, een commando per VM en CT om hem terug te zetten, waar de kopieën van OPNsense en NPM staan, welke sleutels je nodig hebt en waar ze liggen, hoe je het dashboard zelf terugzet, en de adressen van Proxmox, PBS en OPNsense op IP. Er staan geen wachtwoorden of sleutels in.',
+      'Het wordt elke maandagochtend vanzelf bijgewerkt, of met "nu bijwerken". Staat de kopie buiten de container aan, dan staan noodplan.html en noodplan.md ook in /mnt/homepage-backup, voor als het dashboard zelf plat ligt. Tonen en downloaden vraagt je 2FA-code. Lukt een Proxmox of PBS al twee weken niet, of is het noodplan te oud, dan staat het onder !.',
+    ],
+    instellen: [
+      'Niets nodig. Wil je het ook buiten de container: Gezondheid › homepage zelf → kopie buiten de container aan, met een wachtzin. Open noodplan.html daarna eens vanaf je pc via de share, en kijk of elke VM en CT een IP en MAC heeft.',
+    ],
+  },
+  {
     nr: 38,
     datum: '2026-10-11',
     titel: 'Nieuwe service in één keer',

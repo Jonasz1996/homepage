@@ -30,7 +30,7 @@ venster staat in `frontend/src/lib/windows.js`, met de oude korte naam die je in
 
 | Menu | Vensters (oude naam) |
 | --- | --- |
-| Infrastructuur | Gezondheid (`hw`), Capaciteit (`df`), Netwerk (`net`), Cronjobs (`cron`), Logs (`logs`), Tijdlijn (`history`) |
+| Infrastructuur | Gezondheid (`hw`), Capaciteit (`df`), Netwerk (`net`), Cronjobs (`cron`), Logs (`logs`), Tijdlijn (`history`), Noodplan |
 | Beheer | Terminal (`>_`), Updates (`apt`), Gepland onderhoud, Configuratiewijzigingen (`diff`), Hersteltest, Dashboard bewerken (`✎`) |
 | Instellingen | Beveiliging (`⚿`), API-beheer (`api`), Webhooks, Meldingen op je gsm, Instellingen-checklist, Effecten, Wat is er nieuw, Uitloggen |
 
@@ -474,6 +474,26 @@ Later, deel 3 (Authentik en gsm):
   in de terminal, als root; vraagt je 2FA-code, staat van buitenaf uit, komt in het auditlog). Een sync die al bestaat
   ziet het dashboard alleen als het PBS-token ook de rol RemoteAudit op `/remote` heeft. Zet op het doel ook een
   prune-job, anders blijft de kopie groeien
+- **noodplan** (Infrastructuur → Noodplan): één document om af te drukken of als pdf te bewaren, voor als er iets plat
+  ligt. Per node het management-IP, de architectuur en elke VM en CT met ID, IP, MAC, opslag, autostart en de schijven
+  die **niet in de back-up** zitten (een mount point van een CT zonder `backup=1`, een schijf met `backup=0`); waar de
+  back-ups staan (welke PBS, welke job, hoe oud), per VM/CT het commando om hem terug te zetten, waar de kopieën van
+  OPNsense en NPM staan, welke sleutels je nodig hebt en waar ze liggen (de wachtzin van de kopie buiten de container,
+  de sleutel van een versleutelde PBS-opslag met het `paperkey`-commando), hoe je het dashboard zelf terugzet, en de
+  adressen van Proxmox, PBS en OPNsense op IP voor als DNS of NPM het niet doet. Er staan geen wachtwoorden of
+  sleutels in, alleen waar ze staan; wat toch op een geheim lijkt, wordt `***` met een waarschuwing. Elke maandag rond
+  6:00 maakt de worker het opnieuw, of meteen met *nu bijwerken*. Lukt een Proxmox of PBS niet, dan komt dat deel uit
+  het vorige noodplan, met de datum erbij (of ontbreekt het, als het nog nooit lukte); is dat na twee weken nog zo, of
+  is het noodplan ouder dan 15 dagen, dan staat het in **!**. Tonen en downloaden (html of Markdown) vraagt je
+  2FA-code, staat van buitenaf uit en komt in het auditlog. Staat de kopie buiten de container aan, dan staan
+  `noodplan.html` en `noodplan.md` ook in `/mnt/homepage-backup`, te openen zonder het dashboard. Rechten: niets
+  nieuws (het Proxmox-leestoken met PVEAuditor en de PBS-tegels met DatastoreAudit). Ziet het leestoken de back-ups
+  op de PBS-opslag niet bij naam (Proxmox vraagt daar Datastore.AllocateSpace en VM.Backup voor, geef die het
+  leestoken niet), dan staat in de commando's `<tijd uit pvesm list>` en zegt het noodplan dat. Het IP van een VM
+  komt uit de config, OPNsense (ARP/DHCP), de SSH-hosts of de QEMU guest agent: dat laatste werkt op PVE 9 met
+  PVEAuditor (`VM.GuestAgent.Audit`, kijk het na met `pveum role list`) als `qemu-guest-agent` in de VM draait; PVE 8
+  vraagt er `VM.Monitor` voor, geef dat het leestoken niet (OPNsense vindt die VM's ook). Zie [Noodplan
+  instellen](#noodplan-instellen)
 - **gepland onderhoud**: in het mini dashboard van een service (of `Ctrl+K` → "gepland onderhoud" voor groepen)
   onderhoud vooraf plannen: eenmalig, elke dag of op vaste weekdagen (bv. elke zondag 3:00 tot 4:00 tijdens de
   back-up). Een herhalend venster duurt hoogstens 12 uur per keer; een ouder venster dat langer bewaard was, loopt
@@ -909,6 +929,31 @@ alleen voor de veiligheidscheck "slot voor het dashboard".
 
 **Bewaar een kopie van `/etc/homepage/secret.key`.** Zonder die sleutel zijn de opgeslagen
 wachtwoorden, API-sleutels en 2FA-geheimen onleesbaar.
+
+### Noodplan instellen
+
+Het noodplan gebruikt de tegels en API's die er al zijn: geen nieuwe rechten. Na de update:
+
+1. Infrastructuur → Noodplan → *nu bijwerken*, en lees het één keer na: heeft elke VM en CT een IP en een MAC,
+   staat bij elke node het management-IP (niet alleen "corosync-IP") en de architectuur, zijn de schijven met
+   "niet in de back-up" de schijven die je verwacht, en staat er bij *Toegang zonder DNS* een IP voor elk systeem?
+   Staat er "onbekend", dan gebruikt die tegel een DNS-naam die NPM niet kent: zet het IP in de tegel of de API
+2. Zet de **kopie buiten de container** aan (Gezondheid › homepage zelf, met een wachtzin), op een machine die niet
+   de node van het dashboard is (NAS of de PBS-Pi): `pct set <id> -mp0 /mnt/nas/homepage,mp=/mnt/homepage-backup`,
+   `chown homepage: /mnt/homepage-backup` in de container en `systemctl restart homepage-worker`. Open daarna
+   `noodplan.html` één keer vanaf je pc via de share (SMB/NFS), zonder het dashboard. De bestanden zijn leesbaar
+   voor iedereen (0644), maar van de gebruiker `homepage` van een unprivileged CT (uid 100000+ op de host of NAS):
+   weigert de share ze, regel de gebruikers of rechten van de share nu, niet tijdens een storing
+3. Kijk één keer na dat `pvesh get /storage --output-format json` een `encryption-key` (vingerafdruk) toont voor een
+   versleutelde PBS-opslag, en dat `pvesh get /nodes/<node>/status` `current-kernel.machine` toont (de architectuur)
+4. Bewaar zelf wat het noodplan alleen aanwijst: de wachtzin van de kopie (in je wachtwoordmanager), een kopie van
+   elke sleutel van een versleutelde PBS-opslag buiten de cluster (`proxmox-backup-client key paperkey
+   /etc/pve/priv/storage/<id>.enc --output-format text` op een node, afgedrukt bij het noodplan), het wachtwoord of
+   token waarmee Proxmox bij PBS komt, en de rootwachtwoorden. Is een PBS-opslag versleuteld en heb je geen kopie van
+   de sleutel, dan is dat het eerste om op te lossen
+5. Druk het af na grote wijzigingen (nieuwe node, nieuwe PBS, nieuw VLAN) en bewaar de afdruk bij de paperkey, op
+   een veilige plek: er staan IP- en MAC-adressen in. Afdrukken uit de Android-app of op een iPhone lukt niet
+   vanuit het venster: download het als html en druk het af vanuit je browser
 
 ## Bijwerken
 

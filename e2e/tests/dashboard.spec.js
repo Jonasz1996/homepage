@@ -16,7 +16,12 @@ test.beforeAll(async ({ browser }) => {
   page = await browser.newPage()
   page.on('pageerror', (e) => errors.push(String(e)))
   // Mislukte verzoeken (401 voor het inloggen, iconen van buiten) zijn geen fout in de interface.
-  page.on('console', (m) => m.type() === 'error' && !/Failed to load resource/.test(m.text()) && errors.push(m.text()))
+  // Het noodplan staat in een iframe zonder scripts: de tracer van Playwright (trace: retain-on-failure) probeert daar
+  // toch een script in te zetten en Chrome meldt dat het geblokkeerd is. Dat komt van het testgereedschap, niet van het
+  // dashboard; de noodplantest kijkt zelf na dat het iframe geen scripts bevat.
+  const tool = /Blocked script execution in 'about:srcdoc'/
+  page.on('console', (m) => m.type() === 'error' && !/Failed to load resource/.test(m.text()) && !tool.test(m.text()) &&
+    errors.push(m.text()))
   // confirm() en prompt() werken niet in een WebView (de Android-app): het dashboard gebruikt eigen vensters. Een
   // ingebouwde dialoog van de browser is dus een fout.
   page.on('dialog', (d) => { errors.push(`ingebouwde dialoog: ${d.message()}`); d.dismiss() })
@@ -30,6 +35,18 @@ async function menu(name, item) {
 // Een vraag van het dashboard zelf (in plaats van confirm()) beantwoorden.
 async function bevestig(knop) {
   await page.getByRole('dialog', { name: 'bevestigen' }).getByRole('button', { name: knop }).click()
+}
+
+// De vraag om de 2FA-code (ReauthDialog) beantwoorden als ze komt: de vorige bevestiging kan al ouder zijn dan het
+// kwartier van een recente 2FA. Wacht tot de vraag of `until` zichtbaar is, zodat ze een late vraag niet mist.
+async function confirm2fa(until) {
+  const box = page.locator('#ra-code')
+  await expect(box.or(until)).toBeVisible({ timeout: 60000 })
+  if (!(await box.isVisible())) return
+  const { code, at } = await freshCode(secret, usedStep)
+  usedStep = at
+  await box.fill(code)
+  await page.getByRole('button', { name: 'Bevestigen' }).click()
 }
 
 test.afterAll(async () => { await page?.close() })
@@ -109,7 +126,7 @@ test('bewerkmodus: pagina, groep en tegel', async () => {
 
 // Elk venster uit de menu's in de titelbalk opent en kan weer dicht.
 const MENUS = {
-  Infrastructuur: ['Gezondheid', 'Capaciteit', 'Netwerk', 'Cronjobs', 'Logs', 'Tijdlijn'],
+  Infrastructuur: ['Gezondheid', 'Capaciteit', 'Netwerk', 'Cronjobs', 'Logs', 'Tijdlijn', 'Noodplan'],
   Beheer: ['Nieuwe service', 'Terminal', 'Updates', 'Gepland onderhoud', 'Configuratiewijzigingen', 'Hersteltest'],
   Instellingen: ['Beveiliging', 'API-beheer', 'Webhooks', 'Meldingen op je gsm', 'Instellingen-checklist', 'Wat is er nieuw'],
 }
@@ -572,4 +589,44 @@ test('tegel: opruimen… alleen voor namen in het domein', async () => {
   await expect(page.getByRole('button', { name: '✎ bewerken' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'opruimen…' })).toHaveCount(0)
   await page.keyboard.press('Escape')
+})
+
+test('noodplan: bijwerken, tonen, afdrukken en downloaden', async () => {
+  await menu('Infrastructuur', 'Noodplan')
+  const win = page.getByRole('dialog', { name: 'less noodplan.html' })
+  await expect(win.getByText('Nog geen noodplan.')).toBeVisible()
+  await win.getByRole('button', { name: 'nu bijwerken' }).click()
+  await confirm2fa(win.locator('iframe[title="Noodplan"]'))
+  const paper = page.frameLocator('iframe[title="Noodplan"]')
+  await expect(paper.getByRole('heading', { level: 1 })).toHaveText(/Noodplan/, { timeout: 60000 })
+  await expect(paper.getByText('homepage-terugzetten').first()).toBeVisible()
+  await expect(win.getByText('✓ bijgewerkt')).toBeVisible()
+  // Zo hoog als het document (het venster scrolt), en geen scripts of on…-attributen in het iframe.
+  const frame = win.locator('iframe[title="Noodplan"]')
+  await expect.poll(async () => (await frame.boundingBox()).height).toBeGreaterThan(300)
+  expect(await frame.evaluate((f) => [...f.contentDocument.querySelectorAll('*')].filter((el) => el.localName === 'script' ||
+    [...el.attributes].some((a) => a.name.startsWith('on'))).length)).toBe(0)
+  // Afdrukken: print() van het iframe vervangen vanuit de pagina (het iframe zelf voert geen scripts uit).
+  await page.evaluate(() => {
+    document.querySelector('iframe[title="Noodplan"]').contentWindow.print = () => { window.__geprint = true }
+  })
+  await win.getByRole('button', { name: 'afdrukken' }).click()
+  expect(await page.evaluate(() => window.__geprint)).toBe(true)
+  // De 2FA hierboven is seconden oud: de tekstversie vraagt niets meer.
+  const [dl] = await Promise.all([page.waitForEvent('download'), win.getByRole('button', { name: '↓ tekst' }).click()])
+  expect(dl.suggestedFilename()).toMatch(/^noodplan-\d{4}-\d{2}-\d{2}\.md$/)
+  const text = readFileSync(await dl.path(), 'utf8')
+  expect(text).toContain('# Noodplan')
+  expect(text).not.toContain(PASS)
+  expect(text).not.toContain(secret)
+  await win.getByRole('button', { name: 'proef' }).click()
+  await expect(win.getByText('er is niets uitgevoerd')).toBeVisible()
+  // gsm: hetzelfde venster op 393 px, met het document erin en zonder horizontaal scrollen.
+  await page.setViewportSize({ width: 393, height: 852 })
+  await expect(win.getByRole('button', { name: 'afdrukken' })).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(393)
+  expect((await page.locator('iframe[title="Noodplan"]').boundingBox()).width).toBeLessThanOrEqual(393)
+  await page.setViewportSize({ width: 1400, height: 900 })
+  await win.getByRole('button', { name: 'Sluiten' }).click()
+  await expect(win).toHaveCount(0)
 })

@@ -16,8 +16,8 @@ from .health import domains as dom, scan as hw, security, selfcheck as sc, snaps
 from .integrations import REGISTRY
 from .integrations.zabbix import RED_FROM
 from .models import AppState, CronJob, Device, MaintenanceWindow, Service, ServiceState, UpdateRun
-from .monitoring import (cluster, coverage, devices, exposure as expo, planned, restoretest, rollup, updates as upd,
-                         zabbix as zbx)
+from .monitoring import (cluster, coverage, devices, exposure as expo, noodplan, planned, restoretest, rollup,
+                         updates as upd, zabbix as zbx)
 from .monitoring import buitencheck as bc
 from .monitoring.engine import KEEP_CHECKS_DAYS, MASS_KEY, active
 from .syslog import server as rxs
@@ -202,6 +202,21 @@ async def backups(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
                         f"{last['cleanup_error']}. Verwijder hem zelf in Proxmox.", {"window": "restoretest"},
                         sig=at))
     return out + await backup_coverage(db)
+
+
+async def noodplan_items(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
+    """Eén punt als het noodplan te oud is, een deel al twee weken uit een oud noodplan komt, of de maskering iets
+    moest vervangen. Nog nooit gemaakt: dat zegt de checklist. Een bron die alleen deze week niet lukte: dat meldt de
+    cluster of de PBS al."""
+    v = await _state(db, noodplan.STATE_KEY)
+    if not v.get("at"):
+        return []
+    probs = noodplan.problems(v, now)
+    if not probs:
+        return []
+    return [item("noodplan", "warn", "back-ups", "Noodplan verouderd of onvolledig",
+                 "; ".join(t for _, t in probs) + ". Infrastructuur → Noodplan → nu bijwerken.",
+                 {"window": "noodplan"}, sig=",".join(k for k, _ in probs))]
 
 
 async def backup_coverage(db: AsyncSession) -> list[dict]:
@@ -719,8 +734,8 @@ async def public_names(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]
     return out
 
 
-SOURCES = (services, backups, clusters, hardware, capacity, network, outside_checks, homepage, zabbix, cron_jobs, updates,
-           safety, maintenance, public_names, new_services)
+SOURCES = (services, backups, noodplan_items, clusters, hardware, capacity, network, outside_checks, homepage, zabbix,
+           cron_jobs, updates, safety, maintenance, public_names, new_services)
 
 
 async def collect(db: AsyncSession, errors: dict[int, str] | None = None) -> dict:
