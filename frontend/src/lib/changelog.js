@@ -3,6 +3,35 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 31,
+    datum: '2026-10-11',
+    titel: 'Veiliger en zuiniger met de schijf',
+    items: [
+      'Een vervalste Cloudflare-header telt niet meer als thuis: het dashboard gelooft die alleen als NPM het verzoek van Cloudflare of van je tunnel kreeg. Een poging geeft een melding.',
+      'Logregels worden na 1 dag gecomprimeerd. Vanaf 75 % schijf krijg je een melding en ruimt het dashboard de oudste logregels op; de laatste 3 dagen blijven.',
+      'De nachtelijke back-up laat de logregels weg en houdt de 5 nieuwste.',
+      'Een update zet het dashboard even stil tijdens de kopie en de migratie. Mislukt een van beide, of breek je de update af, dan blijft de vorige versie draaien. Terugzetten zet ook de bibliotheken van toen terug.',
+      'Trage SSH-taken (cron, updates, schijven) houden geen databaseverbinding meer open. Een zoekopdracht in de logs die te lang duurt, stopt met een duidelijke melding.',
+    ],
+    instellen: [
+      'Containerlogs van Portainer staan nu standaard uit. Wil je ze houden, zet dan logs = true op je Portainer-tegel (✎ bewerken → Integratie en API).',
+      'Kom je via een Cloudflare Tunnel binnen, laat cloudflared dan naar NPM wijzen en niet rechtstreeks naar het dashboard.',
+    ],
+  },
+  {
+    nr: 30,
+    datum: '2026-10-05',
+    titel: 'Checks zonder DNS',
+    items: [
+      'Checks op een naam die NPM kent, vragen geen DNS meer: ze gaan rechtstreeks naar de server achter NPM, of naar NPM zelf met de naam erbij. Een klik op de tegel opent nog altijd de naam.',
+      'Het mini dashboard zegt waar de check naartoe gaat en waarom.',
+    ],
+    instellen: [
+      'Laat in OPNsense het dashboard door naar de servers en poorten onder NPM-tegel → rechtstreeks, en klik daar op "nu vernieuwen".',
+      'Geef de NPM-tegel een eigen http-check.',
+    ],
+  },
+  {
     nr: 29,
     datum: '2026-10-05',
     titel: 'Het dashboard vervangt Uptime Kuma',
