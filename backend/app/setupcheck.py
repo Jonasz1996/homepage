@@ -15,12 +15,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .config import get_settings
 from .health import scan as hw, security
 from .integrations import IntegrationError, build
-from .models import (AppState, CronJob, HealRule, LogEntry, PushMonitor, Service, ServiceState, SshHost, User,
+from .models import (ApiConnection, AppState, CronJob, HealRule, LogEntry, PushMonitor, Service, ServiceState, SshHost, User,
                      WebhookSource)
 from .monitoring import (cluster, configs, coverage, devices, pbssync, restoretest, routes, upgrade, watchdog, webpush,
                          zabbix as zbx)
+from .monitoring import buitencheck as bc
 from .monitoring.containerlogs import logs_on
 from .monitoring.engine import active
+from .security import decrypt_json
 from .ssh_login import defaults as ssh_defaults
 from .ssh_pin import STATE_KEY as PIN_KEY
 
@@ -385,6 +387,35 @@ async def webpush_row(db: AsyncSession) -> dict:
     return row("webpush", "monitoring", title, "ok", text, fix=fix)
 
 
+async def outside_row(db: AsyncSession) -> dict:
+    title, fix = "Check van buitenaf", {"window": "net", "tab": "buitencheck"}
+    cfg = await bc.config(db)
+    if not cfg["enabled"] or not cfg["worker_url"] or not cfg["token"]:
+        return row("buitencheck", "monitoring", title, "none", "Alles wordt alleen van binnenuit gecheckt.",
+                   ["Netwerk → check van buitenaf: zet de gratis Cloudflare Worker (token met Workers Scripts → Edit in "
+                    "API-beheer, of zelf plakken)."], fix, optional=True)
+    w = (await bc.state(db))["worker"]
+    n = len(cfg["services"])
+    text = f"{n} tegel{'s' if n != 1 else ''} van buitenaf" + (
+        f", laatst {bc.hhmm(w['ok_at'])} vanuit {w.get('colo') or '?'}." if w.get("ok_at") else ".")
+    waiting = bc._dt(cfg["token_next_at"]) if cfg["token_next"] else None
+    stored = False
+    for a in (await db.execute(select(ApiConnection).where(ApiConnection.kind == "cloudflared"))).scalars():
+        try:
+            stored = stored or bool(a.secrets and decrypt_json(a.secrets).get("workers_token"))
+        except Exception:  # noqa: BLE001 - onleesbaar (andere sleutel): telt niet
+            pass
+    todo = ("aan, maar geen tegels in de lijst" if not n
+            else f"Worker antwoordt niet: {w.get('error')}" if int(w.get("fail") or 0) >= bc.WORKER_FAIL_AFTER
+            else "Er wacht al meer dan een uur een nieuw geheim: plak het in Cloudflare of annuleer het"
+            if waiting and datetime.now(timezone.utc) - waiting > bc.PASTE_GRACE
+            else "Het token met Workers Scripts → Edit staat nog in API-beheer. Het is alleen nodig om de Worker opnieuw "
+                 "te zetten: haal het weg (Netwerk → check van buitenaf)." if stored else None)
+    if todo:
+        return row("buitencheck", "monitoring", title, "half", text, [todo], fix, optional=True)
+    return row("buitencheck", "monitoring", title, "ok", text, fix=fix, optional=True)
+
+
 async def hardware(db: AsyncSession) -> dict:
     hosts = (await _state(db, hw.STATE_KEY)).get("hosts") or []
     title, fix = "Schijven en temperatuur", {"window": "health", "tab": "schijven"}
@@ -644,6 +675,7 @@ async def run(db: AsyncSession, clients, results: dict[int, dict]) -> dict:
         await checks_row(db, svcs),
         *([await routes_row(db, of("npm"))] if of("npm") else []),
         await webpush_row(db),
+        await outside_row(db),
         await watcher_row(db),
         await zabbix_row(db, of("zabbix"), results),
         await home_assistant(db, clients, of("homeassistant"), results),

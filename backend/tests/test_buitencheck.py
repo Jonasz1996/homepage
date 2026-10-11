@@ -11,7 +11,7 @@ import httpx
 import pytest
 from sqlalchemy import delete, select, update
 
-from app import masking
+from app import diagnose, masking
 from app.db import ensure_state, get_db
 from app.integrations import IntegrationError, from_api
 from app.main import app
@@ -19,7 +19,7 @@ from app.models import ApiConnection, AppState, AuditLog, Event, Notification, S
 from app.monitoring import buitencheck as bc
 from app.monitoring.checks import HttpClients
 from app.routers import buitencheck as bcroute
-from app.security import encrypt, encrypt_json
+from app.security import decrypt_json, encrypt, encrypt_json
 
 from .test_capacity import _db
 from .test_integrations import _group
@@ -1016,3 +1016,141 @@ async def test_workers_token_niet_naar_een_ander_adres(authed, world):
     r = await authed.post("/api/buitencheck/deploy", json={})
     assert r.status_code == 422
     assert "evil.example" not in world.hosts
+
+
+# --- 18, 22-24: /api/status, aandacht, checklist en diagnose ---------------------------------------------------------
+
+def _entry(now, **kw) -> dict:
+    """Een tegel die van buitenaf down is, met een vers resultaat."""
+    return {"url": "https://x.jbogaert.be/", "status": "down", "since": bc.iso(now - timedelta(minutes=20)),
+            "at": bc.iso(now - timedelta(minutes=1)), "fail": 3, "why": "de Cloudflare Tunnel is niet verbonden (1033)",
+            "note": None, "cause": "cfe:1033", "code": 530, "ms": 41, "colo": "BRU", "quiet": None, "notified": True,
+            "reset_at": None, **kw}
+
+
+async def _setup_rows(authed) -> dict:
+    return {r["key"]: r for g in (await authed.get("/api/attention/setup")).json()["groups"] for r in g["rows"]}
+
+
+async def _attention(authed) -> dict:
+    return {i["key"]: i for i in (await authed.get("/api/attention")).json()["items"] if i["key"].startswith("buiten")}
+
+
+async def test_api_overzicht_en_status(authed, world):
+    ids = await _tiles(authed, 3)
+    await _inside(ids[0], "up")
+    aid = await _api()
+    await _config(ids[:2], token_next=encrypt(SECRET_B), token_next_at=bc.iso(T0), api_id=aid)
+    now = datetime.now(timezone.utc)
+    await _set(bc.STATE_KEY, {"tiles": {str(ids[0]): _entry(now), str(ids[1]): _entry(now, status="up", why=None)},
+                              "worker": {"ok_at": bc.iso(now), "colo": "BRU", "script": 1, "fail": 0},
+                              "groups": {"cfe:1033": {"cause": "cfe:1033", "why": "tunnel", "since": bc.iso(now),
+                                                      "tiles": [ids[0]]}}})
+    r = await authed.get("/api/buitencheck")
+    for secret in (SECRET_A, SECRET_B, "cf-workers", "cf-tunnel"):
+        assert secret not in r.text
+    d = r.json()
+    assert (d["enabled"], d["ready"], d["name"], d["worker_url"], d["how"], d["token_set"]) == (
+        True, True, NAME, WORKER, "api", True)
+    assert d["token_next_at"] == bc.iso(T0) and d["suffixes"] == ["jbogaert.be"] and d["script_version"] == 1
+    assert d["api"] == {"id": aid, "name": "Cloudflare", "workers_token": True, "account": True} and d["apis"] == [d["api"]]
+    assert d["worker"]["colo"] == "BRU" and d["worker"]["fail"] == 0 and d["mass"] is None
+    assert d["groups"] == [{"cause": "cfe:1033", "why": "tunnel", "since": bc.iso(now), "count": 1}]
+    assert d["limits"] == {"per_call": 45, "rounds": 5, "max": 225, "calls_per_day": 1440}
+    t0, t1 = d["tiles"]
+    assert (t0["id"], t0["name"], t0["url"], t0["inside"], t0["problem"]) == (ids[0], "t0", _url("t", 0), "up", None)
+    assert t0["vanbuiten"]["status"] == "down" and t0["vanbuiten"]["code"] == 530
+    assert t1["inside"] is None and t1["vanbuiten"]["status"] == "up"
+    # Op de tegels: ook een tegel zonder check van binnenuit, niet een tegel die niet in de lijst staat.
+    st = (await authed.get("/api/status")).json()
+    assert st[str(ids[0])]["status"] == "up" and st[str(ids[0])]["vanbuiten"]["why"].startswith("de Cloudflare Tunnel")
+    assert st[str(ids[1])] == {"status": None, "vanbuiten": bc.tile_view(_entry(now, status="up", why=None), now)}
+    assert str(ids[2]) not in st
+    # Uit: geen markeringen meer.
+    await _config(ids[:2], enabled=False)
+    st = (await authed.get("/api/status")).json()
+    assert "vanbuiten" not in st[str(ids[0])] and str(ids[1]) not in st
+
+
+async def test_workers_token_weghalen(authed, world):
+    ids = await _tiles(authed, 1)
+    aid = await _api()
+    await _config(ids, api_id=aid)
+    await bc.run_round(_maker(), world.http)
+    row = (await _setup_rows(authed))["buitencheck"]
+    assert row["state"] == "half" and row["todo"][0].startswith("Het token met Workers Scripts → Edit staat nog")
+    r = await authed.delete("/api/buitencheck/workers-token")
+    assert r.status_code == 200 and r.json()["api"]["workers_token"] is False
+    agen, db = await _db()
+    keys = decrypt_json((await db.get(ApiConnection, aid)).secrets)
+    await agen.aclose()
+    assert keys == {"token": "cf-tunnel"}
+    assert "buitencheck_workers_token_removed" in [a.action for a in await _audits()]
+    row = (await _setup_rows(authed))["buitencheck"]
+    assert row["state"] == "ok" and row["text"].startswith("1 tegel van buitenaf, laatst ") and row["text"].endswith(
+        " vanuit BRU.")
+    assert (await authed.delete("/api/buitencheck/workers-token")).status_code == 404
+
+
+async def test_aandacht_en_checklist(authed, world):
+    ids = await _tiles(authed, 6)
+    row = (await _setup_rows(authed))["buitencheck"]
+    assert row["state"] == "none" and row["fix"] == {"window": "net", "tab": "buitencheck"} and row["optional"]
+    await _config(ids)
+    await bc.run_round(_maker(), world.http)
+    assert (await _setup_rows(authed))["buitencheck"]["state"] == "ok"
+    # Een wachtend geheim van meer dan een uur, en een Worker die niet antwoordt.
+    now = datetime.now(timezone.utc)
+    await _config(ids, token_next=encrypt(SECRET_B), token_next_at=bc.iso(now - timedelta(hours=2)))
+    assert (await _setup_rows(authed))["buitencheck"]["todo"][0].startswith("Er wacht al meer dan een uur")
+    # Thuis up, thuis down, in onderhoud, gepauzeerd, in een groep: alleen de eerste en de groep komen in "!".
+    await _inside(ids[0], "up")
+    await _inside(ids[1], "down")
+    await _edit(ids[2], maintenance_until=now + timedelta(hours=1))
+    await _inside(ids[3], "up", paused=True)
+    tiles = {str(ids[0]): _entry(now), str(ids[1]): _entry(now), str(ids[2]): _entry(now), str(ids[3]): _entry(now),
+             str(ids[4]): _entry(now, quiet="groep"), str(ids[5]): _entry(now, at=bc.iso(now - timedelta(hours=1)))}
+    groups = {"cfe:1033": {"cause": "cfe:1033", "why": "de Cloudflare Tunnel is niet verbonden (1033)",
+                           "since": bc.iso(now - timedelta(minutes=30)), "tiles": [ids[4], 999]}}
+    await _set(bc.STATE_KEY, {"tiles": tiles, "groups": groups, "worker": {"fail": 0}})
+    items = await _attention(authed)
+    assert set(items) == {f"buiten:{ids[0]}", "buiten:groep:cfe:1033"}
+    i = items[f"buiten:{ids[0]}"]
+    assert (i["title"], i["level"], i["area"], i["fix"]) == ("t0: van buitenaf onbereikbaar", "err", "netwerk",
+                                                            {"window": "net", "tab": "buitencheck"})
+    assert i["text"] == "De Cloudflare Tunnel is niet verbonden (1033) · al 20 min. Thuis werkt het wel."
+    g = items["buiten:groep:cfe:1033"]
+    assert g["title"] == "2 tegels van buitenaf onbereikbaar" and g["text"].endswith(" · al 30 min")
+    # Massastoring: één punt, geen groepen of tegels. De Worker kapot: een punt, niet zonder internet.
+    await _set(bc.STATE_KEY, {"tiles": tiles, "groups": groups, "worker": {"fail": 5, "error": "Worker gaf HTTP 503"},
+                              "mass": {"since": bc.iso(now), "failing": 5, "total": 6, "why": "time-out"}})
+    items = await _attention(authed)
+    assert set(items) == {"buiten:massa", "buiten:worker"}
+    assert items["buiten:massa"]["text"] == "5 van de 6 checks · time-out"
+    assert items["buiten:worker"]["text"] == "Worker gaf HTTP 503" and items["buiten:worker"]["level"] == "warn"
+    assert (await _setup_rows(authed))["buitencheck"]["todo"] == ["Worker antwoordt niet: Worker gaf HTTP 503"]
+    await _set("public_ip", {"error": "Geen antwoord van 1.1.1.1 of ipify (geen internet?)"})
+    assert set(await _attention(authed)) == {"buiten:massa"}
+    # Uit: niets.
+    await _config(ids, enabled=False)
+    assert await _attention(authed) == {}
+
+
+async def test_diagnose_maskeert_geheim(authed, world):
+    ids = await _tiles(authed, 1)
+    await _config(ids, token_next=encrypt(SECRET_B), token_next_at=bc.iso(T0))
+    await bc.run_round(_maker(), world.http)
+    agen, db = await _db()
+    known = await diagnose.known_secrets(db)
+    db.add(Event(kind="netwerk", title="Een lek", body=f"lek {SECRET_A} en {SECRET_B}"))
+    await db.commit()
+    await agen.aclose()
+    assert SECRET_A in known and SECRET_B in known
+    r = await authed.get("/api/diagnose")
+    assert r.status_code == 200, r.text
+    for text in (SECRET_A, SECRET_B, NAME, WORKER):
+        assert text not in r.text
+    d = r.json()
+    assert "buitencheck" not in d["achtergrond"]
+    b = d["achtergrond"]["buitencheck_state"]
+    assert b["tegels"] == 1 and b["worker"]["colo"] == "BRU" and b["worker"]["fail"] == 0 and b["massa"] is None

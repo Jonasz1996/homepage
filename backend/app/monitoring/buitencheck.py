@@ -363,6 +363,17 @@ def tile_view(entry: dict | None, now: datetime | None = None) -> dict:
             "colo": e.get("colo"), "ms": e.get("ms"), "code": e.get("code"), "quiet": e.get("quiet")}
 
 
+async def tile_views(db: AsyncSession, now: datetime, existing) -> dict[int, dict]:
+    """Voor /api/status: wat elke tegel uit de lijst van buitenaf ziet, alleen als de check draait (zoals run_round).
+    existing: de ids van de tegels die nog bestaan."""
+    st = await db.get(AppState, CONFIG_KEY)
+    cfg = {**CONFIG, **(st.value if st and isinstance(st.value, dict) else {})}
+    if not cfg["enabled"] or not cfg["worker_url"] or not cfg["token"]:
+        return {}
+    tiles = (await state(db))["tiles"]
+    return {int(sid): tile_view(tiles.get(str(sid)), now) for sid in cfg["services"] or [] if int(sid) in existing}
+
+
 def worker_calls(account: str, name: str, suffixes: list[str]) -> list[dict]:
     """De calls naar Cloudflare om de Worker te zetten, één keer gebouwd voor de proef en het echte werk. Het geheim
     staat er als plaatshouder in: run_worker_calls zet het echte alleen in de verzonden inhoud."""
