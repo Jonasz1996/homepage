@@ -110,7 +110,12 @@
 </script>
 
 {#if run}
-  {#if run.status === 'klaar' && run.kind === 'maken'}
+  {#if run.status === 'klaar' && run.kind === 'maken' && run.todo?.length}
+    <!-- Bv. een lokaal beheerde tunnel of geen AdGuard: de naam werkt pas als jij dit nog doet. -->
+    <div class="todo">Klaar, nog zelf te doen:
+      <ul>{#each run.todo as t, i (i)}<li>{t}</li>{/each}</ul>
+    </div>
+  {:else if run.status === 'klaar' && run.kind === 'maken'}
     <p class="done">Klaar: {run.fqdn} werkt. <a href={link} target="_blank" rel="noopener noreferrer">{link}</a></p>
   {/if}
   {#key run.id}
@@ -254,6 +259,8 @@
   .sys { color: var(--muted); font-size: 11.5px; margin: 0 0 8px; overflow-wrap: anywhere }
   .small { font-size: 12px; margin: 2px 0 }
   .done { margin: 4px 0; color: var(--ok); overflow-wrap: anywhere }
+  .todo { margin: 4px 0; color: var(--mid); font-size: 12.5px; overflow-wrap: anywhere }
+  .todo ul { margin: 2px 0; padding-left: 18px }
   .no { color: var(--err); font-size: 12.5px; margin: 6px 0 }
   .no ul { margin: 2px 0; padding-left: 18px }
   .w { color: var(--mid) }

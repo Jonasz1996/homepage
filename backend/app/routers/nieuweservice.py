@@ -267,24 +267,24 @@ async def opruimen(body: OpruimRun, request: Request, sess: Session = Depends(cu
 
 # --- ongedaan maken ------------------------------------------------------------------------------------------------
 
-async def _undo_plan(db: AsyncSession, run_id: str, who: str) -> tuple[dict, ns.Plan]:
+async def _undo_plan(db: AsyncSession, request: Request, run_id: str, who: str) -> tuple[dict, ns.Plan]:
     run = await _run(db, run_id)
     if not run["can_undo"]:
         raise HTTPException(status.HTTP_409_CONFLICT, "Ongedaan maken kan niet (meer) voor deze run")
-    return run, await ns.plan_undo(db, integrations_router.clients, run, who=who)
+    return run, await ns.plan_undo(db, integrations_router.clients, run, who=who, maker=_maker(request))
 
 
 @router.post("/runs/{run_id}/ongedaan/proef", dependencies=[outside.guard("acties")])
 async def ongedaan_proef(run_id: str, request: Request, user: User = Depends(current_user),
                          db: AsyncSession = Depends(get_db)):
-    run, plan = await _undo_plan(db, run_id, user.username)
+    run, plan = await _undo_plan(db, request, run_id, user.username)
     return await _proef_audit(db, request, user, "ongedaan", plan, {"run": run["id"]})
 
 
 @router.post("/runs/{run_id}/ongedaan", status_code=status.HTTP_202_ACCEPTED, dependencies=[outside.guard("acties")])
 async def ongedaan(run_id: str, body: HashIn, request: Request, sess: Session = Depends(current_session),
                    user: User = Depends(recent_auth), db: AsyncSession = Depends(get_db)):
-    run, plan = await _undo_plan(db, run_id, user.username)
+    run, plan = await _undo_plan(db, request, run_id, user.username)
     _accept(plan, body.plan_hash, "Niets ongedaan te maken")
     await _guard_tiles(db, request, sess, user, plan.services)
     return await _launch(db, request, user, "ongedaan", plan, {"run": run["id"]}, of=run["id"])

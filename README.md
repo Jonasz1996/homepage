@@ -122,8 +122,9 @@ wildcardcertificaat of een eigen Let's Encrypt-certificaat), het record in Cloud
 naam in AdGuard, een tegel met check en Zabbix, en zet de CT/VM in een back-upjob van PBS. Eerst een proef die zegt
 wat er zou gebeuren en wat ontbreekt; uitvoeren vraagt je 2FA. Stopt het halverwege, dan haalt **ongedaan maken**
 weg wat de run al maakte. Het tabblad **opruimen** (of **opruimen…** bij een tegel op `<naam>.jbogaert.be`) doet het
-omgekeerde: DNS eerst, de tegel als laatste, en alleen records die naar NPM wijzen of van dit dashboard komen.
-Dit stel je één keer in:
+omgekeerde: DNS eerst, de tegel als laatste, en alleen records en rewrites die naar NPM wijzen of van dit dashboard
+komen. Moet je na een run nog iets zelf doen (bv. de hostname in `config.yml` van een lokaal beheerde tunnel), dan
+zegt het venster dat in plaats van "werkt". Dit stel je één keer in:
 
 1. **NPM, een tweede gebruiker om te schrijven.** NPM → Users → Add User: naam `dashboard-acties`, **een echt
    e-mailadres dat je leest** (Let's Encrypt registreert dat adres voor elk certificaat dat het dashboard vraagt; NPM
@@ -171,7 +172,10 @@ Dit stel je één keer in:
 6. **"Alleen thuis"**: een toegangslijst in NPM (bv. "LAN") met `allow 192.168.0.0/16` (plus het bereik van de VPN) en
    verder niets, satisfy all. Ze moet ook het dashboard toelaten (het IP van de container, bv. 192.168.10.156), anders
    kleurt de check van de tegel rood. Gaat `*.jbogaert.be` via de tunnel naar NPM, dan kan "alleen thuis" niet: elke
-   naam is dan publiek, en een toegangslijst helpt niet (dat verkeer komt van `cloudflared` op je LAN).
+   naam is dan publiek, en een toegangslijst helpt niet (dat verkeer komt van `cloudflared` op je LAN). Is dat niet na
+   te gaan (een lokaal beheerde tunnel, of een vangregel naar een naam die het dashboard niet kent), dan rekent het op
+   het ergste; zet de Docker-naam van NPM bij `npm_names` (API-beheer, NPM). Een toegangslijst is niet nodig als alle
+   namen via de tunnel gaan zonder wildcard; wijst er één (of `*.jbogaert.be`) naar je thuis-IP, dan wel.
 7. **Van buitenaf**: niets; het volgt ⚿ → van buitenaf → acties.
 
 Fase 5, SSH-terminal (knop `>_` in de titelbalk):
