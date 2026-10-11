@@ -2,9 +2,11 @@
   import { onMount } from 'svelte'
   import { api, poll, withReauth } from './api.js'
   import Modal from './Modal.svelte'
+  import ProefPlan from './ProefPlan.svelte'
 
   // Openstaande updates: nodes en PBS via hun API, machines en containers via SSH, Docker via Portainer.
   // Installeren kan hier ook: eerst een snapshot, dan apt, dan kijken of de services nog leven; terugdraaien met één klik.
+  // Elke knop die iets verandert heeft een proef ernaast: tonen wat er zou gebeuren, zonder het te doen.
   let { onclose, onchanged } = $props()
 
   let data = $state(null)
@@ -21,6 +23,10 @@
   let detail = $state(null)
   let cfg = $state(null)
   let note = $state('')
+  let proefPlan = $state(null)   // proef van installeren
+  let runProef = $state(null)    // proef van terugdraaien
+  let autoProef = $state(null)   // proef van vannacht of van het opruimen
+  let lastProef = $state(null)   // wat de nachtelijke run en het opruimen als proef laatst noteerden
 
   async function load() {
     try {
@@ -34,7 +40,7 @@
   let busy = $derived(runs.some((r) => !DONE.includes(r.status)))
   onMount(() => {
     load()
-    api('/updates/settings').then((s) => (cfg = s)).catch(() => {})
+    api('/updates/settings').then(({ last_proef, ...s }) => { cfg = s; lastProef = last_proef }).catch(() => {})
     return poll(() => (data?.running || busy || (detail && !DONE.includes(detail.status))) && load(), 2000)
   })
 
@@ -47,6 +53,7 @@
 
   async function install(keys, withSnapshot = snapshot) {
     refused = []
+    proefPlan = null
     try {
       const r = await withReauth(() => api('/updates/install', { method: 'POST', body: { targets: keys, snapshot: withSnapshot, security_only: secOnly } }))
       refused = r.refused
@@ -63,6 +70,22 @@
       detail = { ...r, status: 'terugdraaien', output: detail?.output || '' }
       await load()
     } catch (e) { error = e.message }
+  }
+
+  // Proef: dezelfde keuze, maar alleen tonen wat er zou gebeuren. Geen herbevestiging nodig: er gebeurt niets.
+  async function proefInstall(keys, withSnapshot = snapshot) {
+    try {
+      proefPlan = await api('/updates/install/proef', { method: 'POST', body: { targets: keys, snapshot: withSnapshot, security_only: secOnly } })
+    } catch (e) { error = e.message }
+  }
+
+  async function proefRollback(r) {
+    try { runProef = await api(`/updates/runs/${r.id}/rollback/proef`, { method: 'POST' }) } catch (e) { error = e.message }
+  }
+
+  async function proefAuto(what) {
+    note = ''
+    try { autoProef = await api(`/updates/${what}/proef`) } catch (e) { note = e.message }
   }
 
   async function saveCfg() {
@@ -93,7 +116,7 @@
   <div class="tabs">
     <button class="mini" class:on={tab === 'open'} onclick={() => (tab = 'open')}>openstaand</button>
     <button class="mini" class:on={tab === 'runs'} onclick={() => (tab = 'runs')}>installaties{#if busy}<i class="pulse"></i>{/if}</button>
-    <button class="mini" class:on={tab === 'auto'} onclick={() => (tab = 'auto')}>'s nachts{#if cfg?.auto}<b class="on-dot">●</b>{/if}</button>
+    <button class="mini" class:on={tab === 'auto'} onclick={() => (tab = 'auto')}>'s nachts{#if cfg?.auto}<b class="on-dot" class:pr={cfg.proef} title={cfg.proef ? 'aan als proef' : 'aan'}>●</b>{/if}</button>
   </div>
   {#if data && tab === 'open'}
     <div class="top">
@@ -112,13 +135,19 @@
                onchange={(e) => { for (const t of installable) picked[t.key] = e.currentTarget.checked }} /> alles</label>
         <label class="chk" title="Proxmox-snapshot vooraf, zodat je met één klik terug kan"><input type="checkbox" bind:checked={snapshot} /> snapshot vooraf</label>
         <label class="chk"><input type="checkbox" bind:checked={secOnly} /> alleen beveiligingsupdates</label>
-        <button class="btn" disabled={!chosen.length || busy} onclick={() => install(chosen)}>
-          {chosen.length ? `${chosen.length} installeren` : 'kies wat je wil installeren'}</button>
+        <span class="go">
+          <button class="btn alt" disabled={!chosen.length} title="tonen wat er zou gebeuren, zonder iets te installeren"
+                  onclick={() => proefInstall(chosen)}>proef</button>
+          <button class="btn" disabled={!chosen.length || busy} onclick={() => install(chosen)}>
+            {chosen.length ? `${chosen.length} installeren` : 'kies wat je wil installeren'}</button>
+        </span>
       </div>
     {/if}
+    {#if proefPlan}<ProefPlan plan={proefPlan} onclose={() => (proefPlan = null)} />{/if}
     {#each refused as x}
       <p class="ref">{x.name}: {x.why}
-        {#if x.nosnap}<button class="lnk" onclick={() => install([x.key], false)}>toch installeren zonder snapshot</button>{/if}</p>
+        {#if x.nosnap}<button class="lnk" onclick={() => install([x.key], false)}>toch installeren zonder snapshot</button>
+          <button class="lnk" title="tonen wat er zonder snapshot zou gebeuren" onclick={() => proefInstall([x.key], false)}>proef</button>{/if}</p>
     {/each}
 
     {#each shown as t (t.key)}
@@ -167,13 +196,15 @@
             <td>{when(r.started_at || r.created_at)}</td>
             <td class="st-{r.status}">{STATUS[r.status] || r.status}{#if r.reboot_needed && r.status === 'ok'}<small class="m"> · herstart nodig</small>{/if}</td>
             <td><small>{r.snapshot?.name || (r.snapshot ? '…' : 'geen')}{r.snapshot?.removed_at ? ' (opgeruimd)' : ''}</small></td>
-            <td>{#if r.can_rollback}<button class="mini danger" onclick={(e) => { e.stopPropagation(); rollback(r) }}>terugdraaien</button>{/if}</td>
+            <td class="acts">{#if r.can_rollback}<button class="mini danger" onclick={(e) => { e.stopPropagation(); rollback(r) }}>terugdraaien</button>
+              <button class="mini" title="tonen wat terugdraaien zou doen" onclick={(e) => { e.stopPropagation(); proefRollback(r) }}>proef</button>{/if}</td>
           </tr>
         {:else}
           <tr><td colspan="5" class="hint">Nog niets geïnstalleerd vanuit het dashboard.</td></tr>
         {/each}
       </tbody>
     </table>
+    {#if runProef}<ProefPlan plan={runProef} onclose={() => (runProef = null)} />{/if}
     {#if detail}
       <div class="det">
         <div class="dh"><b>{detail.name}</b> <span class="st-{detail.status}">{STATUS[detail.status] || detail.status}</span>
@@ -191,8 +222,23 @@
       <p class="hint small">Alleen op containers en VM's waar een snapshot kan (nooit op een fysieke node), alleen de pakketten die als
         beveiligingsupdate gemarkeerd zijn, één machine na de andere. Is een gekoppelde service daarna down of faalt apt, dan
         draait de homepage zelf terug naar de snapshot en krijg je een melding.</p>
+      <label class="chk"><input type="checkbox" bind:checked={cfg.proef} /> alleen proef (niets installeren, alleen noteren wat er zou gebeuren)</label>
       <label>eigen snapshots van geslaagde installaties opruimen na <input type="number" min="1" max="90" bind:value={cfg.keep_days} /> dagen</label>
-      <div class="row"><button class="btn" onclick={saveCfg}>bewaren</button><span class="m">{note}</span></div>
+      <label class="chk"><input type="checkbox" bind:checked={cfg.cleanup_proef} /> snapshots opruimen: alleen proef</label>
+      <p class="hint small">Als proef komt er 's nachts alleen een regel op de tijdlijn met wat er zou gebeuren: welke machine,
+        welk commando, als wie. Het opruimen (elke 6 uur) noteert alleen iets als er andere snapshots weg zouden gaan dan
+        de vorige keer. Er wordt niets geïnstalleerd of verwijderd en je krijgt geen melding.</p>
+      <div class="row"><button class="btn" onclick={saveCfg}>bewaren</button>
+        <button class="btn alt" onclick={() => proefAuto('auto')}>proef van vannacht</button>
+        <button class="btn alt" onclick={() => proefAuto('cleanup')}>wat zou er opgeruimd worden</button>
+        <span class="m">{note}</span></div>
+      {#if autoProef}<ProefPlan plan={autoProef} onclose={() => (autoProef = null)} />{/if}
+      {#if lastProef?.auto}
+        <details><summary>laatste nachtelijke proef · {when(lastProef.auto.at)}</summary><ProefPlan plan={lastProef.auto} /></details>
+      {/if}
+      {#if lastProef?.cleanup}
+        <details><summary>laatste proef van het opruimen · {when(lastProef.cleanup.at)}</summary><ProefPlan plan={lastProef.cleanup} /></details>
+      {/if}
     </div>
   {:else}
     <p class="hint">laden…</p>
@@ -204,6 +250,7 @@
   .pulse { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #a9c7ff; margin-left: 6px; animation: p 1.2s infinite }
   @keyframes p { 50% { opacity: .3 } }
   .on-dot { color: var(--ok); margin-left: 5px; font-size: 9px }
+  .on-dot.pr { color: var(--mid) }
   .top { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 10px }
   .sum { flex: 1; font-size: 13px }
   .sum b { font-size: 18px; color: var(--text-h); font-weight: 500 }
@@ -211,7 +258,9 @@
   .chk { font-size: 12px; color: var(--muted); display: flex; gap: 6px; align-items: center }
   .chk input, .pick { width: auto }
   .inst { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; margin-bottom: 10px }
-  .inst .btn { margin-left: auto }
+  .go { margin-left: auto; display: flex; gap: 8px }
+  .acts { white-space: nowrap }
+  summary { color: var(--muted); font-size: 12px; cursor: pointer }
   .ref { font-size: 12px; color: var(--mid); margin: 0 0 6px }
   .lnk { background: none; border: 0; color: #a9c7ff; cursor: pointer; font: inherit; text-decoration: underline; padding: 0 0 0 6px }
   .sec { color: var(--mid); font-size: 12px }
@@ -255,6 +304,6 @@
   .auto { display: flex; flex-direction: column; gap: 10px; font-size: 12.5px; max-width: 640px }
   .auto label { display: flex; gap: 6px; align-items: center; color: var(--muted) }
   .auto label input[type=number] { width: 64px }
-  .row { display: flex; gap: 10px; align-items: center }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap }
   @media (max-width: 600px) { .runs th:nth-child(4), .runs td:nth-child(4) { display: none } }
 </style>
