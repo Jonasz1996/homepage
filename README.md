@@ -622,14 +622,31 @@ Hetzelfde bootstrap-commando opnieuw, of:
 bash /opt/homepage/deploy/bootstrap.sh
 ```
 
-Voor elke update maakt het script een kopie van de database (de laatste 3 blijven in `/var/backups/homepage`).
+Zo verloopt een update:
+
+1. terwijl het dashboard gewoon blijft draaien, worden de bibliotheken en de frontend gebouwd. De bibliotheken
+   hebben vaste versies (`backend/requirements.lock`, dezelfde als in de tests) en krijgen een eigen venv per lock:
+   `/opt/homepage/.venv-…`, met `.venv` als verwijzing naar de actieve. Verandert de lock niet, dan blijft de venv
+   dezelfde. De frontend komt in `frontend/dist.new`
+2. is er niet genoeg plaats in `/var/backups/homepage` voor een kopie van de database, dan stopt het hier
+3. de diensten stoppen en het script maakt een kopie van de database (`voor-update-*.dump`, de laatste 2 blijven staan)
+4. het schakelt over op de nieuwe venv en frontend (de vorige blijven staan) en werkt de database bij
+5. de diensten starten weer
+
+Mislukt de kopie of het bijwerken van de database (of al iets daarvoor), dan wordt de update netjes afgebroken: de
+vorige versie van de code, de bibliotheken en de frontend komt terug, de database is niet veranderd (alle migraties
+lopen samen in één transactie) en de diensten draaien weer. Het script zegt wat er misliep: los dat op en voer de
+update opnieuw uit. Pas als de database bijgewerkt is, onthoudt het de nieuwe versie (in `/etc/homepage/versie`).
+
 Na de update toont het dashboard één keer wat er nieuw is en wat je zelf moet instellen (later: `Ctrl+K` →
 "wat is er nieuw").
 
 **Een update terugdraaien**: `homepage-terugzetten` in de container zet de vorige versie terug, met de database
-van vlak voor die update. Wat sinds die update in het dashboard veranderde, gaat verloren; de database van
-daarvoor wordt eerst nog bewaard als `voor-terugzetten-*.dump`. `homepage-terugzetten --lijst` toont welke kopieën er
-zijn. Het werkt vanaf de tweede update met deze versie van het script.
+van vlak voor die update en met de bibliotheken die die versie had (de venv van daarvoor blijft daarvoor staan). Wat
+sinds die update in het dashboard veranderde, gaat verloren; de database van daarvoor wordt eerst nog bewaard als
+`voor-terugzetten-*.dump` (alleen de laatste blijft staan). `homepage-terugzetten --lijst` toont welke kopieën er
+zijn. Stopt het terugzetten halverwege, bijvoorbeeld omdat de frontend niet gebouwd kon worden, los de fout op en
+voer het opnieuw uit. Het werkt vanaf de tweede update met deze versie van het script.
 
 Een release maken (voor `stabiel`): een tag `vX.Y.Z` op `main`, bv. `git tag v1.1.0 && git push origin v1.1.0`.
 
@@ -646,12 +663,16 @@ De database is PostgreSQL. TimescaleDB wordt al geïnstalleerd voor de ping- en 
 ## Ontwikkelen
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -e "backend[dev]"
+python3 -m venv .venv && .venv/bin/pip install -r backend/requirements-dev.lock   # vaste versies, zoals in productie
 cd backend && ../.venv/bin/pytest            # tests op SQLite
 HOMEPAGE_TEST_DATABASE_URL=postgresql+asyncpg://... ../.venv/bin/pytest   # tests op PostgreSQL
 
 cd frontend && npm ci && npm run dev         # proxy't /api naar 127.0.0.1:8000
 ```
+
+Een bibliotheek toevoegen of bijwerken: in `backend/pyproject.toml`, en daarna `backend/requirements.lock` (en
+`requirements-dev.lock`) opnieuw maken, zoals bovenaan dat bestand staat. De tests en de CI controleren dat de lock
+bij `pyproject.toml` past.
 
 Zoals in productie, met TimescaleDB (de CI doet dit ook): het schema komt dan uit de migraties en de tests zetten
 oude metingen in gecomprimeerde chunks.

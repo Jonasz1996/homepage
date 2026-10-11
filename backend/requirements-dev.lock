@@ -1,0 +1,11 @@
+# Testgereedschap voor de CI en om zelf te testen, bovenop requirements.lock. Opnieuw maken: in dezelfde venv als
+# voor requirements.lock nog /tmp/lock/bin/pip install "./backend[dev]", en hieronder alleen wat er daardoor bij
+# kwam in pip freeze.
+-r requirements.lock
+aiosqlite==0.22.1
+iniconfig==2.3.1
+packaging==26.3
+pluggy==1.6.0
+Pygments==2.21.0
+pytest==9.1.1
+pytest-asyncio==1.4.0

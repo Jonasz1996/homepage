@@ -6,6 +6,10 @@
 #   homepage-terugzetten --ja      zonder vragen (voor scripts)
 # Wat sinds die update in het dashboard veranderde (tegels, meldingen, metingen) gaat verloren. Voor het
 # terugzetten wordt de huidige database nog bewaard als voor-terugzetten-*.dump.
+
+# Alles tussen { en }: bash leest het hele script in voor het begint. install.sh van de oude versie zet onderweg haar
+# eigen homepage-terugzetten op deze plaats.
+{
 set -euo pipefail
 
 APP_DIR=/opt/homepage
@@ -64,10 +68,18 @@ say "Diensten stoppen"
 systemctl stop homepage-api homepage-worker homepage-syslog
 
 say "Huidige database bewaren"
-SAFE="$BK/voor-terugzetten-$(date +%Y%m%d-%H%M%S).dump"
-runuser -u postgres -- sh -c "pg_dump -Fc homepage > '$SAFE.tmp' && mv '$SAFE.tmp' '$SAFE'"
-echo "$SAFE"
-find "$BK" -name 'voor-terugzetten-*.dump' -printf '%T@ %p\n' | sort -rn | tail -n +4 | cut -d' ' -f2- | xargs -r rm -f
+# Een vorige poging stopte halverwege: de database is dan al (deels) teruggezet, de kopie van toen is de goede.
+SAFE=$(cat "$DUMP.bezig" 2>/dev/null || true)
+if [ -n "$SAFE" ] && [ -f "$SAFE" ]; then
+  echo "Al bewaard bij een vorige poging: $SAFE"
+else
+  SAFE="$BK/voor-terugzetten-$(date +%Y%m%d-%H%M%S).dump"
+  runuser -u postgres -- sh -c "pg_dump -Fc homepage > '$SAFE.tmp' && mv '$SAFE.tmp' '$SAFE'"
+  echo "$SAFE"
+  echo "$SAFE" > "$DUMP.bezig"
+  # Alleen deze kopie blijft staan.
+  find "$BK" -name 'voor-terugzetten-*.dump' -printf '%T@ %p\n' | sort -rn | tail -n +2 | cut -d' ' -f2- | xargs -r rm -f
+fi
 
 say "Database terugzetten"
 runuser -u postgres -- dropdb --force homepage
@@ -88,11 +100,25 @@ fi
 
 say "Code terugzetten naar $VERSIE"
 git -C "$APP_DIR" checkout -q -f --detach "$COMMIT"
+# Een versie van voor requirements.lock kent alleen een gewone map .venv en installeert daar zelf in. Ze krijgt haar
+# venv van toen terug (of maakt een nieuwe); de venvs per lock (.venv-<hash>) blijven zo zoals ze zijn.
+if [ -L "$APP_DIR/.venv" ] && ! git -C "$APP_DIR" cat-file -e "$COMMIT:backend/requirements.lock" 2>/dev/null; then
+  rm -f "$APP_DIR/.venv"
+  [ ! -d "$APP_DIR/.venv-vorige" ] || mv "$APP_DIR/.venv-vorige" "$APP_DIR/.venv"
+fi
 
-# install.sh van die versie bouwt alles opnieuw en start de diensten; de database is al goed.
+# install.sh van die versie neemt haar eigen bibliotheken (de venv van toen als die er nog is), bouwt de frontend en
+# start de diensten; de database is al goed.
 export HOMEPAGE_TERUGZETTEN=1 HOMEPAGE_KANAAL="${KANAAL:-nieuwste}"
-bash "$APP_DIR/deploy/install.sh"
+if ! bash "$APP_DIR/deploy/install.sh"; then
+  warn "Terugzetten niet afgewerkt: de database en de code staan al op $VERSIE, de diensten staan nog stil."
+  warn "Los de fout hierboven op en voer homepage-terugzetten opnieuw uit. De database van daarvoor: $SAFE"
+  exit 1
+fi
 # De kopie hoort nu bij de draaiende versie: niet nog eens naar terugzetten.
 mv "$DUMP.versie" "$DUMP.teruggezet"
+rm -f "$DUMP.bezig"
 echo
 echo "Teruggezet naar $VERSIE. Het bootstrap-commando installeert later weer de nieuwste versie van je kanaal."
+exit
+}

@@ -10,6 +10,10 @@
 # De eerste keer wordt het gevraagd en daarna onthouden in /etc/homepage/kanaal. Zelf kiezen of wisselen:
 #   KANAAL=stabiel bash <(curl ...)      of      KANAAL=nieuwste bash <(curl ...)
 # Een andere branch: BRANCH=naam bash <(curl ...). Een vorige versie terugzetten: homepage-terugzetten.
+
+# Alles tussen { en }: bash leest het hele script in voor het begint. Uitgevoerd vanuit /opt/homepage/deploy haalt het
+# een andere versie van zichzelf op, en bij een mislukte update zet install.sh de vorige weer terug.
+{
 set -euo pipefail
 
 REPO="${REPO:-https://github.com/Jonasz1996/homepage}"
@@ -75,15 +79,26 @@ else
   git -c advice.detachedHead=false clone -q -b "$REF" "$REPO" "$APP_DIR"
 fi
 git -C "$APP_DIR" log -1 --format='versie: %h %s'
-
-install -d "$CONF_DIR"
-if [ "$KANAAL" = branch ]; then
-  echo "$BRANCH" > "$CONF_DIR/branch"
-else
-  rm -f "$CONF_DIR/branch"
-  # Alleen een echte keuze onthouden: zonder release blijft het zoals vroeger, en wordt de keuze later gevraagd.
-  if [ "$KANAAL" = stabiel ] || [ "$KANAAL" = nieuwste ]; then echo "$KANAAL" > "$CONF_DIR/kanaal"; fi
-fi
+NIEUW=$(git -C "$APP_DIR" rev-parse HEAD)
 
 export HOMEPAGE_KANAAL="${KANAAL:-nieuwste}" HOMEPAGE_PREV_COMMIT="$PREV"
-exec bash "$APP_DIR/deploy/install.sh"
+RC=0
+bash "$APP_DIR/deploy/install.sh" || RC=$?
+
+# De keuze pas onthouden als die versie ook echt draait. Na een afgebroken update draait de vorige nog en blijft
+# /etc/homepage/versie zoals het was: dan blijft ook de keuze van toen staan.
+if grep -qx "commit=$NIEUW" "$CONF_DIR/versie" 2>/dev/null; then
+  if [ "$KANAAL" = branch ]; then
+    echo "$BRANCH" > "$CONF_DIR/branch"
+  else
+    rm -f "$CONF_DIR/branch"
+    # Alleen een echte keuze onthouden: zonder release blijft het zoals vroeger, en wordt de keuze later gevraagd.
+    if [ "$KANAAL" = stabiel ] || [ "$KANAAL" = nieuwste ]; then echo "$KANAAL" > "$CONF_DIR/kanaal"; fi
+  fi
+fi
+if [ "$RC" -ne 0 ]; then
+  printf '\n\033[1;31m!! %s\033[0m\n' "Installeren van $REF (${NIEUW:0:7}) niet gelukt, zie hierboven."
+  exit "$RC"
+fi
+exit
+}

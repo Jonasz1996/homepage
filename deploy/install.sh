@@ -3,16 +3,113 @@
 # Meestal via deploy/bootstrap.sh (haalt eerst de code op). Rechtstreeks, als root:
 #   bash /opt/homepage/deploy/install.sh
 # Opnieuw uitvoeren werkt alles bij; bestaande sleutels en data blijven staan.
+#
+# Bij een update worden de bibliotheken (een venv per requirements.lock) en de frontend (in frontend/dist.new) gebouwd
+# terwijl de vorige versie nog draait. Pas daarna: diensten stoppen, kopie van de database, overschakelen, database
+# bijwerken, diensten starten. Mislukt er tot en met het bijwerken van de database iets, dan komt de vorige versie
+# terug (code, venv en frontend) en is de database niet veranderd.
+
+# Alles staat tussen { en }: zo leest bash het hele script in voor het begint. Bij een fout zet het script de vorige
+# versie van de code terug, ook van dit bestand; bash mag daarna niet verder lezen in dat andere bestand.
+{
 set -euo pipefail
 
 APP_DIR=/opt/homepage
 CONF_DIR=/etc/homepage
+BK=/var/backups/homepage
 # NPM_IP: het IP van Nginx Proxy Manager. Wordt bij de eerste keer bewaard in homepage.env en daarna daar gelezen.
 NPM_IP="${NPM_IP:-$(sed -n 's/^HOMEPAGE_NPM_IP=//p' "$CONF_DIR/homepage.env" 2>/dev/null | tail -1 || true)}"
 NPM_IP="${NPM_IP:-192.168.0.245}"
 
 say() { printf '\n\033[1;37m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m!! %s\033[0m\n' "$*"; }
+
+# Hoe ver de update is: dat bepaalt wat er bij een fout teruggezet wordt (zie bij_fout).
+TERUG_NAAR="" GESTOPT="" GEWISSELD="" KLAAR="" REDEN="" VENV_NIEUW="" VENV_OUD="" VERSIE=""
+afbreken() { REDEN=$1; exit 1; }
+
+# Eén venv per requirements.lock en Python-versie (.venv-<hash>), .venv wijst naar de actieve. Bouwen kan dus terwijl
+# alles draait, en een oudere versie vindt bij terugzetten haar eigen bibliotheken terug. Het merkteken .klaar komt er
+# pas als pip helemaal gelukt is; zonder wordt de venv opnieuw gebouwd.
+bouw_venv() {
+  local lock="$APP_DIR/backend/requirements.lock" d
+  VENV_NIEUW=".venv-$({ cat "$lock"; python3 --version; } | sha256sum | cut -c1-12)"
+  d="$APP_DIR/$VENV_NIEUW"
+  if [ -f "$d/.klaar" ]; then
+    echo "Bibliotheken: $VENV_NIEUW bestaat al."
+    return
+  fi
+  rm -rf "$d"
+  python3 -m venv "$d"
+  "$d/bin/pip" install -q --upgrade pip
+  # Precies wat in de lock staat, niets anders; pip check controleert dat er niets ontbreekt.
+  "$d/bin/pip" install -q --no-deps -r "$lock"
+  "$d/bin/pip" check
+  touch "$d/.klaar"
+  echo "Bibliotheken: $VENV_NIEUW gebouwd."
+}
+
+# .venv in één keer naar een andere venv laten wijzen.
+zet_venv() { ln -sfn "$1" "$APP_DIR/.venv.tmp" && mv -Tf "$APP_DIR/.venv.tmp" "$APP_DIR/.venv"; }
+
+# Overschakelen op de nieuwe venv en frontend, met de diensten gestopt. De vorige blijven staan om naar terug te gaan.
+wissel() {
+  rm -rf "$APP_DIR/frontend/dist.vorige"
+  GEWISSELD=1
+  if [ -L "$APP_DIR/.venv" ]; then
+    VENV_OUD=$(readlink "$APP_DIR/.venv")
+  elif [ -d "$APP_DIR/.venv" ]; then
+    # Van voor de venv per lock: een gewone map.
+    rm -rf "$APP_DIR/.venv-vorige"
+    mv "$APP_DIR/.venv" "$APP_DIR/.venv-vorige"
+    VENV_OUD=.venv-vorige
+  fi
+  zet_venv "$VENV_NIEUW"
+  [ ! -d "$APP_DIR/frontend/dist" ] || mv "$APP_DIR/frontend/dist" "$APP_DIR/frontend/dist.vorige"
+  mv "$APP_DIR/frontend/dist.new" "$APP_DIR/frontend/dist"
+}
+
+# shellcheck disable=SC2317  # loopt via bij_fout (trap), dat ziet shellcheck niet
+wissel_terug() {
+  local f="$APP_DIR/frontend"
+  if [ "$VENV_OUD" = .venv-vorige ]; then
+    rm -f "$APP_DIR/.venv"
+    mv "$APP_DIR/.venv-vorige" "$APP_DIR/.venv"
+  elif [ -n "$VENV_OUD" ]; then
+    zet_venv "$VENV_OUD"
+  fi
+  if [ -d "$f/dist.vorige" ]; then
+    [ ! -d "$f/dist" ] || { rm -rf "$f/dist.new"; mv "$f/dist" "$f/dist.new"; }
+    mv "$f/dist.vorige" "$f/dist"
+  fi
+}
+
+# Bij een fout: terug naar wat er draaide. Tot en met het bijwerken van de database kan dat helemaal, want alle
+# migraties lopen samen in één transactie (alembic/env.py): mislukt er één, dan is de database niet veranderd.
+# Bij homepage-terugzetten niet: de database is dan al teruggezet, terugzetten.sh zegt wat er nu moet.
+# shellcheck disable=SC2317  # loopt via trap, dat ziet shellcheck niet
+bij_fout() {
+  local rc=$?
+  trap - EXIT
+  set +e
+  [ "$rc" -ne 0 ] || exit 0
+  printf '\n\033[1;31m!! %s\033[0m\n' "${REDEN:-Er ging iets mis, zie hierboven.}"
+  [ -z "${HOMEPAGE_TERUGZETTEN:-}" ] || exit "$rc"
+  if [ -z "$KLAAR" ]; then
+    [ -z "$GEWISSELD" ] || wissel_terug
+    [ -z "$TERUG_NAAR" ] || git -C "$APP_DIR" checkout -q -f --detach "$TERUG_NAAR" \
+      || warn "De code kon niet terug naar ${TERUG_NAAR:0:7}."
+  fi
+  [ -z "$GESTOPT" ] || systemctl start homepage-api homepage-worker homepage-syslog
+  if [ -n "$KLAAR" ]; then
+    warn "De database is al bijgewerkt, dus versie $VERSIE blijft staan. Los de fout op en voer het opnieuw uit."
+  elif [ -n "$TERUG_NAAR" ]; then
+    warn "Update afgebroken: ${PREV_VERSIE:-de vorige versie} blijft draaien en de database is niet veranderd."
+  else
+    warn "Afgebroken, de database is niet veranderd. Opnieuw uitvoeren mag."
+  fi
+  exit "$rc"
+}
 
 [ "$(id -u)" -eq 0 ] || { echo "Voer uit als root."; exit 1; }
 [ -d "$APP_DIR/backend" ] || { echo "Verwacht de repository in $APP_DIR."; exit 1; }
@@ -22,6 +119,20 @@ case "$VERSION_CODENAME" in
   bookworm|trixie) ;;
   *) warn "Getest op Debian 12 (bookworm) en 13 (trixie), dit is $PRETTY_NAME." ;;
 esac
+
+# Welke versie draaide er tot nu toe: daar gaat een mislukte update naar terug (bootstrap.sh heeft de nieuwe code al
+# opgehaald), en homepage-terugzetten ook.
+PREV_COMMIT=$(sed -n 's/^commit=//p' "$CONF_DIR/versie" 2>/dev/null || true)
+PREV_VERSIE=$(sed -n 's/^versie=//p' "$CONF_DIR/versie" 2>/dev/null || true)
+if [ -z "$PREV_COMMIT" ] && [ -n "${HOMEPAGE_PREV_COMMIT:-}" ]; then
+  PREV_COMMIT=$HOMEPAGE_PREV_COMMIT
+  PREV_VERSIE=$(git -C "$APP_DIR" describe --tags --always "$PREV_COMMIT" 2>/dev/null || true)
+fi
+NOW_COMMIT=$(git -C "$APP_DIR" rev-parse HEAD 2>/dev/null || true)
+if [ -z "${HOMEPAGE_TERUGZETTEN:-}" ] && [ -n "$PREV_COMMIT" ] && [ "$PREV_COMMIT" != "$NOW_COMMIT" ]; then
+  TERUG_NAAR=$PREV_COMMIT
+fi
+trap bij_fout EXIT
 
 say "Pakketten installeren"
 export DEBIAN_FRONTEND=noninteractive
@@ -95,48 +206,70 @@ if ! grep -q '^HOMEPAGE_SYSLOG_TARGET=' "$CONF_DIR/homepage.env"; then
   echo "HOMEPAGE_SYSLOG_TARGET=$(hostname -I | awk '{print $1}')" >> "$CONF_DIR/homepage.env"
 fi
 
+# Eerst bouwen terwijl de vorige versie nog draait, pas dan overschakelen: mislukt de build, dan blijft alles zoals het was.
 say "Backend (Python)"
-[ -d "$APP_DIR/.venv" ] || python3 -m venv "$APP_DIR/.venv"
-"$APP_DIR/.venv/bin/pip" install -q --upgrade pip
-"$APP_DIR/.venv/bin/pip" install -q "$APP_DIR/backend"
+bouw_venv
+# Van vroeger, toen de backend zelf in de venv geïnstalleerd werd. De diensten lezen de code uit backend/.
+rm -rf "$APP_DIR/backend/build" "$APP_DIR/backend/homepage.egg-info"
 chown -R root:root "$APP_DIR"
 
-# Eerst bouwen, dan pas de database bijwerken: mislukt de build, dan blijft alles zoals het was.
 say "Frontend bouwen"
-(cd "$APP_DIR/frontend" && npm ci --no-audit --no-fund --loglevel=error && npm run build --silent)
+# In dist.new: nginx serveert intussen nog dist.
+(cd "$APP_DIR/frontend" && npm ci --no-audit --no-fund --loglevel=error \
+  && npm run build --silent -- --outDir dist.new --emptyOutDir)
 
 set -a
 # shellcheck source=/dev/null
 . "$CONF_DIR/homepage.env"
 set +a
 say "Database bijwerken"
-# Welke versie draaide er tot nu toe (voor homepage-terugzetten).
-PREV_COMMIT=$(sed -n 's/^commit=//p' "$CONF_DIR/versie" 2>/dev/null || true)
-PREV_VERSIE=$(sed -n 's/^versie=//p' "$CONF_DIR/versie" 2>/dev/null || true)
-if [ -z "$PREV_COMMIT" ] && [ -n "${HOMEPAGE_PREV_COMMIT:-}" ]; then
-  PREV_COMMIT=$HOMEPAGE_PREV_COMMIT
-  PREV_VERSIE=$(git -C "$APP_DIR" describe --tags --always "$PREV_COMMIT" 2>/dev/null || true)
-fi
-NOW_COMMIT=$(git -C "$APP_DIR" rev-parse HEAD 2>/dev/null || true)
 if [ -n "${HOMEPAGE_TERUGZETTEN:-}" ]; then
   echo "Terugzetten: de database is al teruggezet, geen nieuwe kopie."
 elif runuser -u postgres -- psql -d homepage -tAc "SELECT 1 FROM alembic_version" 2>/dev/null | grep -q 1; then
-  # Bestaande installatie: eerst een kopie, zodat een mislukte migratie terug te draaien is. De laatste 3 blijven staan.
-  DUMP="/var/backups/homepage/voor-update-$(date +%Y%m%d-%H%M%S).dump"
-  if runuser -u postgres -- sh -c "pg_dump -Fc homepage > '$DUMP.tmp' && mv '$DUMP.tmp' '$DUMP'"; then
-    echo "Kopie van de database: $DUMP"
-    # Naast de kopie: welke versie erbij hoort. Zonder andere versie (opnieuw dezelfde installeren) valt er niets terug te zetten.
-    if [ -n "$PREV_COMMIT" ] && [ "$PREV_COMMIT" != "$NOW_COMMIT" ]; then
-      printf 'commit=%s\nversie=%s\n' "$PREV_COMMIT" "${PREV_VERSIE:-${PREV_COMMIT:0:7}}" > "$DUMP.versie"
-    fi
-  else
-    warn "Kopie van de database mislukt; toch verder."
+  # Bestaande installatie: eerst een kopie, zodat een mislukte migratie terug te draaien is. Er blijven er 2 staan,
+  # deze en die van de vorige update; de oudere eerst weg, dan is er meer plaats.
+  find "$BK" -name 'voor-update-*.dump' -printf '%T@ %p\n' | sort -rn | tail -n +2 | cut -d' ' -f2- \
+    | while read -r f; do rm -f "$f" "$f.versie" "$f.teruggezet" "$f.bezig"; done
+  # Plaats genoeg voor de kopie? Anders afbreken voor er iets stilvalt. Een kopie is kleiner dan de database zelf: dit is ruim.
+  NODIG=$(runuser -u postgres -- psql -d homepage -tAc "SELECT pg_database_size('homepage') * 12 / 10")
+  VRIJ=$(df --output=avail -B1 "$BK" | tail -1 | tr -d ' ')
+  if [ "$VRIJ" -lt "$NODIG" ]; then
+    afbreken "Te weinig plaats in $BK voor een kopie van de database: $((VRIJ >> 20)) MB vrij, $((NODIG >> 20)) MB nodig."
   fi
-  find /var/backups/homepage -name 'voor-update-*.dump' -printf '%T@ %p\n' | sort -rn | tail -n +4 | cut -d' ' -f2- \
-    | while read -r f; do rm -f "$f" "$f.versie" "$f.teruggezet"; done
+  # Stil tijdens de kopie en de migratie: wat de diensten daartussen nog schrijven, zou anders verloren gaan.
+  echo "Diensten stoppen."
+  GESTOPT=1
+  systemctl stop homepage-api homepage-worker homepage-syslog
+  DUMP="$BK/voor-update-$(date +%Y%m%d-%H%M%S).dump"
+  if ! runuser -u postgres -- sh -c "pg_dump -Fc homepage > '$DUMP.tmp' && mv '$DUMP.tmp' '$DUMP'"; then
+    rm -f "$DUMP.tmp"
+    afbreken "Kopie van de database mislukt."
+  fi
+  echo "Kopie van de database: $DUMP"
+  # Naast de kopie: welke versie erbij hoort. Zonder andere versie (opnieuw dezelfde installeren) valt er niets terug te zetten.
+  if [ -n "$PREV_COMMIT" ] && [ "$PREV_COMMIT" != "$NOW_COMMIT" ]; then
+    printf 'commit=%s\nversie=%s\n' "$PREV_COMMIT" "${PREV_VERSIE:-${PREV_COMMIT:0:7}}" > "$DUMP.versie"
+  fi
 fi
-(cd "$APP_DIR/backend" && runuser -u homepage -- env HOMEPAGE_DATABASE_URL="$HOMEPAGE_DATABASE_URL" \
-  "$APP_DIR/.venv/bin/alembic" upgrade head)
+wissel
+if ! (cd "$APP_DIR/backend" && runuser -u homepage -- env HOMEPAGE_DATABASE_URL="$HOMEPAGE_DATABASE_URL" \
+  "$APP_DIR/.venv/bin/alembic" upgrade head); then
+  afbreken "Database bijwerken mislukt."
+fi
+KLAAR=1
+
+# Vanaf hier draait de nieuwe versie. Wat er nu draait: het dashboard toont het (en wat er nieuw is), een volgende
+# update en homepage-terugzetten gebruiken het.
+VERSIE=$(git -C "$APP_DIR" describe --tags --always 2>/dev/null || echo onbekend)
+KANAAL="${HOMEPAGE_KANAAL:-$(sed -n 's/^kanaal=//p' "$CONF_DIR/versie" 2>/dev/null || true)}"
+printf 'versie=%s\ncommit=%s\nkanaal=%s\ndatum=%s\n' "$VERSIE" "$NOW_COMMIT" "${KANAAL:-nieuwste}" "$(date -Iseconds)" \
+  > "$CONF_DIR/versie"
+chgrp homepage "$CONF_DIR/versie" && chmod 640 "$CONF_DIR/versie"
+# Alleen de actieve venv en die van daarvoor blijven staan (om terug te zetten).
+for d in "$APP_DIR"/.venv-*; do
+  [ -d "$d" ] || continue
+  case "${d##*/}" in "$VENV_NIEUW"|"$VENV_OUD") ;; *) rm -rf "$d" ;; esac
+done
 
 say "nginx"
 NPM_IP_RE="${NPM_IP//./\\\\.}"
@@ -173,13 +306,6 @@ else
   warn "API reageert niet: journalctl -u homepage-api"
 fi
 
-# Wat er nu draait: het dashboard toont het (en wat er nieuw is), homepage-terugzetten gebruikt het.
-VERSIE=$(git -C "$APP_DIR" describe --tags --always 2>/dev/null || echo onbekend)
-KANAAL="${HOMEPAGE_KANAAL:-$(sed -n 's/^kanaal=//p' "$CONF_DIR/versie" 2>/dev/null || true)}"
-printf 'versie=%s\ncommit=%s\nkanaal=%s\ndatum=%s\n' "$VERSIE" "$NOW_COMMIT" "${KANAAL:-nieuwste}" "$(date -Iseconds)" \
-  > "$CONF_DIR/versie"
-chgrp homepage "$CONF_DIR/versie" && chmod 640 "$CONF_DIR/versie"
-
 IP=$(hostname -I | awk '{print $1}')
 say "Klaar (versie $VERSIE, ${KANAAL:-nieuwste})"
 cat <<EOF
@@ -198,3 +324,5 @@ if [ "${USERS:-0}" = 0 ] && [ -f "$CONF_DIR/setup-token" ]; then
 fi
 echo
 echo "Bewaar een kopie van $CONF_DIR/secret.key op een veilige plek: zonder die sleutel zijn opgeslagen wachtwoorden en API-sleutels onleesbaar."
+exit
+}
