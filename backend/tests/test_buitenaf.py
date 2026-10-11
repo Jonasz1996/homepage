@@ -74,7 +74,7 @@ def test_welke_routes_van_buitenaf_uit_staan():
         "POST /api/health/snapshots/delete": "acties",
         "PUT /api/restoretest/settings": "acties", "POST /api/restoretest/run": "acties",
         "POST /api/devices/{mac}/scan": "acties",
-        "GET /api/configs/versions/{vid}/download": "downloads",
+        "GET /api/configs/versions/{vid}/download": "downloads", "GET /api/diagnose": "downloads",
         "POST /api/cron/jobs/{job_id}/monitor": "terminal", "POST /api/logs/rollout": "terminal",
         "GET /api/ssh/ready": "terminal", "POST /api/ssh/pin/check": "terminal", "POST /api/ssh/pin": "terminal",
         # De instellingen van de terminal: een host naar een ander adres zetten kan een wachtwoord laten weglekken.
