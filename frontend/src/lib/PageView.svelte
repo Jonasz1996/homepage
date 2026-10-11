@@ -18,26 +18,30 @@
     try { return JSON.parse(localStorage.getItem('hp:fold') || '{}') || {} } catch { return {} }
   }
 
-  // down: rood; twijfel, check loopt niet meer of Zabbix rood: oranje. Onderhoud en pauze tellen niet.
+  // down: rood; twijfel, check loopt niet meer of Zabbix rood: oranje; alleen van buitenaf down (en daar een melding
+  // van): apart geteld, ook oranje. Onderhoud en pauze tellen niet.
   function problem(s) {
     const st = dash.status[s.id]
     if (st?.maintenance_until) return null
     const zb = dash.zbx[s.id]?.level === 'err'
+    const out = st?.vanbuiten?.status === 'down' && !st.vanbuiten.quiet
     if (!st || st.paused || s.check?.paused) return zb ? 'warn' : null
     if (st.status === 'down') return 'err'
     if (st.stale || (st.status === 'up' && st.fail_count > 0) || zb) return 'warn'
-    return null
+    return out ? 'buiten' : null
   }
   function count(services) {
-    let err = 0, warn = 0
+    let err = 0, warn = 0, buiten = 0
     for (const s of services) {
       const p = problem(s)
       if (p === 'err') err++
       else if (p === 'warn') warn++
+      else if (p === 'buiten') buiten++
     }
-    return { err, warn }
+    return { err, warn, buiten }
   }
-  const label = (c) => [c.err && `${c.err} down`, c.warn && `${c.warn} twijfel`].filter(Boolean).join(', ')
+  const label = (c) => [c.err && `${c.err} down`, c.warn && `${c.warn} twijfel`, c.buiten && `${c.buiten} buiten`]
+    .filter(Boolean).join(', ')
 
   class View {
     pageId = $state(readNum('page'))
@@ -217,7 +221,7 @@
 </script>
 
 {#snippet chip(c)}
-  {#if c.err || c.warn}<span class="chip" class:e={c.err} title={label(c)}><i></i>{c.err || c.warn}</span>{/if}
+  {#if c.err || c.warn || c.buiten}<span class="chip" class:e={c.err} title={label(c)}><i></i>{c.err || c.warn + c.buiten}</span>{/if}
 {/snippet}
 
 {#if part === 'tabs' && dash.pages.length > 0}
@@ -292,7 +296,7 @@
               <button class="mini" onclick={() => (v.form = { kind: 'group', group: g })} aria-label="Groep {g.name} bewerken">✎</button>
               <button class="mini" onclick={() => groupMaintenance(g)} title="Onderhoud voor de hele groep" aria-label="Onderhoud voor groep {g.name}">⏸</button>
             {/if}
-            {#if folded(g) && (c.err || c.warn)}
+            {#if folded(g) && (c.err || c.warn || c.buiten)}
               <button class="chipb" onclick={() => toggleGroup(g)} title="{label(c)}: openklappen">{@render chip(c)}</button>
             {/if}
             <button class="mini fold" onclick={() => toggleGroup(g)} aria-label={folded(g) ? 'Openklappen' : 'Dichtklappen'}>
