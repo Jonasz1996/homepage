@@ -8,7 +8,7 @@ from .. import outside
 from ..db import get_db
 from ..deps import audit, current_user, event, recent_auth
 from ..models import AppState, Service, ServiceState, User
-from ..monitoring import ports
+from ..monitoring import exposure, ports
 from ..monitoring.network import power_overview, watch_gateways, watch_public_ip, watch_tunnels
 from .. import wol
 from .integrations import clients
@@ -19,7 +19,7 @@ router = APIRouter(prefix="/api", tags=["network"])
 async def _overview(db: AsyncSession) -> dict:
     services = {s.id: s for s in (await db.execute(select(Service))).scalars()}
     states = {st.key: st.value for st in (await db.execute(
-        select(AppState).where(AppState.key.like("net_%") | (AppState.key == "public_ip")))).scalars()}
+        select(AppState).where(AppState.key.like("net_%") | AppState.key.in_(("public_ip", exposure.SUMMARY_KEY))))).scalars()}
 
     def per(prefix: str, kind: str) -> list[dict]:
         out = []
@@ -39,9 +39,13 @@ async def _overview(db: AsyncSession) -> dict:
             wake.append({"service_id": s.id, "name": s.name, "mac": mac,
                          "status": "unknown" if st is None or st.stale else st.status})
     ip = states.get("public_ip", {})
+    # Netwerk › publiek: alleen de samenvatting (het aantal rode namen op het tabblad), niet de hele uitkomst.
+    pub = states.get(exposure.SUMMARY_KEY) or {}
     return {"public_ip": {k: ip.get(k) for k in ("ip", "since", "checked_at", "error", "history")},
             "gateways": per("net_gw", "opnsense"), "tunnels": per("net_tunnel", "cloudflared"),
-            "wol": sorted(wake, key=lambda w: w["name"].lower())}
+            "wol": sorted(wake, key=lambda w: w["name"].lower()),
+            "exposure": {"err": (pub.get("counts") or {}).get("err", 0), "warn": (pub.get("counts") or {}).get("warn", 0),
+                         "at": pub.get("at"), "checked_at": pub.get("checked_at")}}
 
 
 @router.get("/network")
