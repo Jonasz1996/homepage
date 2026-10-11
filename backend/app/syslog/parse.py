@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 MAX_MSG = 8192
-# Zo ver mag de eigen tijd van een regel voor de ontvangsttijd liggen (klok van de bron), en zo ver erachter: rsyslog
-# houdt regels zelf vast zolang de ontvanger niet leest (wachtrij vol na een storing, herstart, update).
+# Zo ver mag de eigen tijd van een regel voor of achter de ontvangsttijd liggen (klok van de bron). Tot PAST_SLACK
+# erachter alleen als rsyslog de regel vastgehouden kan hebben (held; wanneer dat kan, staat in server.py).
 CLOCK_SLACK = 3600
 PAST_SLACK = 24 * 3600
 SEVERITIES = ["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"]
@@ -33,7 +33,9 @@ def _clean(s: str) -> str:
     return "".join(c for c in s if c == "\t" or c >= " " or c == "\n").strip()[:MAX_MSG]
 
 
-def parse(raw: bytes, source_ip: str | None, now: datetime | None = None) -> Parsed:
+def parse(raw: bytes, source_ip: str | None, now: datetime | None = None, held: bool = False) -> Parsed:
+    """now: de ontvangsttijd. held: rsyslog kan deze regel vastgehouden hebben; dan mag zijn eigen tijd tot PAST_SLACK
+    in het verleden liggen in plaats van tot CLOCK_SLACK."""
     now = now or datetime.now(timezone.utc)
     text = raw.decode("utf-8", errors="replace").rstrip("\r\n\x00")
     facility, severity = 1, 5
@@ -69,12 +71,13 @@ def parse(raw: bytes, source_ip: str | None, now: datetime | None = None) -> Par
             app, _pid, msg = mt.groups()
         else:
             msg = text
-    # Meer dan een uur in de toekomst (klok van de bron verkeerd)? Dan de ontvangsttijd: anders staat de regel dagenlang
-    # bovenaan. Tot een dag in het verleden is gewoon: een regel die rsyslog vasthield terwijl de ontvanger niet las,
-    # hoort bij zijn eigen tijd, niet bij het moment dat hij eindelijk gelezen werd. Nog ouder: ook de ontvangsttijd,
-    # anders moet de regel in een chunk die al gecomprimeerd is (na 1 dag; kan, maar traag).
+    # Meer dan een uur in de toekomst of in het verleden (klok van de bron verkeerd)? Dan de ontvangsttijd: anders staat
+    # de regel dagenlang bovenaan, of ontbreekt hij bij live meekijken en in het laatste uur. Tot een dag in het
+    # verleden alleen als rsyslog de regel vastgehouden kan hebben terwijl de ontvanger niet las (held): die hoort bij
+    # zijn eigen tijd, niet bij het moment dat hij eindelijk gelezen werd. Nog ouder: altijd de ontvangsttijd, anders
+    # moet de regel in een chunk die al gecomprimeerd is (na 1 dag; kan, maar traag).
     late = (now - ts).total_seconds()
-    if late > PAST_SLACK or late < -CLOCK_SLACK:
+    if late > (PAST_SLACK if held else CLOCK_SLACK) or late < -CLOCK_SLACK:
         ts = now
     return Parsed(ts=ts, host=_clean(host)[:255] or "onbekend", facility=facility, severity=severity,
                   app=_clean(app)[:64] if app else None, msg=_clean(msg) or "(leeg)")

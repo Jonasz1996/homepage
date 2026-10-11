@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import asyncssh
 import pytest
-from sqlalchemy import event, func, select, text
+from sqlalchemy import delete, event, func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.attention import syslog_items
@@ -158,7 +158,7 @@ async def test_writer_keeps_every_line_while_the_database_is_away(receiver, monk
     assert await _titles(real) == ["pve50: OOM"]
     assert rx.down_since is None and rx.last_error["until"] and rx.last_error["error"]
     # Nu pas telt de cooldown: een nieuwe OOM-regel geeft geen tweede melding.
-    assert (await rx.prepare([(OOM, "192.168.0.50", time.time())])).notes == []
+    assert (await rx.prepare([(OOM, "192.168.0.50", time.time(), False)])).notes == []
 
 
 async def test_cooldown_only_after_the_batch_is_stored(receiver):
@@ -167,7 +167,7 @@ async def test_cooldown_only_after_the_batch_is_stored(receiver):
     await db.commit()
     await rx.reload_rules()
     real = rx.maker
-    line = (OOM, "192.168.0.50", time.time())
+    line = (OOM, "192.168.0.50", time.time(), False)
     first = await rx.prepare([line])
     assert [n["title"] for n in first.notes] == ["pve50: OOM"]
     rx.maker = flaky = Flaky(real, 1)
@@ -186,10 +186,10 @@ async def test_receive_time_is_kept_until_written(receiver):
     rx, _ = receiver
     before = time.time()
     rx.accept(b"<14>Oct  3 20:00:01 pve50 cron[1]: zonder jaar of tijdzone", "192.168.0.50")
-    data, ip, at = rx.queue.get_nowait()
+    data, ip, at, held = rx.queue.get_nowait()
     assert before <= at <= time.time()
     # Pas tien minuten later weggeschreven (na een storing): de regel houdt zijn ontvangsttijd.
-    await rx.flush([(data, ip, at - 600)])
+    await rx.flush([(data, ip, at - 600, held)])
     async with rx.maker() as s:
         ts = (await s.execute(select(LogEntry.ts))).scalar()
     assert abs(ts.replace(tzinfo=ts.tzinfo or timezone.utc).timestamp() - (at - 600)) < 1
@@ -220,13 +220,73 @@ async def test_held_back_tcp_lines_keep_their_own_time(receiver):
     assert abs(ts.timestamp() - sent.timestamp()) < 0.01
 
 
+async def test_clock_hours_behind_gets_the_receive_time(receiver, monkeypatch):
+    """Een machine waarvan de klok uren achterloopt: sinds regels tot een dag oud hun eigen tijd houden, stonden zijn
+    regels uren in het verleden (niet bij live meekijken, niet in het laatste uur). Uren oud kan alleen als rsyslog de
+    regel vasthield: kort na het (opnieuw) verbinden of kort nadat de wachtrij hier vol zat. Anders, en op UDP altijd,
+    de ontvangsttijd."""
+    monkeypatch.setattr(server, "QUEUE_MAX", 2)
+    monkeypatch.setattr(server, "HELD_AFTER_CONNECT", 0.5)
+    monkeypatch.setattr(server, "HELD_AFTER_FULL", 0.5)
+    rx = Receiver(receiver[0].maker)
+    sent = datetime.now(timezone.utc) - timedelta(hours=3)
+    srv = await asyncio.start_server(lambda r, w: handle_tcp(rx, r, w), "127.0.0.1", 0)
+    _, w = await asyncio.open_connection("127.0.0.1", srv.sockets[0].getsockname()[1])
+    got = []
+
+    def line(msg: str) -> bytes:
+        return f"<14>1 {sent.isoformat()} pve50 app - - - {msg}\n".encode()
+
+    async def tcp(msg: str) -> None:
+        w.write(line(msg))
+        await w.drain()
+
+    async def take(n: int = 1) -> None:
+        await _until(lambda: rx.queue.qsize() >= n)
+        got.extend(rx.queue.get_nowait() for _ in range(n))
+
+    await tcp("net verbonden")
+    await take()
+    rx.accept(line("udp"), "192.168.0.50")
+    await take()
+    await asyncio.sleep(0.6)
+    await tcp("al even verbonden")
+    await take()
+    # Wachtrij vol (de database is weg): de verbinding leest niet verder, rsyslog houdt de regels vast.
+    rx.accept(line("vol 1"), "192.168.0.50")
+    rx.accept(line("vol 2"), "192.168.0.50")
+    await tcp("wachtte op plaats")
+    await _until(lambda: rx.received == 6)
+    await take(2)
+    await take()  # nu pas komt "wachtte op plaats" erbij
+    await tcp("net na vol")
+    await take()
+    await asyncio.sleep(0.6)
+    await tcp("lang na vol")
+    await take()
+    w.close()
+    srv.close()
+    await rx.flush(got)
+    async with rx.maker() as s:
+        rows = (await s.execute(select(LogEntry.msg, LogEntry.ts).order_by(LogEntry.id))).all()
+    assert [msg for msg, _ in rows] == ["net verbonden", "udp", "al even verbonden", "vol 1", "vol 2",
+                                        "wachtte op plaats", "net na vol", "lang na vol"]
+    now = time.time()
+    for msg, ts in rows:
+        ts = ts.replace(tzinfo=ts.tzinfo or timezone.utc).timestamp()
+        if msg in ("net verbonden", "wachtte op plaats", "net na vol"):
+            assert abs(ts - sent.timestamp()) < 0.01, msg
+        else:
+            assert now - 10 < ts <= now, msg
+
+
 async def test_long_host_and_rule_name_cut_to_the_title_column(receiver):
     """notifications.title is varchar(200): op PostgreSQL gaf een lange hostnaam een fout, en verloor de batch."""
     rx, db = receiver
     db.add(LogRule(name="r" * 80, max_severity=7, level="warn", cooldown_minutes=0))
     await db.commit()
     host = "h" * 255
-    await rx.flush([(f"<14>1 2026-10-03T18:00:00Z {host} app - - - hallo".encode(), "192.168.0.9", time.time())])
+    await rx.flush([(f"<14>1 2026-10-03T18:00:00Z {host} app - - - hallo".encode(), "192.168.0.9", time.time(), False)])
     [title] = await _titles(rx.maker)
     assert len(title) == 200 and title.startswith(host[:100])
     async with rx.maker() as s:
@@ -557,6 +617,43 @@ async def test_search_pagination_hosts_histogram(receiver, authed):
     await db.commit()
     live = (await authed.get("/api/logs", params={"after_id": max(newest, 31)})).json()["items"]
     assert [i["msg"] for i in live] == ["live"]
+
+
+async def test_live_tail_continues_from_the_largest_id_at_search_time(receiver, authed):
+    """Een regel die rsyslog vasthield, komt later binnen met zijn eigen, oudere tijd: de id's volgen de tijd niet meer.
+    Live meekijken ging verder vanaf de grootste id van de bovenste 50 regels; een regel die verder in de lijst stond,
+    kwam dan nog eens, en de logviewer liep vast. Nu geeft het zoeken last_id mee: de grootste id van dat moment."""
+    _, db = receiver
+    now = datetime.now(timezone.utc)
+    db.add_all([LogEntry(ts=now - timedelta(minutes=i), host="pve50", severity=6, msg=f"bericht {i}")
+                for i in range(60)])
+    await db.commit()
+    held =LogEntry(ts=now - timedelta(minutes=50, seconds=30), host="pve50", severity=6, msg="vastgehouden")
+    db.add(held)
+    await db.commit()
+    # Nog ouder dan het uur dat live meekijken toont: telt niet mee voor last_id.
+    db.add(LogEntry(ts=now - timedelta(hours=3), host="pve50", severity=6, msg="drie uur vastgehouden"))
+    await db.commit()
+
+    r = (await authed.get("/api/logs", params={"limit": 300})).json()
+    ids = [i["id"] for i in r["items"]]
+    assert ids.index(held.id) == 51 and max(ids[:50]) < held.id
+    assert r["last_id"] == held.id
+    assert (await authed.get("/api/logs", params={"after_id": r["last_id"]})).json()["items"] == []
+    db.add(LogEntry(host="pve50", severity=6, msg="live"))
+    await db.commit()
+    live = (await authed.get("/api/logs", params={"after_id": r["last_id"]})).json()
+    assert [i["msg"] for i in live["items"]] == ["live"] and "last_id" not in live
+    # Meer laden heeft geen last_id nodig.
+    more = await authed.get("/api/logs", params={"limit": 10, "before_ts": r["items"][-1]["ts"],
+                                                 "before_id": r["items"][-1]["id"]})
+    assert more.json()["items"] == [] and "last_id" not in more.json()
+    # Los van de filter: wat die niet toont, toont live meekijken ook niet.
+    assert (await authed.get("/api/logs", params={"host": "ander"})).json()["last_id"] > held.id
+    # Niets in het laatste uur: 0, en live meekijken toont alles wat er daarna binnenkomt.
+    await db.execute(delete(LogEntry).where(LogEntry.ts > now - timedelta(hours=2)))
+    await db.commit()
+    assert (await authed.get("/api/logs")).json()["last_id"] == 0
 
 
 async def test_rules_crud(authed):

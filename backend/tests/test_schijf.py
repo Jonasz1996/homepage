@@ -300,21 +300,30 @@ def test_containerlogs_alleen_als_ze_aan_staan():
                            api=ApiConnection(kind="portainer", url="https://portainer", config=None)))
 
 
-def test_klok_van_de_bron_meer_dan_een_uur_voor_of_een_dag_achter():
+def test_klok_van_de_bron_meer_dan_een_uur_voor_of_achter_een_dag_als_rsyslog_hem_vasthield():
     now = datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc)
 
-    def at(stamp: str) -> datetime:
-        return parse(f"<14>1 {stamp} h a - - - m".encode(), None, now).ts
+    def at(stamp: str, held: bool = False) -> datetime:
+        return parse(f"<14>1 {stamp} h a - - - m".encode(), None, now, held).ts
 
     assert at("2026-10-11T11:30:00Z") == now - timedelta(minutes=30)  # binnen het uur: tijd van de bron
     assert at("2026-10-11T12:50:00Z") == now + timedelta(minutes=50)
     assert at("2026-10-11T14:00:00Z") == now  # twee uur in de toekomst: klok van de bron verkeerd
-    # Uren oud: rsyslog hield de regel vast terwijl de ontvanger niet las (wachtrij vol). Vroeger: de ontvangsttijd.
-    assert at("2026-10-11T10:30:00Z") == now - timedelta(hours=1, minutes=30)
-    assert at("2026-10-10T12:30:00Z") == now - timedelta(hours=23, minutes=30)
+    # Uren achter: een klok die achterloopt. Met zijn eigen tijd stond de regel uren in het verleden, en ontbrak hij
+    # bij live meekijken en in het laatste uur.
+    assert at("2026-10-11T10:30:00Z") == now
+    assert at("2026-10-10T12:30:00Z") == now
+    # Tenzij rsyslog de regel vastgehouden kan hebben terwijl de ontvanger niet las (held, zie server.py): dan zijn
+    # eigen tijd, tot een dag oud.
+    assert at("2026-10-11T10:30:00Z", held=True) == now - timedelta(hours=1, minutes=30)
+    assert at("2026-10-10T12:30:00Z", held=True) == now - timedelta(hours=23, minutes=30)
+    assert at("2026-10-11T11:30:00Z", held=True) == now - timedelta(minutes=30)
+    assert at("2026-10-11T14:00:00Z", held=True) == now
     # Met de tijdzone van de machine, zoals rsyslog hem meestuurt: in UTC, zoals de ontvangsttijd.
-    local = at("2026-10-11T09:00:00.123456+02:00")
+    local = at("2026-10-11T09:00:00.123456+02:00", held=True)
     assert local == now - timedelta(hours=5, microseconds=-123456) and local.utcoffset() == timedelta(0)
-    assert at("2026-10-10T11:30:00Z") == now  # meer dan een dag oud: niet in een gecomprimeerde chunk
-    assert at("2026-10-08T12:00:00Z") == now
-    assert at("0001-01-01T00:00:00+05:00") == at("9999-12-31T23:59:59-05:00") == now  # niet in UTC te zetten
+    # Meer dan een dag oud: niet in een gecomprimeerde chunk.
+    assert at("2026-10-10T11:30:00Z", held=True) == now
+    assert at("2026-10-08T12:00:00Z", held=True) == now
+    for held in (False, True):  # niet in UTC te zetten
+        assert at("0001-01-01T00:00:00+05:00", held) == at("9999-12-31T23:59:59-05:00", held) == now
