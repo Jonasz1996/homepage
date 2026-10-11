@@ -1,6 +1,6 @@
 """Wat meldingen stillegt (onderhoud, gepland onderhoud, een cronjob dempen, een webhook of logregel uit, een
-beveiligingspunt negeren, een check onder een ouder hangen die down is) vraagt een recente 2FA, komt in het auditlog
-en geeft een melding die ook naar de gsm gaat: zoals een check pauzeren."""
+beveiligingspunt negeren, een check onder een ouder hangen die down is of naar een groep waar gepland onderhoud loopt)
+vraagt een recente 2FA, komt in het auditlog en geeft een melding die ook naar de gsm gaat: zoals een check pauzeren."""
 
 from datetime import datetime, timedelta, timezone
 
@@ -345,4 +345,55 @@ async def test_onder_een_ouder_die_down_of_in_onderhoud_is_vraagt_2fa(authed):
     await _stale()
     r = await authed.post(f"/api/revisions/{revs[0]['id']}/restore")
     assert _needs_2fa(r)
+    await agen.aclose()
+
+
+async def test_naar_een_groep_waar_gepland_onderhoud_loopt_vraagt_2fa(authed):
+    """Een venster voor een groep geldt voor alles wat er dan in zit: een tegel erin slepen, of er via de editor of een
+    oude versie in zetten, legt zijn check stil. Met de stand van nu: een venster dat later loopt of uit staat, niet."""
+    page = (await authed.post("/api/pages", json={"name": "P"})).json()["id"]
+    home, backup, later = [(await authed.post("/api/groups", json={"page_id": page, "name": n})).json()["id"]
+                           for n in ("Thuis", "Back-up", "Later")]
+    plex = await _svc(authed, home, "plex", {"type": "http"})
+    wiki = await _svc(authed, home, "wiki")
+    now = datetime.now(timezone.utc)
+    agen, db = await _db()
+    for name, group, start, on in (("nacht", backup, now - timedelta(minutes=10), True),
+                                   ("zondag", later, now + timedelta(hours=3), True),
+                                   ("oud", later, now - timedelta(minutes=10), False)):
+        db.add(MaintenanceWindow(name=name, group_id=group, repeat="once", start=start, minutes=60, weekdays=[],
+                                 enabled=on))
+    await db.commit()
+    await agen.aclose()
+    base = {"name": "plex", "url": "https://plex.lan", "check": {"type": "http"}}
+    await _stale()
+    assert _needs_2fa(await authed.patch(f"/api/services/{plex}", json={**base, "group_id": backup}))
+    assert _needs_2fa(await authed.put("/api/layout/order", json={"services": {backup: [plex], home: [wiki]}}))
+    agen, db = await _db()
+    assert (await db.get(Service, plex)).group_id == home
+    await agen.aclose()
+    # Vrij: een tegel zonder check, een groep waar het onderhoud pas later loopt of uit staat.
+    assert (await authed.put("/api/layout/order", json={"services": {backup: [wiki]}})).status_code == 200
+    assert (await authed.patch(f"/api/services/{plex}", json={**base, "group_id": later})).status_code == 200
+    assert (await authed.put("/api/layout/order", json={"services": {home: [plex]}})).status_code == 200
+    assert not await _notes()
+
+    await _reauth(authed)
+    assert (await authed.put("/api/layout/order", json={"services": {backup: [wiki, plex]}})).status_code == 200
+    assert [t for t, *_ in await _notes()] == ["Naar groep Back-up (gepland onderhoud 'nacht' loopt): plex"]
+    assert (await _actions()).count("check_silenced") == 1
+    # Al in die groep: de volgorde wijzigen blijft vrij.
+    await _stale()
+    assert (await authed.put("/api/layout/order", json={"services": {backup: [plex, wiki]}})).status_code == 200
+
+    # Een oude versie terugzetten waarin plex in die groep zat: geen achterdeur.
+    rev = (await authed.get("/api/revisions")).json()[0]["id"]
+    assert (await authed.put("/api/layout/order", json={"services": {home: [plex]}})).status_code == 200
+    assert _needs_2fa(await authed.post(f"/api/revisions/{rev}/restore"))
+    await _reauth(authed)
+    assert (await authed.post(f"/api/revisions/{rev}/restore")).status_code == 200
+    agen, db = await _db()
+    assert (await db.get(Service, plex)).group_id == backup
+    titles = [n.title for n in (await db.execute(select(Notification).where(Notification.source == "auth"))).scalars()]
+    assert "Checks stil door een oude versie: plex" in titles
     await agen.aclose()
