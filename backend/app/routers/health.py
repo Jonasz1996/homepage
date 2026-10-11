@@ -239,6 +239,7 @@ async def delete_snapshot(body: SnapshotRef, request: Request, user: User = Depe
     svc = await db.get(Service, body.service_id)
     if svc is None or svc.type != "proxmox":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Proxmox-tegel niet gevonden")
+    await db.commit()  # geen transactie open tijdens de call naar Proxmox
     try:
         upid = await snap.delete_snapshot(svc, clients, body.node, body.type, body.vmid, body.name)
     except IntegrationError as e:
@@ -252,6 +253,23 @@ async def delete_snapshot(body: SnapshotRef, request: Request, user: User = Depe
         v["items"] = [s for s in v.get("items", []) if not (
             s["node"] == body.node and s["vmid"] == body.vmid and s["name"] == body.name)]
         st.value = v
+    # Een eigen snapshot van een update: die run kan niet meer terugdraaien.
+    await snap.mark_removed(db, body.node, body.type, body.vmid, body.name)
     await audit(db, request, user, "snapshot_delete", guest=body.vmid, node=body.node, name=body.name)
     await db.commit()
     return {"ok": True, "task": upid}
+
+
+@router.post("/snapshots/proef")
+async def snapshot_proef(body: SnapshotRef, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Wat verwijderen zou doen, zonder het te doen: alleen lezen in Proxmox, niets bewaren."""
+    svc = await db.get(Service, body.service_id)
+    if svc is None or svc.type != "proxmox":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Proxmox-tegel niet gevonden")
+    held = [{"id": r.id, "target": r.target_name, "status": r.status}
+            for r in await snap.held_by(db, body.node, body.type, body.vmid, body.name)]
+    await db.close()
+    try:
+        return await snap.delete_plan(svc, clients, body.node, body.type, body.vmid, body.name, held)
+    except IntegrationError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e)) from e
