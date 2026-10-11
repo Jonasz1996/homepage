@@ -80,6 +80,8 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run check
+      # Losse functies zoals de Markdown van de notities (node --test, zonder extra pakketten).
+      - run: npm test
       - run: npm run build
 
   browser:
