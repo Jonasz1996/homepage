@@ -4,8 +4,8 @@ Elke 10 minuten kijken hoe vol de schijf is. Vanaf 75% gaan de oudste logregels 
 onder 75% zit of alleen de laatste 3 dagen nog over zijn. Daarover één melding per keer dat het gebeurt. Zit de schijf
 daarna nog boven 75%, dan zijn het de logregels niet: een melding zegt wat de schijf wel vult.
 
-Net na de update staan er nog tot 14 volledige dumps (met alle logregels) bij de back-ups; de eerste nieuwe back-up
-(03:30) houdt er 5. Zolang dat nog moet gebeuren, blijven de logregels onder 90% staan en zegt een melding het.
+Staan er meer dan 5 dagelijkse dumps bij de back-ups (van voor deze versie bleven ze 14 dagen staan; install.sh en
+de back-up van 03:30 houden er 5), dan blijven de logregels onder 90% staan en zegt een melding het.
 """
 
 import logging
