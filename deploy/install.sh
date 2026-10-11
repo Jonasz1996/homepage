@@ -25,7 +25,7 @@ say() { printf '\n\033[1;37m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m!! %s\033[0m\n' "$*"; }
 
 # Hoe ver de update is: dat bepaalt wat er bij een fout teruggezet wordt (zie bij_fout).
-TERUG_NAAR="" GESTOPT="" GEWISSELD="" KLAAR="" REDEN="" VENV_NIEUW="" VENV_OUD="" VERSIE=""
+TERUG_NAAR="" GESTOPT="" GEWISSELD="" KLAAR="" REDEN="" VENV_NIEUW="" VENV_OUD="" VERSIE="" DUMP=""
 afbreken() { REDEN=$1; exit 1; }
 
 # Eén venv per requirements.lock en Python-versie (.venv-<hash>), .venv wijst naar de actieve. Bouwen kan dus terwijl
@@ -99,6 +99,8 @@ bij_fout() {
     [ -z "$GEWISSELD" ] || wissel_terug
     [ -z "$TERUG_NAAR" ] || git -C "$APP_DIR" checkout -q -f --detach "$TERUG_NAAR" \
       || warn "De code kon niet terug naar ${TERUG_NAAR:0:7}."
+    # Er is niets bijgewerkt, dus ook niets terug te zetten: homepage-terugzetten blijft bij de vorige update.
+    [ -z "$DUMP" ] || rm -f "$DUMP" "$DUMP.versie"
   fi
   [ -z "$GESTOPT" ] || systemctl start homepage-api homepage-worker homepage-syslog
   if [ -n "$KLAAR" ]; then
