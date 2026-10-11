@@ -36,10 +36,12 @@
   let logsOpen = $state(false)
   let logsUsed = $state(false)
   let logsInitial = $state(null)
-  function openLogs(host = null, q = '', setup = false) {
+  // keep: met de knop logs bovenaan blijven periode en filters zoals je ze achterliet; van elders (zoekbalk, aandacht,
+  // checklist, een melding) begint de logviewer opnieuw bij 24 uur.
+  function openLogs(host = null, q = '', setup = false, keep = false) {
     logsUsed = true
     logsOpen = true
-    logsInitial = { host, q, setup }
+    logsInitial = { host, q, setup, keep }
   }
   let cronOpen = $state(false)
   let cronUsed = $state(false)
@@ -573,7 +575,7 @@
       <span class="menu" class:open={menuOpen} onclick={() => (menuOpen = false)}>
         <button class="mini" class:cronbad={att.counts.err} onclick={() => (modal = { kind: 'attention' })}
                 title="Aandacht: alles wat nu mis is, en welke functies nog ingesteld moeten worden">!<span class="ml">aandacht</span>{#if att.counts.err + att.counts.warn}<b class="n" class:wn={!att.counts.err}>{att.counts.err + att.counts.warn}</b>{/if}</button>
-        <button class="mini" onclick={() => openLogs()} title="Logs van je machines">logs</button>
+        <button class="mini" onclick={() => openLogs(null, '', false, true)} title="Logs van je machines">logs</button>
         <button class="mini" onclick={() => openTerminal()} title="SSH-terminal">&gt;_<span class="ml">terminal</span></button>
         <button class="mini" onclick={() => (modal = { kind: 'capacity' })} title="Capaciteit: opslag, cpu en ram">df<span class="ml">capaciteit, stroom</span></button>
         <button class="mini" onclick={() => (modal = { kind: 'network' })} title="Internet: publiek IP, WAN, tunnels, Wake-on-LAN">net{#if netLevel}<i class="nd {netLevel}"></i>{/if}</button>

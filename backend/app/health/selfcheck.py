@@ -27,6 +27,7 @@ from ..deps import event, notify
 from ..models import AppState
 from ..monitoring import rollup
 from ..monitoring.checks import kill
+from ..syslog import server as rxs
 
 log = logging.getLogger("homepage.health")
 
@@ -87,6 +88,20 @@ def worker_status(value: dict | None, now: datetime) -> dict:
     at = datetime.fromisoformat(value["at"])
     ok = now - at < WORKER_STALE
     return {"ok": ok, "at": value["at"], "started": value.get("started"),
+            "why": None if ok else f"laatste teken van leven {int((now - at).total_seconds() // 60)} min geleden"}
+
+
+def syslog_status(value: dict | None, now: datetime) -> dict | None:
+    """De syslog-ontvanger, uit wat hij elke minuut bewaart (AppState "syslog"): draait hij nog, en wat raakte er
+    het laatste etmaal niet in de database (loss, anders None). None als hij zich nog nooit meldde (bv. nog niet
+    herstart na de update): dan ook geen alarm."""
+    if not value or not value.get("at"):
+        return None
+    at = datetime.fromisoformat(value["at"])
+    ok = now - at < WORKER_STALE
+    loss = value.get("loss") or None
+    recent = bool(loss and now - datetime.fromisoformat(loss["at"]) < timedelta(hours=rxs.LOSS_HOURS))
+    return {**value, "ok": ok, "loss": loss if recent else None,
             "why": None if ok else f"laatste teken van leven {int((now - at).total_seconds() // 60)} min geleden"}
 
 

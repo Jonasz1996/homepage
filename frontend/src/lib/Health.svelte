@@ -58,6 +58,9 @@
   // De klok van de browser kan iets achterlopen op die van de server: nooit "zo meteen" voor iets dat al gebeurde.
   const ago = (ts) => rel(ts, Math.max(now, Date.parse(ts)))
   const LEVEL = { ok: 'in orde', warn: 'opletten', err: 'probleem', unknown: 'onbekend' }
+  // Waarom de syslog-ontvanger regels niet bewaarde (AppState "syslog", loss.why).
+  const LOSS = { vol: 'wachtrij vol terwijl de database weg was', geweigerd: 'geweigerd door de database', gestopt: 'niet weggeschreven bij het stoppen' }
+  const num = (n) => (n ?? 0).toLocaleString('nl-BE')
   const age = (h) => h == null ? '—' : h >= 8760 ? `${(h / 8760).toFixed(1)} jaar` : h >= 720 ? `${Math.round(h / 720)} maanden` : `${Math.round(h / 24)} dagen`
   const day = (s) => s ? new Date(s).toLocaleDateString('nl-BE', { day: 'numeric', month: 'short', year: 'numeric' }) : '—'
   const behind = (h) => h < 48 ? `${h} u` : `${Math.floor(h / 24)} dagen`
@@ -66,6 +69,7 @@
   let snaps = $derived(data?.snapshots?.items || [])
   let oldSnaps = $derived(snaps.filter((s) => (s.age_days || 0) >= (data?.settings?.snapshot_days || 14)))
   let sc = $derived(data?.selfcheck || {})
+  let rx = $derived(data?.syslog)
   let s = $derived(data?.summary)
 
   async function delSnap(x) {
@@ -326,7 +330,7 @@
       <SecurityCheck onfix={(fix) => (fix.window === 'health' ? (tab = fix.tab) : onfix?.(fix))} />
     {:else}
       <div class="head">
-        <span class="hint">Leeft de worker, is er een recente en leesbare back-up, en staat er een kopie buiten de container?</span>
+        <span class="hint">Leven de worker en de syslog-ontvanger, is er een recente en leesbare back-up, en staat er een kopie buiten de container?</span>
         <span class="when">{running.has('selfcheck') ? 'bezig…' : sc.checked_at ? `bekeken ${ago(sc.checked_at)}` : ''}</span>
         <button class="mini" disabled={running.has('selfcheck')} onclick={() => scan('selfcheck')}>⟳ nu</button>
       </div>
@@ -335,6 +339,20 @@
           <div class="hh"><b>worker</b><span class="right"><span class="pill lv-{data?.worker?.ok ? 'ok' : 'err'}">{data?.worker?.ok ? 'draait' : 'draait niet'}</span></span></div>
           <p class="small">{data?.worker?.ok ? `gestart ${ago(data.worker.started)}, laatste teken van leven ${ago(data.worker.at)}` : data?.worker?.why}</p>
           {#if !data?.worker?.ok}<p class="dim small">Op de container: <code>systemctl status homepage-worker</code></p>{/if}
+        </div>
+        <div class="host lv-{!rx ? 'unknown' : !rx.ok || rx.loss || rx.down_since ? 'warn' : 'ok'}">
+          <div class="hh"><b>syslog-ontvanger</b>
+            {#if rx}<span class="right"><span class="pill lv-{rx.ok ? 'ok' : 'warn'}">{rx.ok ? 'draait' : 'draait niet'}</span></span>{/if}</div>
+          {#if !rx}
+            <p class="dim small">heeft zich nog niet gemeld</p>
+          {:else}
+            <p class="small">{rx.ok ? `gestart ${ago(rx.started)}, laatste teken van leven ${ago(rx.at)}` : rx.why}</p>
+            <p class="dim small">{num(rx.received)} regels ontvangen, {num(rx.stored)} bewaard, {num(rx.lost)} niet bewaard sinds de start</p>
+            {#if rx.down_since}<p class="small w">wacht op de database sinds {ago(rx.down_since)}: {num(rx.backlog)} regels in de wachtrij</p>{/if}
+            {#if rx.loss}<p class="small w">{num(rx.loss.n)} regels niet bewaard, {ago(rx.loss.since)} tot {ago(rx.loss.at)}{LOSS[rx.loss.why] ? ` (${LOSS[rx.loss.why]})` : ''}</p>{/if}
+            {#if rx.last_error}<p class="dim small">laatste databasefout {ago(rx.last_error.since)}{rx.last_error.until ? `, opgelost ${ago(rx.last_error.until)}` : ''}: {rx.last_error.error}</p>{/if}
+            {#if !rx.ok}<p class="dim small">Op de container: <code>systemctl status homepage-syslog</code></p>{/if}
+          {/if}
         </div>
         <div class="host lv-{!sc.checked_at ? 'unknown' : sc.stale || sc.verified?.ok === false ? 'err' : 'ok'}">
           <div class="hh"><b>back-up</b><small>{sc.backup_dir}</small>

@@ -322,11 +322,67 @@ async def test_log_search_timeout_gives_clear_error(authed, monkeypatch):
     for resp in (r, h):
         assert resp.status_code == 503, resp.text
         detail = resp.json()["detail"]
-        assert detail.startswith("Zoeken duurde te lang; kies een kortere periode, één machine of een niveau")
-        # Alleen filters die de logviewer echt heeft, in zijn eigen woorden (geen app-filter, geen "host").
-        assert "app" not in detail and "host" not in detail
+        assert detail.startswith("Zoeken duurde te lang; kies een kortere periode of één machine")
+        # Alleen filters die de logviewer echt heeft, in zijn eigen woorden (geen app-filter, geen "host"). Een
+        # niveau helpt nauwelijks bij gecomprimeerde chunks: dat wordt niet meer aangeraden.
+        assert "app" not in detail and "host" not in detail and "helpt weinig" in detail
     # Daarna werkt zoeken gewoon weer.
     assert (await authed.get("/api/logs", params={"range": "30d", "q": "schijf"})).status_code == 200
+    await agen.aclose()
+
+
+@needs_pg
+async def test_log_search_stops_after_its_own_limit(authed, monkeypatch):
+    """De testengine heeft geen algemene statement_timeout: alleen de eigen limiet van de logviewer (SET LOCAL per
+    zoekopdracht) kan het zoeken hier afbreken."""
+    from app.routers import logs
+    monkeypatch.setattr(logs, "SEARCH_SECONDS", 1)
+    monkeypatch.setattr(logs, "QUICK_SECONDS", 1)
+    agen, db = await _db()
+    async with db.bind.connect() as locker:
+        await locker.execute(text("LOCK TABLE log_entries IN ACCESS EXCLUSIVE MODE"))
+        start = asyncio.get_running_loop().time()
+        try:
+            # wait_for: zonder eigen limiet zou het zoeken blijven wachten op het slot.
+            got = [await asyncio.wait_for(authed.get(url, params=p), 15) for url, p in (
+                ("/api/logs", {"range": "30d", "q": "schijf"}), ("/api/logs/histogram", {"range": "30d"}),
+                ("/api/logs", {"after_id": 0}), ("/api/logs/hosts", {}))]
+        finally:
+            await locker.rollback()
+        took = asyncio.get_running_loop().time() - start
+    for resp in got:
+        assert resp.status_code == 503, resp.text
+        assert resp.json()["detail"] == logs.TOO_SLOW
+    assert took < 10
+    assert (await authed.get("/api/logs", params={"range": "30d"})).status_code == 200
+    await agen.aclose()
+
+
+async def test_log_search_sets_its_own_limits(authed):
+    """Op PostgreSQL vlak voor elke query van de logviewer: 20 s voor zoeken en de grafiek, 5 s voor live meekijken
+    en de lijst met machines, en geen parallelle workers. SQLite krijgt niets."""
+    agen, db = await _db()
+    db.add(LogEntry(ts=datetime.now(timezone.utc), host="nas", severity=3, msg="schijf vol"))
+    await db.commit()
+    seen = []
+
+    def record(conn, cursor, statement, params, context, executemany):
+        seen.append(statement)
+    event.listen(db.bind.sync_engine, "before_cursor_execute", record)
+    try:
+        for url, p, limit in (("/api/logs", {"range": "30d", "q": "schijf"}, "20s"),
+                              ("/api/logs/histogram", {"range": "30d"}, "20s"),
+                              ("/api/logs", {"after_id": 0}, "5s"), ("/api/logs/hosts", {}, "5s")):
+            seen.clear()
+            assert (await authed.get(url, params=p)).status_code == 200
+            i = next(i for i, s in enumerate(seen) if "FROM log_entries" in s)
+            if PG:
+                assert seen[i - 2:i] == [f"SET LOCAL statement_timeout = '{limit}'",
+                                         "SET LOCAL max_parallel_workers_per_gather = 0"], url
+            else:
+                assert not any(s.lstrip().upper().startswith("SET") for s in seen)
+    finally:
+        event.remove(db.bind.sync_engine, "before_cursor_execute", record)
     await agen.aclose()
 
 

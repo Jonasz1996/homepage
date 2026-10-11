@@ -38,6 +38,7 @@ from .models import (ApiConnection, AppState, AuditLog, CronJob, Event, HealRule
 from .monitoring import restoretest, upgrade, watchdog
 from .routers import attention as attention_router, integrations as integ, versie
 from .security import decrypt
+from .syslog import server as rxs
 
 log = logging.getLogger("homepage.api")
 
@@ -239,8 +240,10 @@ async def _processen(db: AsyncSession, now: datetime) -> dict:
     syslog = await _value(db, logring.state_key("syslog"))
     return {"api": {"pid": os.getpid(), "started": logring.started()},
             "worker": {**sc.worker_status(hb, now), "pid": hb.get("pid")},
-            # De syslog-ontvanger meldt zich alleen via zijn logregels.
-            "syslog": {k: syslog.get(k) for k in ("at", "pid", "started")},
+            # De syslog-ontvanger: zijn teken van leven en tellers (ontvangen, bewaard, verloren, de laatste
+            # databasefout), en wanneer hij zijn logregels bewaarde.
+            "syslog": {**{k: syslog.get(k) for k in ("at", "pid", "started")},
+                       "ontvanger": await _value(db, rxs.STATE_KEY)},
             "worker_alert": await _value(db, "worker_alert"), "api_alert": await _value(db, watchdog.API_KEY),
             "healthz_seen": await _value(db, watchdog.SEEN_KEY)}
 

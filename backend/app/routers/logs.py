@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import asyncssh
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, func, or_, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,8 +26,14 @@ router = APIRouter(prefix="/api/logs", tags=["logs"])
 RANGES = {"1h": timedelta(hours=1), "24h": timedelta(hours=24), "7d": timedelta(days=7), "30d": timedelta(days=30)}
 BUCKETS = {"1h": 60, "24h": 1800, "7d": 6 * 3600, "30d": 86400}
 # In de woorden van de logviewer (Logs.svelte): die kent een periode, een machine links en een niveau-keuze;
-# geen app-filter.
-TOO_SLOW = "Zoeken duurde te lang; kies een kortere periode, één machine of een niveau (bv. 'err en erger')"
+# geen app-filter. Wat ouder is dan een dag staat gecomprimeerd, per machine: één machine kiezen maakt het zoeken daar
+# echt sneller, een niveau nauwelijks (dan moet toch alles uitgepakt worden).
+TOO_SLOW = ("Zoeken duurde te lang; kies een kortere periode of één machine (een niveau kiezen helpt weinig bij "
+            "regels ouder dan een dag)")
+# Eigen tijdslimieten (de algemene statement_timeout is 60 s): liever na 20 s een duidelijke melding dan na 60 s een
+# 504 van de proxy ervoor. Live meekijken en de lijst met machines horen altijd snel te zijn.
+SEARCH_SECONDS = 20
+QUICK_SECONDS = 5
 
 
 def _row(e: LogEntry) -> dict:
@@ -50,10 +56,19 @@ def _filters(host: list[str] | None, app: str | None, sev: int | None, q: str | 
     return conds
 
 
-async def _execute(db: AsyncSession, stmt):
-    """Zoeken in 30 dagen logregels kan langer duren dan de statement_timeout: dan een duidelijke fout in plaats van
-    een 500."""
+async def _execute(db: AsyncSession, stmt, seconds: int):
+    """Met een eigen tijdslimiet: zoeken in 30 dagen logregels kan lang duren, en dan liever een duidelijke fout dan
+    een 500 of een time-out van de proxy. Zonder parallelle workers: één zoekopdracht neemt hoogstens één kern, de
+    rest blijft vrij voor de checks.
+
+    SET LOCAL geldt tot het einde van de transactie; deze GET's committen niet, dus voor de query die volgt. Nooit
+    ruimer dan de algemene limiet (HOMEPAGE_DB_STATEMENT_TIMEOUT), als die lager staat."""
     try:
+        if db.bind.dialect.name == "postgresql":
+            general = get_settings().db_statement_timeout
+            seconds = min(seconds, general) if general > 0 else seconds
+            await db.execute(text(f"SET LOCAL statement_timeout = '{int(seconds)}s'"))
+            await db.execute(text("SET LOCAL max_parallel_workers_per_gather = 0"))
         return await db.execute(stmt)
     except DBAPIError as e:
         if not timed_out(e):
@@ -73,14 +88,14 @@ async def search(host: list[str] | None = Query(default=None), app: str | None =
         stmt = (select(LogEntry).where(LogEntry.id > after_id, *conds)
                 .where(LogEntry.ts > datetime.now(timezone.utc) - timedelta(hours=1))
                 .order_by(LogEntry.id).limit(limit))
-        rows = (await _execute(db, stmt)).scalars().all()
+        rows = (await _execute(db, stmt, QUICK_SECONDS)).scalars().all()
         return {"items": [_row(e) for e in reversed(rows)]}
     span = RANGES.get(span_key, RANGES["24h"])
     conds.append(LogEntry.ts >= datetime.now(timezone.utc) - span)
     if before_ts is not None and before_id is not None:
         conds.append(or_(LogEntry.ts < before_ts, and_(LogEntry.ts == before_ts, LogEntry.id < before_id)))
     stmt = select(LogEntry).where(*conds).order_by(LogEntry.ts.desc(), LogEntry.id.desc()).limit(limit)
-    rows = (await _execute(db, stmt)).scalars().all()
+    rows = (await _execute(db, stmt, SEARCH_SECONDS)).scalars().all()
     return {"items": [_row(e) for e in rows], "more": len(rows) == limit}
 
 
@@ -92,7 +107,7 @@ async def hosts(user: User = Depends(current_user), db: AsyncSession = Depends(g
                    func.max(case((LogEntry.app == "docker", 1), else_=0)))
             .where(LogEntry.ts >= since).group_by(LogEntry.host).order_by(LogEntry.host))
     return [{"host": h, "count": n, "last": _aware(last), "worst": worst, "errors": int(errs or 0), "docker": bool(dock)}
-            for h, n, last, worst, errs, dock in (await _execute(db, stmt)).all()]
+            for h, n, last, worst, errs, dock in (await _execute(db, stmt, QUICK_SECONDS)).all()]
 
 
 @router.get("/histogram")
@@ -110,7 +125,8 @@ async def histogram(host: list[str] | None = Query(default=None), app: str | Non
     stmt = (select(bucket.label("b"), func.sum(case((LogEntry.severity <= 3, 1), else_=0)),
                    func.sum(case((LogEntry.severity == 4, 1), else_=0)), func.count())
             .where(LogEntry.ts >= start, *_filters(host, app, sev, q)).group_by("b").order_by("b"))
-    rows = {int(b): (int(e or 0), int(w or 0), int(n)) for b, e, w, n in (await _execute(db, stmt)).all()}
+    rows = {int(b): (int(e or 0), int(w or 0), int(n))
+            for b, e, w, n in (await _execute(db, stmt, SEARCH_SECONDS)).all()}
     first = int(start.timestamp()) // size
     last = int(datetime.now(timezone.utc).timestamp()) // size
     return {"bucket_seconds": size, "points": [
