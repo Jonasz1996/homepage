@@ -5,6 +5,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 import httpx
+import pytest
 from sqlalchemy import select
 
 from app.config import get_settings
@@ -499,6 +500,27 @@ async def test_foutmelding_gemaskeerd(authed, monkeypatch, tmp_path):
     assert not src["ok"] and "302" in src["error"] and "***" in src["error"] and "Kd2-pbs-4Wm" not in src["error"]
     st = nood.status(v, False, T0, False, "/x")
     assert "Kd2-pbs-4Wm" not in str(st) and v["masked"] == 0
+    await agen.aclose()
+
+
+async def test_mislukt_met_reden(authed, monkeypatch, tmp_path):
+    # Iets anders dan een fout van een API (onverwachte gegevens, de database): het venster zegt waarom, zonder geheim.
+    await _setup(authed, monkeypatch, tmp_path)
+
+    def boom(*a):
+        raise TypeError("onverwacht antwoord met Xq7-pve-9Zt")
+    place = nood._place
+    monkeypatch.setattr(nood, "_place", boom)
+    with pytest.raises(TypeError):
+        await _run(World())
+    agen, db = await _db()
+    v = await _plan(db)
+    assert v["running"] is None and v["tried"] == T0.isoformat() and not v.get("at")
+    st = nood.status(v, False, T0, False, "/x")
+    assert st["failed"] == {"at": T0.isoformat(), "error": "TypeError: onverwacht antwoord met ***"}
+    monkeypatch.setattr(nood, "_place", place)
+    assert (await _run(World(), T0 + timedelta(hours=2)))["ok"]
+    assert nood.status(await _plan(db), False, T0, False, "/x")["failed"] is None
     await agen.aclose()
 
 

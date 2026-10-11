@@ -60,6 +60,7 @@
     msg = ''
     plan = null
     const before = st?.at
+    const failedBefore = st?.failed?.at
     try {
       try {
         await api('/noodplan/run', { method: 'POST' })
@@ -73,7 +74,8 @@
       else if (st?.at && st.at !== before) {
         msg = '✓ bijgewerkt'
         await show()
-      } else msg = '✕ niet bijgewerkt: kijk de tijdlijn na'
+      } else if (st?.failed && st.failed.at !== failedBefore) msg = `✕ niet bijgewerkt: ${st.failed.error}`
+      else msg = '✕ niet bijgewerkt: kijk in de log (journalctl -u homepage-api)'
     } catch (e) { msg = `✕ ${e.message}` } finally { busy = false }
   }
   async function proef() {
@@ -135,7 +137,8 @@
       <button class="mini" disabled={running} onclick={proef} title="Toon wat nu bijwerken zou doen, zonder het te doen">proef</button>
     </div>
     {#if running}<p class="small m">Dit duurt tot een minuut.{#if st.running_by === 'worker'} De worker is ermee bezig.{/if}</p>{/if}
-    {#if msg}<p class="small" class:e={msg.startsWith('✕')} class:g={msg.startsWith('✓')}>{msg}</p>{/if}
+    {#if msg}<p class="small" class:e={msg.startsWith('✕')} class:g={msg.startsWith('✓')}>{msg}</p>
+    {:else if st.failed && !running}<p class="small e">✕ De laatste poging ({full(st.failed.at)}) mislukte: {st.failed.error}</p>{/if}
 
     {#each bad as s (s.key)}
       <p class="small w">{s.name}: {s.error || 'fout'}.

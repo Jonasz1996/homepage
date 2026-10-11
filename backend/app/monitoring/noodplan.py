@@ -1131,11 +1131,14 @@ async def run(maker, http, trigger: str = "week", user: str | None = None, now: 
                             "masked": masked, "masked_kinds": kinds, "alerts": alerts}
                 await db.commit()
             return {"ok": True, "at": value["at"]}
-        except BaseException:
-            # Marker weg, "tried" blijft: de volgende poging pas na RETRY.
+        except BaseException as e:
+            # Marker weg, "tried" blijft: de volgende poging pas na RETRY. Waarom het mislukte blijft staan tot een
+            # run wel lukt (gemaskeerd: het gaat naar de browser); niet bij afbreken (de worker of API stopt).
+            why = mask(f"{type(e).__name__}: {str(e)[:200]}", secrets)
+            failed = {"failed": {"at": now.isoformat(), "error": why}} if isinstance(e, Exception) else {}
             async with maker() as db:
                 st = await ensure_state(db, STATE_KEY, {})
-                st.value = {**(st.value or {}), "running": None}
+                st.value = {**(st.value or {}), "running": None, **failed}
                 await db.commit()
             raise
 
@@ -1152,7 +1155,7 @@ def status(value: dict | None, running: bool, now: datetime, offsite_on: bool, o
                         for x in v.get("sources") or []],
             "offsite": v.get("offsite") or {"enabled": offsite_on, "dir": offsite_dir},
             "counts": counts(v.get("data")) if at else None,
-            "masked": v.get("masked") or 0, "masked_kinds": v.get("masked_kinds") or [],
+            "masked": v.get("masked") or 0, "masked_kinds": v.get("masked_kinds") or [], "failed": v.get("failed"),
             "problems": [{"key": k, "text": t} for k, t in problems(v, now)]}
 
 
