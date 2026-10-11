@@ -196,6 +196,9 @@ def build_hosts(proxy_hosts: list[dict], certs: list[dict] | None, npm_id: int, 
         entry = {"npm": npm_id, "via": via, "id": h.get("id"), "scheme": fwd[0] if fwd else None,
                  "host": fwd[1] if fwd else None, "port": fwd[2] if fwd else None, **cert_of(h), "why": why,
                  "ssl_forced": bool(h.get("ssl_forced") and h.get("certificate_id")),
+                 # Apart van why: daar kan een andere reden voor gaan (eigen configuratie). De check van buitenaf
+                 # moet het weten: van buitenaf geeft zo'n host 401 of 403.
+                 "access_list": bool(h.get("access_list_id")),
                  "locations": sorted(locations, key=lambda x: len(x["path"]), reverse=True)}
         for name in _names(h):
             out.setdefault(name, entry)
