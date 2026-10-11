@@ -57,7 +57,8 @@
   }
 
   // Eerst de regels, dan de grafiek: die is het duurst. Mislukt de grafiek, dan blijven de regels staan; mislukt het
-  // zoeken, dan geen regels van de vorige filter onder de nieuwe.
+  // zoeken, dan geen regels van de vorige filter onder de nieuwe. Zo ook de grafiek: die van de vorige filter gaat weg
+  // zodra de nieuwe regels er zijn, niet pas als de nieuwe grafiek er is (tot 20 s later).
   async function search(my) {
     const p = params()
     let r
@@ -71,6 +72,8 @@
     items = r.items
     more = r.more
     error = ''
+    hist = null
+    histError = ''
     try {
       const h = await api('/logs/histogram?' + p)
       if (my === gen) { hist = h; histError = '' }
@@ -211,6 +214,8 @@
           </svg>
         {:else if histError}
           <p class="hnote">{histError}</p>
+        {:else if busy}
+          <p class="hnote">grafiek laden…</p>
         {/if}
         {#if error}<p class="err">{error}</p>{/if}
         <div class="list">
