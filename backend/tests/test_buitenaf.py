@@ -213,6 +213,34 @@ async def test_vervalste_cloudflare_header(authed, monkeypatch):
     await agen.aclose()
 
 
+@pytest.mark.skipif(not os.environ.get("HOMEPAGE_TEST_DATABASE_URL", "").startswith("postgresql"),
+                    reason="gelijktijdige sessies: alleen op PostgreSQL")
+async def test_vervalste_header_tegelijk_een_melding(authed):
+    """Veel vervalste verzoeken tegelijk (elk met een eigen sessie, zoals in de API): toch maar één melding."""
+    sessions = [await _db() for _ in range(12)]
+    arrived = []
+
+    def slow(db):
+        # Elke commit wacht even tot de andere verzoeken ook zover zijn: zonder slot zien ze dan allemaal nog geen
+        # melding. Met het slot wachten de andere in de database, dus niet eindeloos wachten.
+        real = db.commit
+
+        async def commit():
+            arrived.append(1)
+            for _ in range(20):
+                if len(arrived) >= len(sessions):
+                    break
+                await asyncio.sleep(0.01)
+            await real()
+        db.commit = commit
+    for _, db in sessions:
+        slow(db)
+    await asyncio.gather(*(outside.where(_Conn(f"203.0.113.{i}", FORGED), db) for i, (_, db) in enumerate(sessions)))
+    assert len(await _forged_notes(sessions[0][1])) == 1
+    for agen, _ in sessions:
+        await agen.aclose()
+
+
 async def test_ipv4_in_ipv6_vorm(authed):
     """::ffff:a.b.c.d (NPM op een dual-stack socket) telt als dat IPv4-adres: thuis-IP, thuisnetwerk, publiek."""
     agen, db = await _db()

@@ -260,7 +260,9 @@ async def run_selfcheck(db: AsyncSession, offsite_on: bool) -> dict:
     state = await db.get(AppState, STATE_KEY)
     prev = state.value if state else {}
     ks = await db.get(AppState, KEY_STATE) if offsite_on else None
-    # Alles gelezen: geen transactie open tijdens het nakijken en kopiëren van de dumps (kan minuten duren).
+    guard = await db.get(AppState, GUARD_KEY)
+    # Alles gelezen: geen transactie open tijdens het nakijken en kopiëren van de dumps (kan minuten duren). Tot de
+    # kopie hieronder dus niets meer lezen: dat opent een nieuwe transactie die tijdens de kopie blijft openstaan.
     await db.commit()
     dumps = list_dumps(s.backup_dir)
     latest = dumps[0] if dumps else None
@@ -286,7 +288,6 @@ async def run_selfcheck(db: AsyncSession, offsite_on: bool) -> dict:
     was = disk_alert({"alerts": alerts})
     # Eén melding per keer dat de schijf volloopt, en nog één als het van oranje naar rood gaat. Tussen 75 en 90%
     # meldt de schijfbewaker het al als hij aan het opruimen is (met wat hij opruimde en wat de schijf vult).
-    guard = await db.get(AppState, GUARD_KEY)
     told = level == "warn" and bool(guard and (guard.value or {}).get("since"))
     if level and (was is None or (level, was) == ("err", "warn")) and not told:
         body = f"{d['path']}: nog {d['free'] // 2**20} MB vrij"

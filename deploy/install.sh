@@ -241,29 +241,50 @@ say "Database bijwerken"
 if [ -n "${HOMEPAGE_TERUGZETTEN:-}" ]; then
   echo "Terugzetten: de database is al teruggezet, geen nieuwe kopie."
 elif runuser -u postgres -- psql -d homepage -tAc "SELECT 1 FROM alembic_version" 2>/dev/null | grep -q 1; then
-  # Bestaande installatie: eerst een kopie, zodat een mislukte migratie terug te draaien is. Er blijven er 2 staan,
-  # deze en die van de vorige update; de oudere eerst weg, dan is er meer plaats.
-  find "$BK" -name 'voor-update-*.dump' -printf '%T@ %p\n' | sort -rn | tail -n +2 | cut -d' ' -f2- \
-    | while read -r f; do rm -f "$f" "$f.versie" "$f.teruggezet" "$f.bezig"; done
-  # Plaats genoeg voor de kopie? Anders afbreken voor er iets stilvalt. Een kopie is kleiner dan de database zelf: dit is ruim.
-  NODIG=$(runuser -u postgres -- psql -d homepage -tAc "SELECT pg_database_size('homepage') * 12 / 10")
-  VRIJ=$(df --output=avail -B1 "$BK" | tail -1 | tr -d ' ')
-  if [ "$VRIJ" -lt "$NODIG" ]; then
-    afbreken "Te weinig plaats in $BK voor een kopie van de database: $((VRIJ >> 20)) MB vrij, $((NODIG >> 20)) MB nodig."
+  # Bestaande installatie: eerst een kopie, zodat een mislukte migratie terug te draaien is.
+  # Dezelfde versie opnieuw (bv. na een fout na het bijwerken van de database): die staat al op deze versie en
+  # verandert niet, dus geen kopie. Zo blijft de kopie van de echte update die waar homepage-terugzetten naartoe gaat.
+  ZELFDE=""
+  if [ -n "$PREV_COMMIT" ] && [ "$PREV_COMMIT" = "$NOW_COMMIT" ]; then
+    ZELFDE=1
+    echo "Dezelfde versie opnieuw: de database verandert niet, geen kopie nodig."
+  else
+    # Er blijven 2 kopieën van voor een update staan: straks deze, en de nieuwste die bij een update hoort (met de
+    # versie ernaast, of al teruggezet). De rest eerst weg, dan is er meer plaats.
+    KEEP=$(find "$BK" -maxdepth 1 -name 'voor-update-*.dump' -printf '%T@ %p\n' | sort -rn | cut -d' ' -f2- \
+      | while read -r f; do if [ -f "$f.versie" ] || [ -f "$f.teruggezet" ]; then echo "$f"; break; fi; done)
+    [ -n "$KEEP" ] || KEEP=$(find "$BK" -maxdepth 1 -name 'voor-update-*.dump' -printf '%T@ %p\n' | sort -rn \
+      | head -1 | cut -d' ' -f2-)
+    find "$BK" -maxdepth 1 -name 'voor-update-*.dump' | while read -r f; do
+      [ "$f" = "$KEEP" ] || rm -f "$f" "$f.versie" "$f.teruggezet" "$f.bezig"
+    done
+    # De dagelijkse kopieën: de 5 nieuwste, zoals homepage-backup.sh (vroeger bleven ze 14 dagen staan).
+    find "$BK" -maxdepth 1 -name 'homepage-????-??-??.dump' | sort -r | tail -n +6 | xargs -r rm -f
+    # Plaats genoeg voor de kopie? Anders afbreken voor er iets stilvalt. Geschat: de gegevens zonder de indexen
+    # (die gaan niet mee in een kopie) plus 64 MB. Een kopie (pg_dump -Fc, gecomprimeerd) is meestal kleiner.
+    NODIG=$(runuser -u postgres -- psql -d homepage -tAc "SELECT pg_database_size(current_database())
+      - coalesce((SELECT sum(pg_relation_size(oid)) FROM pg_class WHERE relkind = 'i'), 0) + 64 * 1024 * 1024")
+    VRIJ=$(df --output=avail -B1 "$BK" | tail -1 | tr -d ' ')
+    if [ "$VRIJ" -lt "$NODIG" ]; then
+      afbreken "Te weinig plaats in $BK voor een kopie van de database: $((VRIJ >> 20)) MB vrij, ongeveer \
+$((NODIG >> 20)) MB nodig. Wat plaats inneemt: du -sh $BK/* /var/lib/postgresql"
+    fi
   fi
   # Stil tijdens de kopie en de migratie: wat de diensten daartussen nog schrijven, zou anders verloren gaan.
   echo "Diensten stoppen."
   GESTOPT=1
   systemctl stop homepage-api homepage-worker homepage-syslog
-  DUMP="$BK/voor-update-$(date +%Y%m%d-%H%M%S).dump"
-  if ! runuser -u postgres -- sh -c "pg_dump -Fc homepage > '$DUMP.tmp' && mv '$DUMP.tmp' '$DUMP'"; then
-    rm -f "$DUMP.tmp"
-    afbreken "Kopie van de database mislukt."
-  fi
-  echo "Kopie van de database: $DUMP"
-  # Naast de kopie: welke versie erbij hoort. Zonder andere versie (opnieuw dezelfde installeren) valt er niets terug te zetten.
-  if [ -n "$PREV_COMMIT" ] && [ "$PREV_COMMIT" != "$NOW_COMMIT" ]; then
-    printf 'commit=%s\nversie=%s\n' "$PREV_COMMIT" "${PREV_VERSIE:-${PREV_COMMIT:0:7}}" > "$DUMP.versie"
+  if [ -z "$ZELFDE" ]; then
+    DUMP="$BK/voor-update-$(date +%Y%m%d-%H%M%S).dump"
+    if ! runuser -u postgres -- sh -c "pg_dump -Fc homepage > '$DUMP.tmp' && mv '$DUMP.tmp' '$DUMP'"; then
+      rm -f "$DUMP.tmp"
+      afbreken "Kopie van de database mislukt."
+    fi
+    echo "Kopie van de database: $DUMP"
+    # Naast de kopie: welke versie erbij hoort (onbekend bij een update van een heel oude installatie).
+    if [ -n "$PREV_COMMIT" ]; then
+      printf 'commit=%s\nversie=%s\n' "$PREV_COMMIT" "${PREV_VERSIE:-${PREV_COMMIT:0:7}}" > "$DUMP.versie"
+    fi
   fi
 fi
 # Onderbreken pas na het onthouden van de versie (zie onderbroken). De migratie zelf stopt wel bij Ctrl+C: dan is de

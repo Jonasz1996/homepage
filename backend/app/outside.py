@@ -16,10 +16,11 @@ dat kan gekozen zijn (NPM gelooft X-Real-IP van het LAN), dus de limieten op pog
 """
 
 import ipaddress
+import zlib
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import HTTPConnection
 
@@ -84,8 +85,14 @@ def forged(conn: HTTPConnection) -> bool:
 async def _report_forged(db: AsyncSession, ip: ipaddress.IPv4Address | ipaddress.IPv6Address | None) -> None:
     """Melding (en tijdlijn) over een vervalste header. Bewaart meteen: een geweigerd verzoek bewaart zelf niets.
     De aanroepers van where() hebben op dat moment nog niets gewijzigd."""
+    if db.bind.dialect.name == "postgresql":
+        # Gelijktijdige verzoeken na elkaar: anders zien ze allemaal nog geen melding en maakt elk er een. Het slot
+        # gaat vrij bij de commit hieronder.
+        key = zlib.crc32(f"homepage:{FORGED_KEY}".encode())
+        await db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": key})
     if (await db.execute(select(Notification.id).where(
             Notification.push_key == FORGED_KEY, Notification.ts >= _now() - FORGED_EVERY).limit(1))).first():
+        await db.commit()
         return
     who = str(ip) if ip is not None else "?"
     notify(db, "Vervalste Cloudflare-header",

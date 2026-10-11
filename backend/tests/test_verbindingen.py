@@ -344,3 +344,36 @@ def test_alembic_uses_its_own_engine():
     from pathlib import Path
     env = (Path(dbmod.__file__).resolve().parent.parent / "alembic" / "env.py").read_text()
     assert "create_async_engine(get_settings().database_url)" in env and "app.db" not in env
+
+
+async def test_selfcheck_copies_offsite_without_open_transaction(client, tmp_path, monkeypatch):
+    """De kopie buiten de container kan minuten duren: geen transactie open, ook niet als er al een melding klaarstaat
+    (geen back-up, schijf vol) of de schijfbewaker bezig is."""
+    from app.health import selfcheck as sc
+    s = get_settings()
+    monkeypatch.setattr(s, "backup_dir", tmp_path / "leeg")
+    monkeypatch.setattr(s, "offsite_dir", tmp_path)
+    monkeypatch.setattr(sc, "disk", lambda p: {"path": str(p), "total": 100, "used": 80, "free": 20, "pct": 80.0})
+    seen = []
+
+    def copy(src, dst, blob, now):
+        seen.append(asyncio.run_coroutine_threadsafe(_idle_in_transaction(), loop).result(10))
+        return {"copied": [], "latest": None, "count": 0, "key": False}
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(sc, "offsite_copy", copy)
+    agen, db = await _db()
+    db.add(AppState(key=sc.GUARD_KEY, value={"since": datetime.now(timezone.utc).isoformat()}))
+    await db.commit()
+    real_copy = asyncio.to_thread
+
+    async def to_thread(fn, *a):
+        # Een klaargezette melding begint wel een transactie in de sessie, maar zonder verbinding: dat mag.
+        tx = db.sync_session.get_transaction()
+        seen.append(bool(tx and tx._connections))
+        return await real_copy(fn, *a)
+    monkeypatch.setattr(sc.asyncio, "to_thread", to_thread)
+    v = await sc.run_selfcheck(db, offsite_on=True)
+    await db.commit()
+    assert v["stale"] and v["offsite"]["count"] == 0
+    assert seen == [False, 0]
+    await agen.aclose()

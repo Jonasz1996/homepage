@@ -33,7 +33,10 @@ if [ "${1:-}" = "--lijst" ]; then
   exit 0
 fi
 
-DUMP=$(copies | head -1)
+# De nieuwste kopie die bij een update hoort: met de versie ernaast, of al teruggezet. Een kopie zonder (van een update
+# van een heel oude installatie) slaan we over.
+DUMP=$(copies | while read -r f; do if [ -f "$f.versie" ] || [ -f "$f.teruggezet" ]; then echo "$f"; break; fi; done)
+[ -n "$DUMP" ] || DUMP=$(copies | head -1)
 [ -n "$DUMP" ] || { echo "Geen kopie van voor een update gevonden in $BK."; exit 1; }
 if [ -f "$DUMP.teruggezet" ]; then
   echo "De laatste update is al teruggedraaid. Nog verder terug kan niet met dit commando."
