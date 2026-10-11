@@ -249,7 +249,39 @@ Later, deel 2 (internet, Wake-on-LAN en stroom):
 - **OPNsense** (type `opnsense`, geheimen `key` en `secret` van een API-key): WAN-status, latency en verlies op de
   tegel, alle gateways en de firmwarestatus in het mini dashboard. Firmware-updates tellen mee in `apt`
 - **Cloudflare Tunnel** (type `cloudflared`, instelling `account` = account-id, geheim `token` = API-token met
-  *Account → Cloudflare Tunnel → Read*): status, verbindingen en datacenters per tunnel
+  *Account → Cloudflare Tunnel → Read*): status, verbindingen en datacenters per tunnel. Voor **wat is publiek**
+  (hieronder) krijgt hetzelfde token meer leesrechten
+- **wat is publiek** (Infrastructuur → Netwerk → tabblad *publiek*, of `Ctrl+K` → "publiek"): per naam
+  `<x>.jbogaert.be` of iemand op internet erbij kan, en of er een login voor staat: Cloudflare Access, Authentik (of
+  een andere forward-auth) in NPM, of een access list van NPM. Rood = van buitenaf bereikbaar zonder login ervoor. Het
+  dashboard volgt elke weg naar binnen: een Cloudflare Tunnel, de oranje wolk, de grijze wolk, en rechtstreeks via je
+  thuis-IP als poort 443 daar voor iedereen naar NPM gaat (dan is Cloudflare Access te omzeilen: wie het thuis-IP
+  kent, kiest zelf de naam). Ook records die iemand kan overnemen (naar een vroeger thuis-IP, of een CNAME naar een
+  naam die niet meer bestaat), records zonder host in NPM en wildcards. Of de app zelf een login heeft, ziet het
+  dashboard niet: markeer zo'n naam als *bewust open* met een reden (vraagt je 2FA-code, komt in het auditlog). Elk
+  uur, met een melding als een naam nieuw rood wordt; *vernieuwen* kijkt meteen, *welke calls?* toont wat het opvraagt.
+  Alleen lezen: het dashboard verandert niets in Cloudflare, NPM of OPNsense, en geen enkel geheim gaat naar de browser.
+  Instellen:
+  1. **Cloudflare-token** (het token van API-beheer of van de tegel Cloudflare Tunnel): Cloudflare → My Profile →
+     API Tokens → dat token → Edit. Rechten: *Account → Cloudflare Tunnel → Read* (had je al), **Account → Access:
+     Apps and Policies → Read**, **Zone → Zone → Read**, **Zone → DNS → Read**, en optioneel *Zone → Zone Settings →
+     Read* ("Always Use HTTPS") en *Zone → Access: Apps and Policies → Read* (alleen voor oude Access-apps op
+     zoneniveau). Zone Resources: *Include → Specific zone → jbogaert.be* (en elke andere zone); Account Resources:
+     je account. Zonder zone ziet het token niets, en dat zegt het tabblad dan ook. Krijg je een nieuw token, zet het
+     dan in API-beheer. Wil je maar een paar zones nakijken: instelling `zones` = `jbogaert.be,andere.be`
+  2. **NPM-gebruiker** van het dashboard: NPM → Users → die gebruiker → Permissions: *Item visibility: All Items*,
+     *View* op Proxy Hosts, Redirection Hosts, 404 Hosts, **Access Lists** en SSL Certificates, nergens *Manage*.
+     Bereikt cloudflared NPM met een Docker-naam (`http://npm:80`), zet die naam dan bij de NPM-API in `npm_names`;
+     heeft NPM een publiek IPv6-adres, zet dat in `npm_ipv6`
+  3. **Kopie van OPNsense** (Beheer → Configuratiewijzigingen, elke nacht): zo weet het dashboard of poort 443 van
+     je thuis-IP voor iedereen naar NPM gaat of alleen voor Cloudflare. Zonder kopie gaat het ervan uit dat hij open
+     staat zodra een record naar je thuis-IP wijst
+  4. Lees eerst het kader *hoe het binnenkomt*. Staat daar *rechtstreeks naar NPM: open voor iedereen*, beperk de
+     doorverwijzing van 443 dan tot Cloudflare (een alias met `https://www.cloudflare.com/ips-v4`), gebruik alleen de
+     tunnel, of laat NPM het certificaat van Cloudflare eisen (Authenticated Origin Pulls met `ssl_verify_client on`).
+     Werk daarna de rode namen af: Cloudflare Access met een echte regel (niet "iedereen"), Authentik of een access
+     list met wachtwoord, of *bewust open*. Een IP-lijst die je LAN toelaat, houdt via de tunnel niemand tegen:
+     cloudflared komt zelf van je LAN
 - **Wake-on-LAN**: zet bij een service (bv. een HP-node) onder bewerken → Monitoring het MAC-adres. Wekken kan dan
   vanuit het mini dashboard, het netwerkoverzicht of met `Ctrl+K` → "wekken"; het vraagt je 2FA als je langer dan 15
   minuten niet bevestigd hebt. Werkt niet het standaard-broadcastadres in jouw netwerk, zet dan `"wol_broadcast":
@@ -752,6 +784,8 @@ plaats van dat van de bezoeker; het dashboard ziet nog altijd het echte IP.
 
 De adressen van Cloudflare zijn van alle klanten van Cloudflare. Wil je zeker zijn dat alleen je eigen zone bij NPM
 komt, gebruik dan alleen een Cloudflare Tunnel (geen poortdoorverwijzing naar 443) of Authenticated Origin Pulls.
+Netwerk → *publiek* zegt in het kader *hoe het binnenkomt* hoe dat bij jou staat (uit de nachtelijke kopie van
+OPNsense), en welke namen je zo langs Cloudflare Access heen bereikt.
 
 Krijg je de melding voor je eigen bezoek via Cloudflare, dan heeft Cloudflare een nieuw adresblok. Dat hoort in
 de repository: vul het aan in `deploy/nginx-map.conf` en werk bij (op het kanaal stabiel pas met een nieuwe
