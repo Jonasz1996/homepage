@@ -92,6 +92,11 @@ def test_welke_routes_van_buitenaf_uit_staan():
         "POST /api/backups/sync/create": "terminal",
         # De proef van de PBS-sync meldt zich via SSH aan op beide PBS'en (alleen lezen), net als de echte knop.
         "POST /api/backups/sync/proef": "terminal",
+        # Nieuwe service: de proeven lezen NPM, Cloudflare en Proxmox en proberen een poort; de runs veranderen ze.
+        "POST /api/nieuweservice/proef": "acties", "POST /api/nieuweservice/maken": "acties",
+        "POST /api/nieuweservice/opruimen/proef": "acties", "POST /api/nieuweservice/opruimen": "acties",
+        "POST /api/nieuweservice/runs/{run_id}/ongedaan/proef": "acties",
+        "POST /api/nieuweservice/runs/{run_id}/ongedaan": "acties",
     }
     ws = {r.path for r in _routes() if isinstance(r, WebSocketRoute)}
     assert ws == {"/api/ssh/ws/{host_id}", "/api/cron/ws/run/{job_id}", "/api/cron/ws/tail/{target}"}
