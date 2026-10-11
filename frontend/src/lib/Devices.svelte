@@ -31,7 +31,7 @@
     if (!confirm(`${d.name || d.hostname || d.mac} vergeten? Komt het terug op je netwerk, dan krijg je opnieuw een melding.`)) return
     try { await api(`/devices/${d.mac}`, { method: 'DELETE' }); edit = null; await load() } catch (e) { error = e.message }
   }
-  const PRIVATE = 'Willekeurig MAC-adres (gsm of laptop met een privé-adres, of een VM/container): de fabrikant is niet te zien. Neemt het toestel een nieuw adres met dezelfde hostnaam, dan houdt het zijn naam.'
+  const PRIVATE = 'Willekeurig MAC-adres (gsm of laptop met een privé-adres, of een VM/container): de fabrikant is niet te zien. Neemt een gekend toestel een nieuw adres met dezelfde hostnaam op dezelfde interface, dan houdt het zijn naam.'
 
   const ago = (ts) => {
     const m = Math.round((Date.now() - new Date(ts).getTime()) / 60000)

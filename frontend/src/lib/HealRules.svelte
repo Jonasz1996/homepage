@@ -157,7 +157,7 @@
     </div>
   {:else}
     <button class="mini add" onclick={startAdd}>+ regel</button>
-    {#if !rules.length}<small class="m">bv. "als {service.name} 3× down is, herstart zijn container". Je krijgt altijd een melding van wat er gebeurde. Met "proef" zie je eerst wat een regel zou doen.</small>{/if}
+    {#if !rules.length}<small class="m">bv. "als {service.name} 3× down is, herstart zijn container". Wat de regel deed, staat altijd op de tijdlijn (en in 🔔, zoals "Melden" van de tegel het wil). Met "proef" zie je eerst wat een regel zou doen.</small>{/if}
   {/if}
   {#if msg}<p class="msg" class:e={msg.startsWith('✕')}>{msg}</p>{/if}
 </div>
