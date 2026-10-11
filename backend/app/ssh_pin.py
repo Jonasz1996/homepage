@@ -171,7 +171,7 @@ def _host_status(blob: str, ip: str | None, real: str | None, text: str) -> dict
         return {"state": "los", "text": "werkt vanaf elk IP", "ip": ip, "path": real}
     # Een patroon (*), een netwerk of een naam in from=: dan werkt de sleutel ook vanaf andere IP's.
     if wide := sorted({f for f in froms if _literals(f) is None}):
-        return {"state": "los", "text": f'from="{wide[0]}" is geen los IP-adres: werkt ook vanaf andere IP\'s',
+        return {"state": "los", "text": f'from="{wide[0][:60]}" is geen los IP-adres: werkt ook vanaf andere IP\'s',
                 "ip": ip, "path": real}
     if all(_covers(f, ip) for f in froms):
         return {"state": "vast", "text": f"alleen vanaf {', '.join(sorted(set(froms)))}", "ip": ip, "path": real}
