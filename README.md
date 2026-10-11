@@ -642,13 +642,19 @@ Open het dashboard via zijn naam in NPM. Via NPM met HTTPS is de sessiecookie au
 (`HOMEPAGE_COOKIE_SECURE=auto`). Geef bij de eerste installatie het IP van NPM mee:
 `NPM_IP=192.168.0.245 bash <(curl ...)`; het komt in `/etc/homepage/homepage.env` (`HOMEPAGE_NPM_IP`).
 
-nginx laat zelf alleen dit binnen: van NPM en van de container zelf alles, van je LAN (privé-adressen) alleen
-`/api/push/`, `/api/hooks/` en `/api/healthz`, en de rest krijgt een 403 met uitleg. Zo kan niemand op het LAN NPM en
-Cloudflare omzeilen, en gaat je wachtwoord nooit onversleuteld over het netwerk. In **! → instellingen** staat dat
-als *Dashboard alleen via NPM*. Eerst testen op `http://<IP>` voor er een host in NPM is: zet `HOMEPAGE_LAN_OPEN=1`
-in `/etc/homepage/homepage.env`, voer `bash /opt/homepage/deploy/install.sh` uit, en zet het daarna terug op 0. Gaf
-je bij de eerste installatie geen `NPM_IP` mee, dan neemt het script 192.168.0.245 en laat het het LAN open tot jij
-`HOMEPAGE_LAN_OPEN=0` zet. Krijg je ook via NPM een 403, dan klopt `HOMEPAGE_NPM_IP` niet: zet het juiste IP en
+nginx laat zelf alleen dit binnen: van NPM en van de container zelf alles, van je LAN alleen `/api/push/`,
+`/api/hooks/` en `/api/healthz`, en de rest krijgt een 403 met uitleg. LAN zijn de privé-adressen, het IPv6-netwerk
+van de container en wat je in `HOMEPAGE_LAN_NETS` zet, bv. je IPv6-voorvoegsel voor toestellen met een publiek
+IPv6-adres in een ander VLAN: `HOMEPAGE_LAN_NETS=2a02:1810:abcd:1200::/56` (meer netwerken: gescheiden door spaties,
+tussen aanhalingstekens). Zo kan niemand op het LAN NPM en Cloudflare omzeilen, en gaat je wachtwoord niet meer
+onversleuteld over het LAN tussen je toestel en het dashboard. Alleen tussen NPM en de container is het nog gewone
+http: zet ze in hetzelfde VLAN als dat voor jou telt. In **! → instellingen** staat dat als *Dashboard alleen via
+NPM*. Eerst testen op `http://<IP>` voor er een host in NPM is: zet `HOMEPAGE_LAN_OPEN=1` in
+`/etc/homepage/homepage.env`, voer `bash /opt/homepage/deploy/install.sh` uit, en zet het daarna terug op 0. Gaf je
+bij de eerste installatie geen `NPM_IP` mee, dan neemt het script 192.168.0.245 en laat het het LAN open tot jij
+`HOMEPAGE_LAN_OPEN=0` zet. Een update van een installatie van voor deze regel laat het LAN ook open, want het IP van
+NPM is dan nooit nagekeken: open het dashboard via zijn naam in NPM, en werkt dat, zet dan `HOMEPAGE_LAN_OPEN=0` en
+voer `install.sh` opnieuw uit. Krijg je ook via NPM een 403, dan klopt `HOMEPAGE_NPM_IP` niet: zet het juiste IP en
 voer `install.sh` opnieuw uit in de container (`pct enter <CTID>`). Wat install.sh koos, staat in
 `/etc/homepage/nginx`.
 
