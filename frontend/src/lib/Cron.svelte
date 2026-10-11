@@ -5,6 +5,8 @@
   import CronGraph from './CronGraph.svelte'
   import CronJob from './CronJob.svelte'
   import CronLive from './CronLive.svelte'
+  import Tabs from './Tabs.svelte'
+  import Window from './Window.svelte'
   import { KIND, STATUS, STATUS_HINT, dur, full, rel } from './cronfmt.js'
 
   // Alles wat er gepland staat op je machines: cron, timers, Proxmox- en PBS-jobs. Met de laatste runs,
@@ -74,24 +76,17 @@
   })
   let hosts = $derived((data?.targets || []).filter((t) => !t.error))
   let broken = $derived((data?.targets || []).filter((t) => t.error))
+  const TABS = [{ key: 'jobs', label: 'jobs' }, { key: 'agenda', label: 'agenda' }, { key: 'graph', label: 'verbanden' }, { key: 'live', label: 'live' }]
 </script>
 
-<div class="ov" class:hidden={!open}>
-  <div class="win card glow">
-    <div class="bar">
-      <div class="dots"><i></i><i></i><i></i></div>
-      <span class="title">root@jbogaert:~# crontab -l --alle-machines</span>
-      <div class="right">
-        <span class="when">{data?.running ? 'scannen…' : data?.scanned_at ? `gescand ${rel(data.scanned_at, now)}` : 'nog niet gescand'}</span>
-        <button class="mini" disabled={data?.running} onclick={scan}>⟳ nu scannen</button>
-        <button class="mini x" onclick={onclose} aria-label="Cron sluiten">✕</button>
-      </div>
-    </div>
+<Window {open} title="crontab -l --alle-machines" label="Cron" {onclose}>
+  {#snippet actions()}
+    <span class="when">{data?.running ? 'scannen…' : data?.scanned_at ? `gescand ${rel(data.scanned_at, now)}` : 'nog niet gescand'}</span>
+    <button class="mini" disabled={data?.running} onclick={scan}>⟳ nu scannen</button>
+  {/snippet}
 
-    <div class="tabs">
-      {#each [['jobs', 'jobs'], ['agenda', 'agenda'], ['graph', 'verbanden'], ['live', 'live']] as [k, label]}
-        <button class="mini" class:on={tab === k} onclick={() => (tab = k)}>{label}</button>
-      {/each}
+  <Tabs items={TABS} bind:value={tab} pad>
+    {#snippet extra()}
       {#if data}
         <span class="sum">
           <b>{data.summary.jobs}</b> jobs
@@ -100,109 +95,105 @@
           {#if data.summary.monitored}<span class="m">· {data.summary.monitored} bewaakt</span>{/if}
         </span>
       {/if}
-    </div>
+    {/snippet}
+  </Tabs>
 
-    {#if error}<p class="err pad">{error}</p>{/if}
+  {#if error}<p class="err pad">{error}</p>{/if}
 
-    {#if tab === 'jobs'}
-      <div class="cols">
-        <aside>
-          <button class="hb" class:on={!target} onclick={() => (target = null)}><b>alle machines</b>
-            <small>{hosts.length} gescand</small></button>
-          {#each hosts as t (t.key)}
-            <button class="hb" class:on={target === t.key} class:ct={t.vmid != null} onclick={() => (target = target === t.key ? null : t.key)}>
-              <b>{t.vmid != null ? '└ ' : ''}{t.name}</b>
-              <small>
-                {t.counts.jobs} job{t.counts.jobs === 1 ? '' : 's'}{#if t.counts.system}&nbsp;· {t.counts.system} systeem{/if}
-                {#if t.counts.fout}&nbsp;·&nbsp;<span class="e">{t.counts.fout} mislukt</span>{/if}
-                {#if t.counts.gemist}&nbsp;·&nbsp;<span class="w">{t.counts.gemist} gemist</span>{/if}
-                {#if t.cluster}&nbsp;· cluster{/if}
-              </small>
-            </button>
+  {#if tab === 'jobs'}
+    <div class="cols">
+      <aside>
+        <button class="hb" class:on={!target} onclick={() => (target = null)}><b>alle machines</b>
+          <small>{hosts.length} gescand</small></button>
+        {#each hosts as t (t.key)}
+          <button class="hb" class:on={target === t.key} class:ct={t.vmid != null} onclick={() => (target = target === t.key ? null : t.key)}>
+            <b>{t.vmid != null ? '└ ' : ''}{t.name}</b>
+            <small>
+              {t.counts.jobs} job{t.counts.jobs === 1 ? '' : 's'}{#if t.counts.system}&nbsp;· {t.counts.system} systeem{/if}
+              {#if t.counts.fout}&nbsp;·&nbsp;<span class="e">{t.counts.fout} mislukt</span>{/if}
+              {#if t.counts.gemist}&nbsp;·&nbsp;<span class="w">{t.counts.gemist} gemist</span>{/if}
+              {#if t.cluster}&nbsp;· cluster{/if}
+            </small>
+          </button>
+        {/each}
+        {#if broken.length}
+          <span class="lbl">niet gescand</span>
+          {#each broken as t (t.key)}
+            <div class="bad" title={t.error}><b>{t.name}</b><small>{t.error}</small></div>
           {/each}
-          {#if broken.length}
-            <span class="lbl">niet gescand</span>
-            {#each broken as t (t.key)}
-              <div class="bad" title={t.error}><b>{t.name}</b><small>{t.error}</small></div>
+        {/if}
+        {#if data?.pending?.length}
+          <span class="lbl">nog geen hostsleutel</span>
+          <p class="hint tiny">{data.pending.length} host{data.pending.length === 1 ? '' : 's'} nog nooit geopend in de terminal:
+            {data.pending.slice(0, 8).map((p) => p.name).join(', ')}{data.pending.length > 8 ? ', …' : ''}.
+            Containers op een node scant de node zelf al mee.</p>
+        {/if}
+        {#if data && !data.targets.length}
+          <p class="hint tiny">Nog niets gescand. Voeg je nodes toe in de terminal (⟳ pve), open ze één keer om de
+            hostsleutel te bevestigen en zet de standaard login (root). Daarna: ⟳ nu scannen.</p>
+        {/if}
+      </aside>
+      <section>
+        <div class="filters">
+          <select class="msel" bind:value={target} aria-label="Machine">
+            <option value={null}>alle machines</option>
+            {#each hosts as t (t.key)}<option value={t.key}>{t.name}</option>{/each}
+          </select>
+          <input class="q" bind:value={q} placeholder="zoeken: naam, commando, machine, doel…" />
+          {#each [['', 'alles'], ['probleem', 'problemen'], ['bewaakt', 'bewaakt'], ['systeem', 'systeem'], ['weg', 'verdwenen']] as [k, label]}
+            <button class="mini" class:on={filter === k} onclick={() => (filter = k)}>{label}</button>
+          {/each}
+          <label class="chk"><input type="checkbox" bind:checked={system} /> systeemjobs tonen</label>
+        </div>
+        <div class="list">
+          {#each groups as [key, g] (key)}
+            <span class="gh">{g.name}</span>
+            {#each g.items as j (j.id)}
+              <button class="job" class:off={!j.enabled} onclick={() => (detail = j.id)}>
+                <i class="dot s-{j.last_status || 'none'}" title={STATUS[j.last_status] || 'nog niet gelopen'}></i>
+                <span class="nm">
+                  <b>{j.name}</b>
+                  <span class="k">{KIND[j.kind] || j.kind}</span>
+                  {#if j.monitored}<span class="tag">bewaakt</span>{/if}
+                  {#if j.muted}<span class="tag dim" title="Geen meldingen">stil</span>{/if}
+                  {#if !j.enabled}<span class="tag dim">uit</span>{/if}
+                  {#if j.system}<span class="tag dim">systeem</span>{/if}
+                  <code>{j.command}</code>
+                </span>
+                <span class="sch"><span>{j.when}</span><small>{j.next_run_at ? `volgende ${rel(j.next_run_at, now)}` : ''}</small></span>
+                <span class="last">
+                  <span class="s-{j.last_status || 'none'}" title={STATUS_HINT[j.last_status] || ''}>{STATUS[j.last_status] || '—'}</span>
+                  <small>{j.last_run_at ? rel(j.last_run_at, now) : ''}{j.last_duration ? ` · ${dur(j.last_duration)}` : ''}{j.runs_24h > 1 ? ` · ${j.runs_24h}× / 24 u` : ''}</small>
+                </span>
+                <span class="strip" aria-hidden="true">
+                  {#each j.recent as r}<i class="s-{r.s}" title="{full(r.t)} · {STATUS[r.s] || r.s}{r.d ? ` · ${dur(r.d)}` : ''}"></i>{/each}
+                </span>
+                <span class="tg">
+                  {#each j.targets.slice(0, 3) as t}<span class="to" title="{t.via}">{t.dir === 'in' ? '←' : '→'} {t.label}</span>{/each}
+                </span>
+              </button>
             {/each}
-          {/if}
-          {#if data?.pending?.length}
-            <span class="lbl">nog geen hostsleutel</span>
-            <p class="hint tiny">{data.pending.length} host{data.pending.length === 1 ? '' : 's'} nog nooit geopend in de terminal:
-              {data.pending.slice(0, 8).map((p) => p.name).join(', ')}{data.pending.length > 8 ? ', …' : ''}.
-              Containers op een node scant de node zelf al mee.</p>
-          {/if}
-          {#if data && !data.targets.length}
-            <p class="hint tiny">Nog niets gescand. Voeg je nodes toe in de terminal (⟳ pve), open ze één keer om de
-              hostsleutel te bevestigen en zet de standaard login (root). Daarna: ⟳ nu scannen.</p>
-          {/if}
-        </aside>
-        <section>
-          <div class="filters">
-            <select class="msel" bind:value={target} aria-label="Machine">
-              <option value={null}>alle machines</option>
-              {#each hosts as t (t.key)}<option value={t.key}>{t.name}</option>{/each}
-            </select>
-            <input class="q" bind:value={q} placeholder="zoeken: naam, commando, machine, doel…" />
-            {#each [['', 'alles'], ['probleem', 'problemen'], ['bewaakt', 'bewaakt'], ['systeem', 'systeem'], ['weg', 'verdwenen']] as [k, label]}
-              <button class="mini" class:on={filter === k} onclick={() => (filter = k)}>{label}</button>
-            {/each}
-            <label class="chk"><input type="checkbox" bind:checked={system} /> systeemjobs tonen</label>
-          </div>
-          <div class="list">
-            {#each groups as [key, g] (key)}
-              <span class="gh">{g.name}</span>
-              {#each g.items as j (j.id)}
-                <button class="job" class:off={!j.enabled} onclick={() => (detail = j.id)}>
-                  <i class="dot s-{j.last_status || 'none'}" title={STATUS[j.last_status] || 'nog niet gelopen'}></i>
-                  <span class="nm">
-                    <b>{j.name}</b>
-                    <span class="k">{KIND[j.kind] || j.kind}</span>
-                    {#if j.monitored}<span class="tag">bewaakt</span>{/if}
-                    {#if j.muted}<span class="tag dim" title="Geen meldingen">stil</span>{/if}
-                    {#if !j.enabled}<span class="tag dim">uit</span>{/if}
-                    {#if j.system}<span class="tag dim">systeem</span>{/if}
-                    <code>{j.command}</code>
-                  </span>
-                  <span class="sch"><span>{j.when}</span><small>{j.next_run_at ? `volgende ${rel(j.next_run_at, now)}` : ''}</small></span>
-                  <span class="last">
-                    <span class="s-{j.last_status || 'none'}" title={STATUS_HINT[j.last_status] || ''}>{STATUS[j.last_status] || '—'}</span>
-                    <small>{j.last_run_at ? rel(j.last_run_at, now) : ''}{j.last_duration ? ` · ${dur(j.last_duration)}` : ''}{j.runs_24h > 1 ? ` · ${j.runs_24h}× / 24 u` : ''}</small>
-                  </span>
-                  <span class="strip" aria-hidden="true">
-                    {#each j.recent as r}<i class="s-{r.s}" title="{full(r.t)} · {STATUS[r.s] || r.s}{r.d ? ` · ${dur(r.d)}` : ''}"></i>{/each}
-                  </span>
-                  <span class="tg">
-                    {#each j.targets.slice(0, 3) as t}<span class="to" title="{t.via}">{t.dir === 'in' ? '←' : '→'} {t.label}</span>{/each}
-                  </span>
-                </button>
-              {/each}
-            {:else}
-              <p class="hint pad">{data ? 'Geen jobs gevonden.' : 'laden…'}</p>
-            {/each}
-          </div>
-        </section>
-      </div>
-    {:else if tab === 'agenda'}
-      <CronAgenda {open} onjob={(id) => (detail = id)} />
-    {:else if tab === 'graph'}
-      <CronGraph {open} onjob={(id) => (detail = id)} />
-    {:else}
-      {#if open}<CronLive targets={hosts.filter((t) => t.key.startsWith('ssh:'))} jobs={data?.jobs || []} />{/if}
-    {/if}
-  </div>
-</div>
+          {:else}
+            <p class="hint pad">{data ? 'Geen jobs gevonden.' : 'laden…'}</p>
+          {/each}
+        </div>
+      </section>
+    </div>
+  {:else if tab === 'agenda'}
+    <CronAgenda {open} onjob={(id) => (detail = id)} />
+  {:else if tab === 'graph'}
+    <CronGraph {open} onjob={(id) => (detail = id)} />
+  {:else}
+    {#if open}<CronLive targets={hosts.filter((t) => t.key.startsWith('ssh:'))} jobs={data?.jobs || []} />{/if}
+  {/if}
+</Window>
 
 {#if detail}
   <CronJob id={detail} onclose={() => (detail = null)} onchanged={load} {onterminal} />
 {/if}
 
 <style>
-  .ov { position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, .65); padding: 2vh 1vw; display: flex }
-  .ov.hidden { display: none }
-  .win { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden }
   .when { color: var(--dim); font-size: 12px }
-  .tabs { display: flex; gap: 6px; align-items: center; padding: 10px 12px 0; flex-wrap: wrap }
   .sum { margin-left: auto; font-size: 12.5px; color: var(--muted) }
   .sum b { color: var(--text-h); font-weight: 500 }
   .lnk { background: none; border: 0; padding: 0; font: inherit; cursor: pointer }
@@ -259,5 +250,4 @@
     .job { grid-template-columns: 12px 1fr auto; }
     .job .strip, .job .tg, .job .sch { display: none }
   }
-  @media (max-width: 600px) { .ov { padding: 0 } }
 </style>
