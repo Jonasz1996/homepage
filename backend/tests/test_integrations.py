@@ -386,3 +386,71 @@ def test_npm_bouwstenen():
     c = {"id": 3, "nice_name": "*.x", "domain_names": ["*.x"], "provider": "other", "expires_on": "2027-01-01",
          "meta": {"dns_provider_credentials": "geheim"}}
     assert "meta" not in npm_mod.public_cert(c)
+
+
+async def test_cloudflare_dns_alleen_naar_api_cloudflare():
+    from app.integrations import cloudflare as cf_mod, from_api
+    from app.integrations.base import IntegrationError
+    from app.models import ApiConnection
+    from app.security import encrypt_json
+
+    cf_mod._zones.clear()
+    zone = "a" * 32
+    hosts = []
+
+    def handler(req):
+        hosts.append(req.url.host)
+        assert req.headers["authorization"] == "Bearer cf-geheim-token"
+        p = req.url.path
+        if p == "/client/v4/zones":
+            return httpx.Response(200, json={"success": True, "result": [{"id": zone}]})
+        if p == f"/client/v4/zones/{zone}/dns_records" and req.method == "GET":
+            page = int(req.url.params["page"])
+            recs = [{"id": f"{page:032x}", "type": "CNAME", "name": f"r{page}.jbogaert.be", "content": "jbogaert.be",
+                     "proxied": True, "comment": None, "meta": {"x": 1}}]
+            return httpx.Response(200, json={"success": True, "result": recs, "result_info": {"page": page, "total_pages": 2}})
+        if req.method == "POST":
+            return httpx.Response(400, json={"success": False, "errors": [
+                {"code": 81053, "message": "An A, AAAA, or CNAME record with that host already exists. token=abc123secretvalue"}]})
+        return httpx.Response(404)
+
+    a = ApiConnection(id=1, name="Cloudflare DNS", kind="cloudflare", url="https://evil.example",
+                      config={"zone": "jbogaert.be"}, secrets=encrypt_json({"token": "cf-geheim-token"}), calls=[])
+    c = HttpClients(httpx.MockTransport(handler))
+    cf = from_api(a, {}, c)
+    assert isinstance(cf, cf_mod.CloudflareDns) and cf.base == cf_mod.API
+    recs = await cf.records()
+    assert [r["name"] for r in recs] == ["r1.jbogaert.be", "r2.jbogaert.be"] and "meta" not in recs[0]
+    assert set(hosts) == {"api.cloudflare.com"}
+    with pytest.raises(IntegrationError) as e:
+        await cf.send(*cf_mod.record_create_request(zone, {"type": "CNAME"}))
+    assert str(e.value).startswith("Cloudflare: An A, AAAA, or CNAME record") and "(81053)" in str(e.value)
+    assert "abc123secretvalue" not in str(e.value)
+    with pytest.raises(IntegrationError):
+        cf_mod.record_delete_request(zone, "../x")
+    with pytest.raises(IntegrationError):
+        cf_mod.tunnel_put_request("b" * 32, "geen-uuid", {})
+    # De tunnel-tegel (alleen lezen) volgt nog altijd een adres uit de instellingen.
+    assert cf_mod.CloudflareTunnel(None, {"url": "https://proxy.lan"}, {}, c.get(False)).base == "https://proxy.lan"
+    await c.aclose()
+
+
+def test_adguard_en_proxmox_bouwstenen():
+    from app.integrations.adguard import AdGuard
+    from app.integrations.base import IntegrationError
+    from app.integrations.proxmox import Proxmox
+
+    ag = AdGuard("http://192.168.0.2", {}, {}, None)
+    assert ag.rewrite_request(True, "x.jbogaert.be", "192.168.0.245") == (
+        "POST", "/control/rewrite/add", {"domain": "x.jbogaert.be", "answer": "192.168.0.245"})
+    assert ag.rewrite_request(False, "x.jbogaert.be", "192.168.0.245")[1] == "/control/rewrite/delete"
+    px = Proxmox("https://192.168.0.50:8006", {}, {}, None)
+    assert px.job_update_request("backup-1a2b", [105, 101, 123, 101]) == (
+        "PUT", "/api2/json/cluster/backup/backup-1a2b", {"vmid": "101,105,123"})
+    for bad in (("backup-1a2b", []), ("../x", [1]), ("", [1])):
+        with pytest.raises(IntegrationError):
+            px.job_update_request(*bad)
+    assert px.pool_update_request("backup", 123) == ("PUT", "/api2/json/pools", {"poolid": "backup", "vms": "123"})
+    assert px.pool_update_request("backup", 123, remove=True)[2] == {"poolid": "backup", "vms": "123", "delete": 1}
+    with pytest.raises(IntegrationError):
+        px.pool_update_request("a/b", 123)

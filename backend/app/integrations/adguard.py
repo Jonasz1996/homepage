@@ -27,6 +27,19 @@ class AdGuard(Integration):
     async def get(self, path: str):
         return await self.request("GET", "/control" + path, auth=self.auth()) or {}
 
+    async def rewrites(self) -> list[dict]:
+        """DNS-rewrites: [{domain, answer, enabled}]. Een uitgezette rewrite (enabled false) telt nergens mee."""
+        data = await self.request("GET", "/control/rewrite/list", auth=self.auth()) or []
+        return [{"domain": str(r.get("domain") or "").lower(), "answer": str(r.get("answer") or ""),
+                 "enabled": r.get("enabled") is not False} for r in data if isinstance(r, dict)]
+
+    def rewrite_request(self, add: bool, domain: str, answer: str) -> tuple[str, str, dict]:
+        """De call die een rewrite toevoegt of weghaalt: de proefmodus toont precies deze."""
+        return "POST", "/control/rewrite/add" if add else "/control/rewrite/delete", {"domain": domain, "answer": answer}
+
+    async def send(self, method: str, path: str, body: dict | None = None):
+        return await self.request(method, path, auth=self.auth(), json=body)
+
     async def summary(self) -> list[dict]:
         stats = await self.get("/stats")
         status = await self.get("/status")
