@@ -185,6 +185,31 @@ class CheckResult(Base):
     maintenance: Mapped[bool | None] = mapped_column(Boolean, default=False, server_default=sa_false())
 
 
+class CheckHourly(Base):
+    """De checks van één service in één uur, opgeteld (monitoring/rollup.py). Losse checks blijven 90 dagen, dit
+    400 dagen: de grafiek en de uptime over 7 dagen tot een jaar en het weekrapport lezen de hele uren hier. Op
+    PostgreSQL met TimescaleDB is dit een hypertable."""
+
+    __tablename__ = "check_hourly"
+
+    service_id: Mapped[int] = mapped_column(ForeignKey("services.id", ondelete="CASCADE"), primary_key=True)
+    # Begin van het uur (UTC).
+    hour: Mapped[datetime] = mapped_column(primary_key=True, index=True)
+    # Checks buiten onderhoud, en hoeveel daarvan gelukt: de uptime.
+    checks: Mapped[int] = mapped_column(Integer, default=0)
+    ok: Mapped[int] = mapped_column(Integer, default=0)
+    # Latency van de checks buiten onderhoud (het weekrapport) en apart die tijdens onderhoud (de grafiek telt
+    # beide mee). n: hoeveel checks een latency hadden.
+    latency_n: Mapped[int] = mapped_column(Integer, default=0)
+    latency_sum: Mapped[float | None]
+    latency_min: Mapped[float | None]
+    latency_max: Mapped[float | None]
+    maint_latency_n: Mapped[int] = mapped_column(Integer, default=0)
+    maint_latency_sum: Mapped[float | None]
+    maint_latency_min: Mapped[float | None]
+    maint_latency_max: Mapped[float | None]
+
+
 class ServiceState(Base):
     """Huidige toestand per service, bijgewerkt door de worker."""
 

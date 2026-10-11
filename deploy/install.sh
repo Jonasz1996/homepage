@@ -169,7 +169,7 @@ if ! dpkg -s "timescaledb-2-postgresql-$PG_VER" >/dev/null 2>&1; then
     systemctl restart postgresql
   else
     rm -f /etc/apt/sources.list.d/timescaledb.list
-    warn "TimescaleDB kon niet geïnstalleerd worden. Alles werkt, alleen ruimt de worker oude metingen dan zelf op (90 dagen)."
+    warn "TimescaleDB kon niet geïnstalleerd worden. Alles werkt en blijft even lang bewaard (losse checks 90 dagen, per uur opgeteld 400 dagen, metingen 180 dagen); het dashboard ruimt dan zelf op, alleen zonder compressie: de database wordt groter."
   fi
 fi
 

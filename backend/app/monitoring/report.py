@@ -1,16 +1,18 @@
 """Weekrapport: uptime per service, traagste services, langste storing, back-ups, herstarts en updates.
 
-Wordt berekend uit de check-resultaten en de tijdlijn. Elke maandagochtend komt er een samenvatting in
-het meldingencentrum; het volledige rapport staat in het dashboard (history → weekrapport).
+Wordt berekend uit de check-resultaten (de hele uren uit de uurtotalen, zie rollup.py) en de tijdlijn. Elke
+maandagochtend komt er een samenvatting in het meldingencentrum; het volledige rapport staat in het dashboard
+(history → weekrapport).
 """
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import Integer, cast, func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..deps import notify
-from ..models import AppState, CheckResult, Event, Service, ServiceState
+from ..models import AppState, Event, Service, ServiceState
+from . import rollup
 from .capacity import storage_trends
 from .engine import _fmt_duration
 
@@ -25,17 +27,13 @@ def _aware(dt: datetime) -> datetime:
 async def build_report(db: AsyncSession, start: datetime, end: datetime) -> dict:
     services = {s.id: s for s in (await db.execute(select(Service))).scalars()}
 
-    # Uptime en snelheid per service (onderhoud telt niet mee).
-    stmt = (select(CheckResult.service_id, func.count(),
-                   func.sum(cast(CheckResult.ok, Integer)), func.avg(CheckResult.latency_ms), func.max(CheckResult.latency_ms))
-            .where(CheckResult.ts >= start, CheckResult.ts < end, CheckResult.maintenance.is_not(True))
-            .group_by(CheckResult.service_id))
+    # Uptime en snelheid per service (onderhoud telt niet mee, ook niet voor de snelheid).
     rows = []
     total = ok_total = 0
-    for sid, n, ok, avg, mx in (await db.execute(stmt)).all():
+    for (sid, _), t in (await rollup.totals(db, start, end)).items():
+        n, ok, avg, mx = t.checks, t.ok, t.avg, t.latency_max
         if sid not in services or not n:
             continue
-        ok = int(ok or 0)
         total += n
         ok_total += ok
         rows.append({"service_id": sid, "name": services[sid].name, "checks": n, "uptime": round(ok / n * 100, 3),

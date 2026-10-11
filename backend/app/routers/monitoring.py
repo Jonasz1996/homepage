@@ -4,19 +4,21 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import Integer, and_, case, cast, func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
 from ..deps import audit, current_session, current_user, notify, recent_auth
 from ..layout import record_revision
 from ..models import CheckResult, Group, Service, ServiceState, Session, User
-from ..monitoring import routes
+from ..monitoring import rollup, routes
 from ..monitoring.engine import active, down_after, reset_state
+from ..monitoring.rollup import NOT_MAINT
 
 router = APIRouter(prefix="/api", tags=["monitoring"])
 
-# range -> (lengte, bucketgrootte in seconden)
+# range -> (lengte, bucketgrootte in seconden). Vanaf 7 dagen zijn de tijdvakken hele uren: die komen uit de
+# uurtotalen (monitoring/rollup.py), alleen het lopende uur nog uit de losse checks.
 RANGES = {
     "1h": (timedelta(hours=1), 60),
     "24h": (timedelta(hours=24), 300),
@@ -31,20 +33,8 @@ def _aware(dt: datetime | None) -> datetime | None:
     return dt.replace(tzinfo=timezone.utc) if dt and dt.tzinfo is None else dt
 
 
-def _bucket(db: AsyncSession, seconds: int):
-    """Tijdvak-nummer per rij: epoch / bucketgrootte, afgerond naar beneden."""
-    if db.bind.dialect.name == "sqlite":
-        epoch = cast(func.strftime("%s", CheckResult.ts), Integer)
-        return cast(epoch / seconds, Integer)
-    return func.floor(func.extract("epoch", CheckResult.ts) / seconds)
-
-
 def _ok_count():
     return func.sum(case((CheckResult.ok, 1), else_=0))
-
-
-# Checks tijdens onderhoud tellen niet mee voor de uptime.
-NOT_MAINT = CheckResult.maintenance.is_not(True)
 
 
 # De uptime over 24 uur verandert nauwelijks per minuut, maar telt wel alle checks van een dag op. Het dashboard
@@ -142,6 +132,7 @@ async def all_status(user: User = Depends(current_user), db: AsyncSession = Depe
 
 
 # Uptime over 24 uur, 7 en 30 dagen en een jaar naast elkaar (zoals Kuma), per service vijf minuten onthouden.
+# 24 uur uit de losse checks, de rest met de uurtotalen.
 UPTIME_ALL = {"24h": timedelta(hours=24), "7d": timedelta(days=7), "30d": timedelta(days=30), "1y": timedelta(days=365)}
 _uptime_all_cache: dict[tuple[int, int], tuple[float, dict]] = {}
 
@@ -151,21 +142,38 @@ async def _uptime_all(db: AsyncSession, service_id: int, now: datetime) -> dict:
     hit = _uptime_all_cache.get(key)
     if hit and hit[0] > time.monotonic():
         return hit[1]
-    cols = []
-    for name, span in UPTIME_ALL.items():
-        recent = CheckResult.ts >= now - span
-        cols += [func.sum(case((and_(recent, CheckResult.ok, NOT_MAINT), 1), else_=0)),
-                 func.sum(case((and_(recent, NOT_MAINT), 1), else_=0))]
-    row = (await db.execute(select(*cols).where(CheckResult.service_id == service_id,
-                                                  CheckResult.ts >= now - UPTIME_ALL["1y"]))).one()
     out = {}
-    for i, name in enumerate(UPTIME_ALL):
-        ok, total = row[2 * i] or 0, row[2 * i + 1] or 0
-        out[name] = ok / total if total else None
+    for name, span in UPTIME_ALL.items():
+        per = await rollup.totals(db, now - span, service_id=service_id, hourly=name != "24h")
+        out[name] = per[(service_id, 0)].uptime if (service_id, 0) in per else None
     if len(_uptime_all_cache) > 1000:
         _uptime_all_cache.clear()
     _uptime_all_cache[key] = (time.monotonic() + 300, out)
     return out
+
+
+async def _series(db: AsyncSession, service_id: int, start: datetime, size: int) -> dict:
+    """Grafiek, uptime en verstoringen van start tot nu, per tijdvak van size seconden. De latency telt ook de
+    checks tijdens onderhoud mee, de uptime niet."""
+    per = await rollup.totals(db, start, size=size, service_id=service_id)
+    points, outages = [], []
+    total_ok = total = 0
+    for (_, b), tot in sorted(per.items()):
+        t = datetime.fromtimestamp(b * size, timezone.utc)
+        up = tot.uptime
+        points.append({"t": t, "avg": tot.chart_avg, "min": tot.chart_min, "max": tot.chart_max, "up": up})
+        total_ok += tot.ok
+        total += tot.checks
+        # Opeenvolgende tijdvakken met mislukte checks samenvoegen tot één verstoring.
+        if up is not None and up < 1:
+            end = t + timedelta(seconds=size)
+            if outages and outages[-1]["end"] >= t:
+                outages[-1]["end"] = end
+                outages[-1]["worst"] = min(outages[-1]["worst"], up)
+            else:
+                outages.append({"start": t, "end": end, "worst": up})
+    return {"uptime": total_ok / total if total else None, "checks": total, "points": points,
+            "outages": outages[::-1][:50]}
 
 
 @router.get("/services/{service_id}/history")
@@ -176,38 +184,7 @@ async def history(service_id: int, range: str = Query("24h", pattern="^(1h|24h|7
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Service niet gevonden")
     span, size = RANGES[range]
     now = datetime.now(timezone.utc)
-    bucket = _bucket(db, size).label("b")
-    rows = (await db.execute(
-        select(
-            bucket,
-            func.avg(CheckResult.latency_ms),
-            func.min(CheckResult.latency_ms),
-            func.max(CheckResult.latency_ms),
-            func.sum(case((and_(CheckResult.ok, NOT_MAINT), 1), else_=0)),
-            func.sum(case((NOT_MAINT, 1), else_=0)),
-        )
-        .where(CheckResult.service_id == service_id, CheckResult.ts >= now - span)
-        .group_by(bucket)
-        .order_by(bucket)
-    )).all()
-
-    points, outages = [], []
-    total_ok = total = 0
-    for b, avg, lo, hi, ok, n in rows:
-        t = datetime.fromtimestamp(int(b) * size, timezone.utc)
-        ok, n = ok or 0, n or 0
-        up = ok / n if n else None
-        points.append({"t": t, "avg": avg, "min": lo, "max": hi, "up": up})
-        total_ok += ok or 0
-        total += n
-        # Opeenvolgende tijdvakken met mislukte checks samenvoegen tot één verstoring.
-        if up is not None and up < 1:
-            end = t + timedelta(seconds=size)
-            if outages and outages[-1]["end"] >= t:
-                outages[-1]["end"] = end
-                outages[-1]["worst"] = min(outages[-1]["worst"], up)
-            else:
-                outages.append({"start": t, "end": end, "worst": up})
+    series = await _series(db, service_id, now - span, size)
 
     state = await db.get(ServiceState, service_id)
     last = (await db.execute(
@@ -218,11 +195,11 @@ async def history(service_id: int, range: str = Query("24h", pattern="^(1h|24h|7
         "bucket_seconds": size,
         # Gaat de check rechtstreeks naar de server achter NPM (zonder DNS), en zo niet, waarom niet.
         "route": routes.describe(svc.check, svc.url, await routes.load(db)),
-        "uptime": total_ok / total if total else None,
+        "uptime": series["uptime"],
         "uptime_all": await _uptime_all(db, service_id, now),
-        "checks": total,
-        "points": points,
-        "outages": outages[::-1][:50],
+        "checks": series["checks"],
+        "points": series["points"],
+        "outages": series["outages"],
         "state": {
             "status": state.status, "since": _aware(state.since), "latency_ms": state.latency_ms,
             "last_error": state.last_error, "last_check": _aware(state.last_check),
