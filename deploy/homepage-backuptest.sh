@@ -5,8 +5,8 @@
 # Zoals bij een echte ramp (LEESMIJ.txt bij de kopie buiten de container): lege database, met TimescaleDB eerst
 # timescaledb_pre_restore(), dan pg_restore, dan timescaledb_post_restore(). Daarna: geen fouten van pg_restore (zoals
 # homepage-herstelfouten ze telt), alembic_version is er, er is een gebruiker, en elke tabel is te tellen.
-# Het resultaat komt in $BK/backuptest (ok=1, 0 of overgeslagen), wat pg_restore schreef in $BK/backuptest.log. De
-# worker leest het en toont het in hw → homepage zelf, en onder ! als het mislukt. Het script zelf eindigt altijd met 0:
+# Het resultaat komt in $BK/backuptest (ok=1, 0 of overgeslagen), wat pg_restore schreef in $BK/backuptest.log (alleen
+# als pg_restore deze keer liep: dan staat log=1 in het resultaat). De worker leest het en toont het in hw → homepage zelf, en onder ! als het mislukt. Het script zelf eindigt altijd met 0:
 # de dienst hoeft niet op "failed" te staan voor iets wat het dashboard al meldt.
 # Om te testen: BACKUP_DIR, BACKUPTEST_DB, BACKUPTEST_MAX_PCT, BACKUPTEST_TIMEOUT, BACKUPTEST_DF_PATH, HERSTELFOUTEN en
 # de gewone PostgreSQL-variabelen (PGDATABASE, PGHOST, PGPORT).
@@ -36,7 +36,7 @@ esac
 
 START=$(date +%s)
 AT=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
-DUMP="" ALEMBIC="" TABELLEN="" TSV="" PGV=""
+DUMP="" ALEMBIC="" TABELLEN="" TSV="" PGV="" LOGGED=""
 
 q() { psql -XAtq -v ON_ERROR_STOP=1 "$@"; }
 # Hoeveel seconden er nog over zijn (minstens 1).
@@ -69,6 +69,7 @@ klaar() {
     echo "tabellen=$TABELLEN"
     echo "timescaledb=$TSV"
     echo "postgresql=$PGV"
+    echo "log=$LOGGED"
   } > "$OUT.tmp" && mv "$OUT.tmp" "$OUT"
   exit 0
 }
@@ -76,8 +77,10 @@ trap 'dropdb --if-exists --force "$TEST" 2>/dev/null' EXIT
 # Gestopt (systemctl stop, of de tijdslimiet van de dienst): toch opruimen en zeggen wat er gebeurde.
 trap 'klaar 0 "afgebroken"' INT TERM HUP
 
-# Van een vorige test die halverwege stopte.
+# Van een vorige test die halverwege stopte. Het log van de vorige keer ook weg: mislukt deze test vóór pg_restore,
+# dan wijst de melding niet naar wat pg_restore een maand geleden schreef.
 dropdb --if-exists --force "$TEST" 2>/dev/null
+rm -f "$LOG"
 
 D=$(find "$BK" -maxdepth 1 -name 'homepage-????-??-??.dump' | sort -r | head -1)
 [ -n "$D" ] || klaar overgeslagen "nog geen nachtelijke dump in $BK"
@@ -118,6 +121,7 @@ if pg_restore -l "$D" 2>/dev/null | grep -q 'EXTENSION.*timescaledb'; then
     klaar 0 "TimescaleDB klaarzetten mislukt: $e"
   fi
 fi
+LOGGED=1
 timeout "$(left)" pg_restore -d "$TEST" "$D" 2> "$LOG"
 rc=$?
 [ "$rc" -ne 124 ] || klaar 0 "terugzetten $(te_lang)"

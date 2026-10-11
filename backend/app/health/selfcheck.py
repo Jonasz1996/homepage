@@ -52,6 +52,7 @@ MIN_PASSPHRASE = 12
 # Het resultaat van de maandelijkse test van de back-up (deploy/homepage-backuptest.sh schrijft het in de map met
 # back-ups). Is de laatste geslaagde test ouder dan RESTORE_STALE, dan loopt de timer niet (of is er nog geen).
 RESTORE_FILE = "backuptest"
+RESTORE_LOG = "backuptest.log"
 RESTORE_STALE = timedelta(days=40)
 RESTORE_RUN = "systemctl start homepage-backuptest"
 RESTORE_STATUS = {"1": "ok", "0": "fout", "overgeslagen": "overgeslagen"}
@@ -203,7 +204,9 @@ def read_restore(folder: Path) -> dict | None:
     return {"at": at, "dump": v.get("dump", "")[:100] or None, "status": RESTORE_STATUS.get(v.get("ok", ""), "fout"),
             "why": v.get("why", "")[:300] or None, "seconds": int(secs) if secs.isdigit() else None,
             "alembic": v.get("alembic", "")[:32] or None, "tables": tables,
-            "timescaledb": v.get("timescaledb", "")[:20] or None, "postgresql": v.get("postgresql", "")[:20] or None}
+            "timescaledb": v.get("timescaledb", "")[:20] or None, "postgresql": v.get("postgresql", "")[:20] or None,
+            # pg_restore liep deze keer: dan staat wat het schreef in backuptest.log.
+            "log": v.get("log") == "1"}
 
 
 def restore_state(found: dict | None, prev: dict, now: datetime) -> dict:
@@ -402,8 +405,9 @@ async def run_selfcheck(db: AsyncSession, offsite_on: bool) -> dict:
     restore = restore_state(read_restore(s.backup_dir), prev.get("restore") or {}, now)
     if restore["status"] == "fout" and alerts.get("restore") != restore["at"]:
         notify(db, "Back-up van de homepage lukt niet terug te zetten",
-               f"{restore['dump'] or 'De nieuwste dump'}: {restore['why'] or 'onbekende fout'}\n"
-               f"Wat pg_restore schreef: {s.backup_dir / 'backuptest.log'}. Opnieuw proberen: {RESTORE_RUN}",
+               f"{restore['dump'] or 'De nieuwste dump'}: {restore['why'] or 'onbekende fout'}\n" +
+               (f"Wat pg_restore schreef: {s.backup_dir / RESTORE_LOG}. " if restore.get("log") else "") +
+               f"Opnieuw proberen: {RESTORE_RUN}",
                level="err", source="homepage")
         alerts["restore"] = restore["at"]
     elif restore["status"] == "ok" and alerts.get("restore"):

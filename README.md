@@ -295,9 +295,10 @@ Later, deel 3 (Authentik en gsm):
     nieuwste dump echt terug in een tijdelijke database `homepage_backuptest`, kijkt of `alembic_version` en je
     account erin zitten, telt de rijen per tabel en gooit de database daarna altijd weg. Hij slaat over als de schijf
     daardoor boven 70% zou komen, en stopt na een uur. Het resultaat staat in hw → homepage zelf (met de tabellen),
-    in `/var/backups/homepage/backuptest` en `backuptest.log`; mislukt het, dan een melding en een rood punt in
-    **!**, en een oranje punt als er 40 dagen geen geslaagde test was. Meteen testen: `systemctl start
-    homepage-backuptest`
+    in `/var/backups/homepage/backuptest` en, als pg_restore liep, `backuptest.log`; mislukt het, dan een melding
+    en een rood punt in **!**, en een oranje punt als er 40 dagen geen geslaagde test was. Viel de container uit
+    tijdens de test, dan gooit de back-up van de nacht erna de achtergebleven testdatabase weg. Meteen testen:
+    `systemctl start homepage-backuptest`
   - **schijfbewaker**: elke 10 minuten kijkt de worker hoe vol de schijf van de container is. Vanaf 75% gooit hij de
     oudste logregels weg, dag per dag, tot de schijf weer onder 75% zit of alleen de laatste 3 dagen nog over zijn.
     Daarover één melding; helpt het niet, dan zegt een melding wat de schijf wel vult (de grootste tabellen en de

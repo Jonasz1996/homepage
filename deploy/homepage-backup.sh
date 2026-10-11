@@ -2,13 +2,20 @@
 # Dagelijkse back-up van de database. homepage-backup.service start dit om 03:30 als gebruiker postgres; het mag
 # alleen in /var/backups/homepage schrijven. De logregels gaan niet mee: ze zijn het grootste deel van de database
 # en na het terugzetten heb je ze niet nodig (de tabel log_entries is er wel, leeg). De 5 nieuwste dumps blijven.
-# Om te testen: BACKUP_DIR en de gewone PostgreSQL-variabelen (PGDATABASE, PGHOST, PGPORT).
+# Om te testen: BACKUP_DIR, BACKUPTEST_DB en de gewone PostgreSQL-variabelen (PGDATABASE, PGHOST, PGPORT).
 set -eu
 
 BK=${BACKUP_DIR:-/var/backups/homepage}
 KEEP=5
 export PGDATABASE="${PGDATABASE:-homepage}"
 F="$BK/homepage-$(date +%F).dump"
+
+# Een testdatabase van de maandelijkse test die bleef staan (de container viel uit tijdens de test): weg, anders
+# neemt hij tot de volgende test plaats in. Alleen als systemd zegt dat de test nu niet loopt.
+T=${BACKUPTEST_DB:-${PGDATABASE}_backuptest}
+case "$(systemctl is-active homepage-backuptest 2>/dev/null)" in
+  inactive|failed) dropdb --if-exists --force "$T" 2>/dev/null || true ;;
+esac
 
 set -- --exclude-table-data=public.log_entries
 # Met TimescaleDB staat de inhoud van log_entries in de chunks van de hypertable, en na compressie in de chunks van

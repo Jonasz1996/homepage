@@ -418,8 +418,9 @@ def _restore(r: dict, now: datetime, fix: dict) -> list[dict]:
     niet gelukt (de timer loopt niet, of de test was er nog nooit)."""
     if r.get("status") == "fout":
         return [item("selfrestore", "err", "homepage", "De back-up van het dashboard lukt niet terug te zetten",
-                     f"{r.get('dump') or 'De nieuwste dump'}: {r.get('why') or 'onbekende fout'}. Wat pg_restore "
-                     f"schreef, staat in backuptest.log bij de back-ups. Opnieuw proberen: {sc.RESTORE_RUN}.", fix,
+                     f"{r.get('dump') or 'De nieuwste dump'}: {r.get('why') or 'onbekende fout'}. " +
+                     (f"Wat pg_restore schreef, staat in {sc.RESTORE_LOG} bij de back-ups. " if r.get("log") else "") +
+                     f"Opnieuw proberen: {sc.RESTORE_RUN}.", fix,
                      sig=r.get("at"), since=r.get("at"))]
     since = r.get("last_ok") or r.get("missing_since")
     days = (now - _aware(datetime.fromisoformat(since))).days if since else 0

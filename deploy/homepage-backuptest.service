@@ -12,6 +12,9 @@ UMask=0027
 # een uur; dit is het vangnet daarboven.
 ExecStart=/usr/local/sbin/homepage-backuptest
 TimeoutStartSec=75min
+# Ook na een harde stop (systemctl kill -s KILL): de testdatabase niet laten staan. Na een crash of stroomuitval ruimt
+# de nachtelijke back-up hem op (homepage-backup.sh).
+ExecStopPost=-/usr/bin/dropdb --if-exists --force homepage_backuptest
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

@@ -211,7 +211,13 @@ async def test_back_up_test_mislukt_netjes(tmp_path):
         dump.write_bytes(good[: len(good) * 2 // 3])
         r = _run("homepage-backuptest.sh", env)
         assert r["status"] == "fout" and r["why"].startswith("pg_restore: "), r
+        assert r["log"] is True and (bk / "backuptest.log").read_text()
         assert scratch not in await _databases(url)
+
+        # Mislukt vóór pg_restore (PostgreSQL niet bereikbaar): het log van de vorige keer is weg, log=0.
+        r = _run("homepage-backuptest.sh", {**env, "PGPORT": "1"})
+        assert r["status"] == "fout" and "PostgreSQL niet bereikbaar" in r["why"], r
+        assert r["log"] is False and not (bk / "backuptest.log").exists()
 
         # Duurt het te lang (hier een pg_restore die blijft hangen): afgebroken na BACKUPTEST_TIMEOUT, weer opgeruimd.
         dump.write_bytes(good)
@@ -232,3 +238,32 @@ async def test_back_up_test_mislukt_netjes(tmp_path):
         r = _run("homepage-backuptest.sh", env)
         assert r["status"] == "ok", (r, (bk / "backuptest.log").read_text())
         assert scratch not in await _databases(url)
+
+
+@pg
+async def test_nachtelijke_back_up_ruimt_een_achtergebleven_testdatabase_op(tmp_path):
+    """Viel de container uit tijdens de maandelijkse test, dan blijft de testdatabase staan. De back-up van de nacht
+    erna gooit hem weg, maar alleen als systemd zegt dat de test niet loopt."""
+    async with aparte_database("bron3") as url:
+        alembic(url, "upgrade", "head")
+        env = await _env(tmp_path / "bk", url)
+        scratch = f"{url.database}_backuptest"
+        fake = tmp_path / "bin"
+        fake.mkdir()
+        (fake / "systemctl").write_text('#!/bin/sh\n[ "$*" = "is-active homepage-backuptest" ] && echo "$TEST_STATE"\n')
+        (fake / "systemctl").chmod(0o755)
+        env = {**env, "PATH": f"{fake}:{env['PATH']}"}
+        admin = create_async_engine(TEST_DB, isolation_level="AUTOCOMMIT")
+        async with admin.connect() as conn:
+            await conn.execute(text(f'CREATE DATABASE "{scratch}"'))
+        await admin.dispose()
+
+        # De test loopt nu: blijven staan.
+        _run("homepage-backup.sh", {**env, "TEST_STATE": "activating"})
+        assert scratch in await _databases(url)
+        # De test loopt niet: weg, en de back-up zelf lukt gewoon.
+        for f in (tmp_path / "bk").glob("homepage-*.dump"):
+            f.unlink()
+        _run("homepage-backup.sh", {**env, "TEST_STATE": "inactive"})
+        assert scratch not in await _databases(url)
+        assert next((tmp_path / "bk").glob("homepage-*.dump"), None) is not None

@@ -410,18 +410,18 @@ async def test_selfcheck_test_van_de_back_up(authed, tmp_path, monkeypatch):
     assert r["status"] is None and r["missing_since"]
     assert (await run())["missing_since"] == r["missing_since"]
 
-    def result(days_ago: int, ok: str, why: str = "") -> str:
+    def result(days_ago: int, ok: str, why: str = "", log: str = "1") -> str:
         at = (now - timedelta(days=days_ago)).isoformat()
         (tmp_path / sc.RESTORE_FILE).write_text(
             f"at={at}\ndump=homepage-2026-10-01.dump\nok={ok}\nwhy={why}\nseconden=37\nalembic=0023\n"
             "tabellen=alembic_version:1,check_results:52000,log_entries:0,services:42,users:1\n"
-            "timescaledb=2.17.2\npostgresql=16.15\n")
+            f"timescaledb=2.17.2\npostgresql=16.15\nlog={log}\n")
         return at
 
     good = result(30, "1")
     r = await run()
     assert r == {"at": good, "dump": "homepage-2026-10-01.dump", "status": "ok", "why": None, "seconds": 37,
-                 "alembic": "0023", "timescaledb": "2.17.2", "postgresql": "16.15", "last_ok": good,
+                 "alembic": "0023", "timescaledb": "2.17.2", "postgresql": "16.15", "last_ok": good, "log": True,
                  "tables": {"alembic_version": 1, "check_results": 52000, "log_entries": 0, "services": 42, "users": 1}}
     assert "terugzetten mislukt" not in (await authed.get("/api/health/summary")).json()["problems"]
 
@@ -435,9 +435,19 @@ async def test_selfcheck_test_van_de_back_up(authed, tmp_path, monkeypatch):
     note = (await db.execute(select(Notification).where(
         Notification.title == "Back-up van de homepage lukt niet terug te zetten"))).scalar_one()
     assert note.level == "err" and "COPY failed" in note.body and "systemctl start homepage-backuptest" in note.body
+    assert f"Wat pg_restore schreef: {tmp_path / 'backuptest.log'}." in note.body
     assert "terugzetten mislukt" in (await authed.get("/api/health/summary")).json()["problems"]
     items = {i["key"]: i for i in (await authed.get("/api/attention")).json()["items"]}
-    assert items["selfrestore"]["level"] == "err"
+    assert items["selfrestore"]["level"] == "err" and "backuptest.log" in items["selfrestore"]["text"]
+    # Mislukt vóór pg_restore (PostgreSQL niet bereikbaar): geen verwijzing naar een log van een vorige keer.
+    early = result(0, "0", "PostgreSQL niet bereikbaar: connection refused", log="")
+    assert (await run())["log"] is False
+    note = (await db.execute(select(Notification).where(
+        Notification.title == "Back-up van de homepage lukt niet terug te zetten").order_by(Notification.id.desc())
+    )).scalars().first()
+    assert "niet bereikbaar" in note.body and "backuptest.log" not in note.body
+    items = {i["key"]: i for i in (await authed.get("/api/attention")).json()["items"]}
+    assert items["selfrestore"]["since"] == early and "backuptest.log" not in items["selfrestore"]["text"]
     # De volgende maand weer gelukt: op de tijdlijn, en geen punt meer.
     result(0, "1")
     assert (await run())["status"] == "ok"
