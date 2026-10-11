@@ -15,7 +15,8 @@ from .health import domains as dom, scan as hw, security, selfcheck as sc, snaps
 from .integrations import REGISTRY
 from .integrations.zabbix import RED_FROM
 from .models import AppState, CronJob, Device, MaintenanceWindow, Service, ServiceState, UpdateRun
-from .monitoring import cluster, coverage, devices, planned, restoretest, rollup, updates as upd, zabbix as zbx
+from .monitoring import (cluster, coverage, devices, exposure as expo, planned, restoretest, rollup, updates as upd,
+                         zabbix as zbx)
 from .monitoring import buitencheck as bc
 from .monitoring.engine import KEEP_CHECKS_DAYS, MASS_KEY, active
 from .syslog import server as rxs
@@ -24,7 +25,7 @@ ACK_KEY = "attention_ack"
 RANK = {"err": 0, "warn": 1, "info": 2}
 # Bij gelijke ernst: wat het meeste stuk kan maken eerst.
 AREAS = ("services", "checks", "back-ups", "cluster", "hardware", "opslag", "netwerk", "homepage", "zabbix", "cron", "updates",
-         "certificaten", "domeinen", "integraties", "beveiliging", "apparaten", "snapshots", "onderhoud")
+         "certificaten", "domeinen", "integraties", "publiek", "beveiliging", "apparaten", "snapshots", "onderhoud")
 CERT_DAYS = 14
 MAX_PER_AREA = 8
 UPDATE_RUN_DAYS = 7
@@ -652,8 +653,49 @@ def integrations(errors: dict[int, str], ctx: dict) -> list[dict]:
     return _cap(out, "integraties", "Nog {n} tegels waarvan de API een fout geeft", {"window": "api"})
 
 
+async def public_names(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
+    """Netwerk › publiek: namen die van buitenaf open staan, records die over te nemen zijn, wildcards en records
+    zonder host. Leest alleen de samenvatting die de ronde (elk uur) bewaart: geen API's, geen markeringen."""
+    s = await _state(db, expo.SUMMARY_KEY)
+    if not s:
+        return []
+    fix = {"window": "net", "tab": "publiek"}
+    red = []
+    for r in s.get("red") or []:
+        name, why = r.get("name") or "?", r.get("why") or ""
+        if r.get("state") == "overname":
+            red.append(item(f"pub:overname:{name}", "err", "publiek", f"{name}: DNS-record kan overgenomen worden", why,
+                            fix, sig=r.get("sig")))
+        else:
+            red.append(item(f"pub:{name}", "err", "publiek", f"{name} staat open van buitenaf",
+                            f"{why} Bedoeld zo? Markeer het als bewust in Netwerk › publiek.", fix, sig=r.get("sig")))
+    out = _cap(red, "publiek", "Nog {n} namen open van buitenaf", fix, key="pub:open")
+    for w in s.get("wildcards") or []:
+        out.append(item(f"pub:wildcard:{w.get('name')}", "warn", "publiek", f"Wildcard {w.get('name')} in Cloudflare",
+                        w.get("why") or "", fix, sig=w.get("sig")))
+    n = int(s.get("wees_n") or 0)
+    if n:
+        names = list(s.get("wees") or [])
+        out.append(item("pub:wees", "warn", "publiek", f"{n} DNS-record{'s' if n != 1 else ''} zonder host",
+                        ", ".join(names[:5]) + (" …" if n > 5 else "") + ". Opruimen in Cloudflare, of markeren als bewust.",
+                        fix, sig=",".join(sorted(names))))
+    n = int(s.get("verborgen_n") or 0)
+    if n:
+        out.append(item("pub:verborgen", "warn", "publiek", f"{n} interne namen via je thuis-IP bereikbaar zonder login",
+                        s.get("origin_text") or "", fix, sig=n))
+    errors = s.get("errors") or []
+    if errors:
+        out.append(item("pub:fout", "warn", "publiek", "Niet na te gaan wat publiek is", str(errors[0]), fix,
+                        sig=str(errors[0])))
+    at = _aware(datetime.fromisoformat(s["at"])) if s.get("at") else None
+    if at and (now - at).total_seconds() > expo.STALE_AFTER:
+        out.append(item("pub:oud", "warn", "publiek", "Overzicht van wat publiek is, is oud",
+                        f"Laatst gelukt {ago(now - at)} geleden.", fix))
+    return out
+
+
 SOURCES = (services, backups, clusters, hardware, capacity, network, outside_checks, homepage, zabbix, cron_jobs, updates,
-           safety, maintenance)
+           safety, maintenance, public_names)
 
 
 async def collect(db: AsyncSession, errors: dict[int, str] | None = None) -> dict:

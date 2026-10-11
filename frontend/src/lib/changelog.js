@@ -15,6 +15,23 @@ export const CHANGELOG = [
     ],
   },
   {
+    nr: 36,
+    datum: '2026-10-11',
+    titel: 'Wat is publiek',
+    items: [
+      'Netwerk heeft een tabblad publiek: per naam onder jbogaert.be of iemand op internet erbij kan, en of er een login voor staat (Cloudflare Access, Authentik of een toegangslijst in NPM). Rood = van buitenaf bereikbaar zonder login ervoor. Het tabblad toont het aantal rode namen.',
+      'Het dashboard volgt elke weg naar binnen: de tunnel, de oranje en de grijze wolk, en rechtstreeks via je thuis-IP als poort 443 daar voor iedereen naar NPM gaat. Dan is Cloudflare Access te omzeilen, en dat zegt het ook. Een IP-lijst die je LAN toelaat, telt via de tunnel niet: cloudflared komt zelf van je LAN.',
+      'Ook records die iemand kan overnemen (naar een vroeger thuis-IP, of naar een naam die niet meer bestaat), records waar NPM niets mee doet en wildcards. Heeft een app zijn eigen login, of gebruik je een record voor je VPN, markeer het dan als bewust (met je 2FA-code en een reden).',
+      'Elk uur nagekeken. Een naam die nieuw open staat, geeft een melding, en ! toont de rode namen. Het dashboard leest alleen: het verandert niets in Cloudflare, NPM of OPNsense. Welke calls het doet, zie je met "welke calls?".',
+    ],
+    instellen: [
+      'Cloudflare → My Profile → API Tokens → het token van API-beheer (of van de tegel Cloudflare Tunnel) → Edit: voeg Zone → Zone → Read, Zone → DNS → Read en Account → Access: Apps and Policies → Read toe, met bij Zone Resources je zone jbogaert.be. Optioneel ook Zone → Zone Settings → Read. Krijg je een nieuw token, zet het dan in API-beheer.',
+      'NPM → Users → de gebruiker van het dashboard → Permissions: Item visibility All Items, en View op Proxy Hosts, Redirection Hosts, 404 Hosts, Access Lists en SSL Certificates. Bereikt cloudflared NPM met een Docker-naam (bv. http://npm:80), zet die naam dan bij de NPM-API in npm_names.',
+      'Zet de nachtelijke kopie van OPNsense aan (Beheer → Configuratiewijzigingen): zo weet het dashboard of poort 443 van je thuis-IP voor iedereen openstaat.',
+      'Open Infrastructuur → Netwerk → publiek en klik op vernieuwen. Lees eerst "hoe het binnenkomt", werk dan de rode namen af, ruim records die over te nemen zijn op en beslis over de wildcard.',
+    ],
+  },
+  {
     nr: 35,
     datum: '2026-10-11',
     titel: 'Eenvoudiger',

@@ -59,7 +59,7 @@ PACKAGES = ("fastapi", "starlette", "uvicorn", "pydantic", "sqlalchemy", "alembi
 # megabytes aan hosts of pakketten.
 BACKGROUND = ("containerlogs", "zabbix", "npm_routes", "cluster", "coverage", "config_last", "devices", "health",
               "snapshots", "domains", "selfcheck", "diskguard", "updates", "cron", "restoretest", "massastoring",
-              "update_auto_last", "check_hourly", "buitencheck_state")
+              "update_auto_last", "check_hourly", "buitencheck_state", "exposure_summary")
 BACKGROUND_PREFIX = ("net_gw:", "net_tunnel:", "pbs_problems:")
 # Nooit mee, ook niet verkort: daar staan geheimen in (of wie wanneer van waar keek).
 DENY = ("offsite_key", "webpush", "oidc", "ssh_defaults", "ssh_snippets", "ssh_pin", "attention_ack", "outside_seen",
@@ -355,6 +355,13 @@ def _buitencheck(v: dict) -> dict:
             "massa": {k: mass.get(k) for k in ("since", "failing", "total")} if mass else None,
             "groepen": [{"cause": str(c)[:40], "since": g.get("since"), "count": len(g.get("tiles") or [])}
                         for c, g in (v.get("groups") or {}).items() if isinstance(g, dict)]}
+def _exposure(v: dict) -> dict:
+    """Netwerk › publiek: tijdstippen, aantallen, ontbrekende rechten en fouten, zonder namen."""
+    counts = v.get("counts") if isinstance(v.get("counts"), dict) else {}
+    return {"at": v.get("at"), "checked_at": v.get("checked_at"), "never": v.get("never"),
+            "counts": {k: x for k, x in counts.items() if isinstance(x, int)},
+            "missing": [str(x) for x in v.get("missing") or []], "optional": [str(x) for x in v.get("optional") or []],
+            "origin": v.get("origin"), "errors": _errors(list(v.get("errors") or []))}
 
 
 def _pbs(v: dict) -> dict:
@@ -378,6 +385,8 @@ async def _achtergrond(db: AsyncSession) -> dict:
             out[st.key] = _pbs(v)
         elif st.key == "buitencheck_state":
             out[st.key] = _buitencheck(v)
+        elif st.key == "exposure_summary":
+            out[st.key] = _exposure(v)
         else:
             out[st.key] = brief(v)
     return out

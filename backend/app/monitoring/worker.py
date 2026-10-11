@@ -27,8 +27,8 @@ from .network import NETWORK_EVERY, PUBLIC_IP_EVERY, sample_power, watch_gateway
 from .report import weekly_notification
 from .updates import UPDATES_EVERY, run_updates
 from .upgrade import auto_updates, cleanup_snapshots, mark_interrupted
-from . import (buitencheck, cluster, configs, containerlogs, coverage, devices, healing, planned, restoretest, rollup,
-               routes, zabbix)
+from . import (buitencheck, cluster, configs, containerlogs, coverage, devices, exposure, healing, planned, restoretest,
+               rollup, routes, zabbix)
 from .watchers import watch_npm, watch_pbs
 
 log = logging.getLogger("homepage.worker")
@@ -344,6 +344,8 @@ class Worker:
         last_zabbix = start - zabbix.EVERY + 10
         # Meteen bij de start: daarna gaan de checks rechtstreeks (zonder DNS) naar wat NPM erachter heeft.
         last_routes = start - routes.REFRESH_EVERY + 5
+        # Wat publiek is (Netwerk › publiek): elk uur, de eerste keer 2,5 minuten na de start.
+        last_exposure = start - exposure.EVERY + 150
         # Uurtotalen pas na 2 minuten: eerst de push-signalen die tijdens de stilstand binnenkwamen (die krijgen het
         # tijdstip van toen), dan pas die uren optellen.
         last_rollup = start - rollup.ROLLUP_EVERY + 120
@@ -401,6 +403,9 @@ class Worker:
                     # Loopt de vorige ronde nog (een trage Worker), dan deze overslaan: de tegels met het oudste
                     # resultaat gaan de volgende keer, er valt er geen uit.
                     self.job("buitencheck", self.outside_round, quiet=True)
+                if time.monotonic() - last_exposure > exposure.EVERY:
+                    last_exposure = time.monotonic()
+                    self.job("exposure", lambda: self.step("blootstelling", lambda db: exposure.run_exposure(db, self.http)))
                 if time.monotonic() - last_lan > devices.DEVICES_EVERY:
                     last_lan = time.monotonic()
                     self.job("lan", self.lan)

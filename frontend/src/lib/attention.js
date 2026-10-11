@@ -11,6 +11,6 @@ export const FIX_LABEL = Object.fromEntries(NAMES.map((w) => [w, SPECIAL[w] || b
 export const AREA = {
   services: 'down', checks: 'check', 'back-ups': 'back-up', cluster: 'cluster', hardware: 'hardware', opslag: 'opslag', netwerk: 'netwerk',
   homepage: 'dashboard', zabbix: 'zabbix', cron: 'cron', updates: 'updates', certificaten: 'certificaat',
-  domeinen: 'domein', integraties: 'API', beveiliging: 'beveiliging', apparaten: 'apparaten', snapshots: 'snapshots',
+  domeinen: 'domein', integraties: 'API', publiek: 'publiek', beveiliging: 'beveiliging', apparaten: 'apparaten', snapshots: 'snapshots',
   onderhoud: 'onderhoud',
 }
