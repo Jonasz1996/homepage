@@ -59,6 +59,9 @@ TEMPLATES: dict[str, dict] = {
                     "hint": "Instelling account: je account-id. Token met Account → Cloudflare Tunnel → Read; voor Netwerk › "
                             "publiek ook Zone → Zone → Read, Zone → DNS → Read en Account → Access: Apps and Policies → "
                             "Read, met Zone Resources → je zone (README)."},
+    "cloudflare": {"label": "Cloudflare DNS", "category": "Netwerk", "kind": "cloudflare", "match": ["cloudflaredns"],
+                   "url": "https://api.cloudflare.com/client/v4",
+                   "hint": "Config: zone = jbogaert.be (account alleen bij een tunnel)."},
     # --- media -------------------------------------------------------------------
     "jellyfin": {"label": "Jellyfin / Emby", "category": "Media", "match": ["jellyfin", "emby"],
                  "auth": {"type": "header", "name": "X-Emby-Token"}, "secret": "API-sleutel (Dashboard → API-sleutels)",

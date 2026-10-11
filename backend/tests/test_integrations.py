@@ -285,3 +285,172 @@ async def test_errors_say_what_is_wrong():
             with pytest.raises(IntegrationError) as e:
                 await i.request("GET", path)
             assert text in str(e.value)
+
+
+async def test_eigen_timeout_en_foutdetail():
+    from app.integrations.base import Integration, IntegrationError
+
+    seen = []
+
+    def handler(req):
+        seen.append(req.extensions["timeout"])
+        if req.url.path == "/stuk":
+            return httpx.Response(400, json={"fout": "kapot"})
+        return httpx.Response(200, json={})
+
+    class Eigen(Integration):
+        def _error_detail(self, r):
+            return f"eigen: {r.json()['fout']}"
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+        i = Integration("https://x.jbogaert.be", {}, {}, c)
+        await i.request("GET", "/ok")
+        await i.request("GET", "/ok", timeout=120)
+        assert seen[0]["read"] == 8.0 and seen[1]["read"] == 120
+        with pytest.raises(IntegrationError, match="HTTP 400 op /stuk"):
+            await i.request("GET", "/stuk")
+        with pytest.raises(IntegrationError, match="eigen: kapot"):
+            await Eigen("https://x.jbogaert.be", {}, {}, c).request("GET", "/stuk")
+
+
+async def test_npm_schrijfgebruiker_alleen_voor_send():
+    from app.integrations import npm as npm_mod
+    from app.integrations.base import IntegrationError
+
+    npm_mod._tokens.clear()
+    logins, auths = [], []
+
+    def handler(req):
+        if req.url.path == "/api/tokens":
+            who = json.loads(req.content)["identity"]
+            logins.append(who)
+            return httpx.Response(200, json={"token": f"jwt-{who}"})
+        auths.append((req.method, req.url.path, req.headers["authorization"], req.extensions["timeout"]["read"]))
+        if req.url.path == "/api/nginx/proxy-hosts" and req.method == "POST":
+            return httpx.Response(400, json={"error": {"code": 400, "message": "kapot password=hunter22geheim"}})
+        return httpx.Response(200, json=[])
+
+    secrets = {"username": "lees@jbogaert.be", "password": "a", "action_username": "acties@jbogaert.be",
+               "action_password": "b"}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+        n = npm_mod.NginxProxyManager("http://192.168.0.245:81", {}, secrets, c)
+        assert n.split and n.user() == "lees@jbogaert.be" and n.user(True) == "acties@jbogaert.be"
+        # Eigen calls en "uitproberen" in API-beheer blijven op de leesgebruiker.
+        assert (await n.call_auth())["headers"]["Authorization"] == "Bearer jwt-lees@jbogaert.be"
+        assert (await n.write_auth())["headers"]["Authorization"] == "Bearer jwt-lees@jbogaert.be"
+        await n.proxy_hosts()
+        await n.proxy_hosts(write=True)
+        with pytest.raises(IntegrationError) as e:
+            await n.send("POST", "/nginx/proxy-hosts", {"x": 1}, timeout=120)
+        assert str(e.value).startswith("NPM: kapot") and "hunter22geheim" not in str(e.value)
+        assert logins == ["lees@jbogaert.be", "acties@jbogaert.be"]
+        assert auths[0][2] == "Bearer jwt-lees@jbogaert.be" and auths[1][2] == "Bearer jwt-acties@jbogaert.be"
+        assert auths[2][:3] == ("POST", "/api/nginx/proxy-hosts", "Bearer jwt-acties@jbogaert.be") and auths[2][3] == 120
+        # Zonder tweede gebruiker doet de ene alles, zoals vroeger.
+        one = npm_mod.NginxProxyManager("http://192.168.0.245:81", {}, {"username": "lees@jbogaert.be", "password": "a"}, c)
+        assert not one.split and one.user(True) == "lees@jbogaert.be"
+
+
+def test_npm_bouwstenen():
+    from app.integrations import npm as npm_mod
+    from app.integrations.base import IntegrationError
+
+    new = npm_mod.cert_create_request("x.jbogaert.be", (2, 13, 0), "a@b.be")
+    assert new == ("POST", "/nginx/certificates", {"provider": "letsencrypt", "domain_names": ["x.jbogaert.be"],
+                                                   "meta": {"dns_challenge": False}})
+    old = npm_mod.cert_create_request("x.jbogaert.be", (2, 12, 6), "a@b.be")[2]
+    assert old["meta"] == {"dns_challenge": False, "letsencrypt_email": "a@b.be", "letsencrypt_agree": True}
+    with pytest.raises(IntegrationError, match="NPM-versie onbekend"):
+        npm_mod.cert_create_request("x.jbogaert.be", None, "a@b.be")
+    assert npm_mod.host_delete_request("57") == ("DELETE", "/nginx/proxy-hosts/57", None)
+    with pytest.raises(ValueError):
+        npm_mod.host_get_request("../1")
+    assert npm_mod.nginx_failed({"meta": {"nginx_online": True}}) is None
+    assert npm_mod.nginx_failed({"meta": {}}) is None
+    err = npm_mod.nginx_failed({"meta": {"nginx_online": False, "nginx_err": "unknown directive token=abcdef123456"}})
+    assert err.startswith("NPM: nginx weigerde de configuratie: unknown directive") and "abcdef123456" not in err
+    lan = lambda *addrs, **kw: npm_mod.lan_only({"clients": [{"address": a, "directive": "allow"} for a in addrs], **kw})  # noqa: E731
+    assert lan("192.168.0.0/16")[0] and lan("10.0.0.0/8", "100.64.0.0/10")[0] and lan("100.100.1.2")[0]
+    assert lan("192.168.0.0/16", "0.0.0.0/0") == (False, "laat 0.0.0.0/0 toe")
+    assert lan("all") == (False, "laat all toe")
+    assert not lan("8.8.8.8")[0]
+    assert lan("192.168.0.0/16", satisfy_any=1, items=[{"username": "x"}]) == (
+        False, "wachtwoord volstaat van overal (satisfy any)")
+    assert not npm_mod.lan_only({"clients": []})[0]
+    me = {"roles": [], "permissions": {"visibility": "all", "proxy_hosts": "manage", "certificates": "view",
+                                       "access_lists": "view", "redirection_hosts": "view", "dead_hosts": "view"}}
+    assert npm_mod.can_write(me, need_cert=False)[0]
+    assert not npm_mod.can_write(me, need_cert=True)[0]
+    assert not npm_mod.can_write({"permissions": {**me["permissions"], "visibility": "user"}}, False)[0]
+    assert npm_mod.can_write({"roles": ["admin"]}, True)[0]
+    c = {"id": 3, "nice_name": "*.x", "domain_names": ["*.x"], "provider": "other", "expires_on": "2027-01-01",
+         "meta": {"dns_provider_credentials": "geheim"}}
+    assert "meta" not in npm_mod.public_cert(c)
+
+
+async def test_cloudflare_dns_alleen_naar_api_cloudflare():
+    from app.integrations import cloudflare as cf_mod, from_api
+    from app.integrations.base import IntegrationError
+    from app.models import ApiConnection
+    from app.security import encrypt_json
+
+    cf_mod._zones.clear()
+    zone = "a" * 32
+    hosts = []
+
+    def handler(req):
+        hosts.append(req.url.host)
+        assert req.headers["authorization"] == "Bearer cf-geheim-token"
+        p = req.url.path
+        if p == "/client/v4/zones":
+            return httpx.Response(200, json={"success": True, "result": [{"id": zone}]})
+        if p == f"/client/v4/zones/{zone}/dns_records" and req.method == "GET":
+            page = int(req.url.params["page"])
+            recs = [{"id": f"{page:032x}", "type": "CNAME", "name": f"r{page}.jbogaert.be", "content": "jbogaert.be",
+                     "proxied": True, "comment": None, "meta": {"x": 1}}]
+            return httpx.Response(200, json={"success": True, "result": recs, "result_info": {"page": page, "total_pages": 2}})
+        if req.method == "POST":
+            return httpx.Response(400, json={"success": False, "errors": [
+                {"code": 81053, "message": "An A, AAAA, or CNAME record with that host already exists. token=abc123secretvalue"}]})
+        return httpx.Response(404)
+
+    a = ApiConnection(id=1, name="Cloudflare DNS", kind="cloudflare", url="https://evil.example",
+                      config={"zone": "jbogaert.be"}, secrets=encrypt_json({"token": "cf-geheim-token"}), calls=[])
+    c = HttpClients(httpx.MockTransport(handler))
+    cf = from_api(a, {}, c)
+    assert isinstance(cf, cf_mod.CloudflareDns) and cf.base == cf_mod.API
+    recs = await cf.records()
+    assert [r["name"] for r in recs] == ["r1.jbogaert.be", "r2.jbogaert.be"] and "meta" not in recs[0]
+    assert set(hosts) == {"api.cloudflare.com"}
+    with pytest.raises(IntegrationError) as e:
+        await cf.send(*cf_mod.record_create_request(zone, {"type": "CNAME"}))
+    assert str(e.value).startswith("Cloudflare: An A, AAAA, or CNAME record") and "(81053)" in str(e.value)
+    assert "abc123secretvalue" not in str(e.value)
+    with pytest.raises(IntegrationError):
+        cf_mod.record_delete_request(zone, "../x")
+    with pytest.raises(IntegrationError):
+        cf_mod.tunnel_put_request("b" * 32, "geen-uuid", {})
+    # De tunnel-tegel (alleen lezen) volgt nog altijd een adres uit de instellingen.
+    assert cf_mod.CloudflareTunnel(None, {"url": "https://proxy.lan"}, {}, c.get(False)).base == "https://proxy.lan"
+    await c.aclose()
+
+
+def test_adguard_en_proxmox_bouwstenen():
+    from app.integrations.adguard import AdGuard
+    from app.integrations.base import IntegrationError
+    from app.integrations.proxmox import Proxmox
+
+    ag = AdGuard("http://192.168.0.2", {}, {}, None)
+    assert ag.rewrite_request(True, "x.jbogaert.be", "192.168.0.245") == (
+        "POST", "/control/rewrite/add", {"domain": "x.jbogaert.be", "answer": "192.168.0.245"})
+    assert ag.rewrite_request(False, "x.jbogaert.be", "192.168.0.245")[1] == "/control/rewrite/delete"
+    px = Proxmox("https://192.168.0.50:8006", {}, {}, None)
+    assert px.job_update_request("backup-1a2b", [105, 101, 123, 101]) == (
+        "PUT", "/api2/json/cluster/backup/backup-1a2b", {"vmid": "101,105,123"})
+    for bad in (("backup-1a2b", []), ("../x", [1]), ("", [1])):
+        with pytest.raises(IntegrationError):
+            px.job_update_request(*bad)
+    assert px.pool_update_request("backup", 123) == ("PUT", "/api2/json/pools", {"poolid": "backup", "vms": "123"})
+    assert px.pool_update_request("backup", 123, remove=True)[2] == {"poolid": "backup", "vms": "123", "delete": 1}
+    with pytest.raises(IntegrationError):
+        px.pool_update_request("a/b", 123)

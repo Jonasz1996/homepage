@@ -36,7 +36,11 @@
       case 'detail':
         return { service: m.service, groups: dash.groupOptions, onchanged: reload, onclose: close,
                  onterminal: (hostId) => dash.open('terminal', { hostId }),
-                 onedit: (svc) => dash.open('service', { service: svc }) }
+                 onedit: (svc) => dash.open('service', { service: svc }),
+                 oncleanup: (svc) => dash.open('nieuweservice', { tab: 'opruimen', service: svc }) }
+      case 'nieuweservice':
+        return { tab: m.tab, service: m.service, groups: dash.groupOptions, services: dash.services, onclose: close,
+                 ondone: () => { reload(); dash.refresh(['widgets', 'aandacht']) } }
       case 'service':
         return { service: m.service, groupId: m.groupId, groups: dash.groupOptions, services: dash.services, onclose: close,
                  onsaved: () => { reload(); setTimeout(() => dash.refresh(['widgets']), 300) } }

@@ -12,11 +12,12 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from . import nieuweservice as ns
 from .config import get_settings
 from .health import scan as hw, security
 from .integrations import IntegrationError, build
-from .models import (ApiConnection, AppState, CronJob, HealRule, LogEntry, PushMonitor, Service, ServiceState, SshHost, User,
-                     WebhookSource)
+from .models import (ApiConnection, AppState, CronJob, HealRule, LogEntry, PushMonitor, Service, ServiceState, SshHost,
+                     User, WebhookSource)
 from .monitoring import (cluster, configs, coverage, devices, exposure as expo, pbssync, restoretest, routes, upgrade,
                          watchdog, webpush, zabbix as zbx)
 from .monitoring import buitencheck as bc
@@ -643,6 +644,42 @@ async def safety(db: AsyncSession, cfg: dict) -> list[dict]:
     return out
 
 
+async def _first_secrets(db: AsyncSession, kind: str) -> dict | None:
+    """De geheimen van de API (of tegel zonder API) die een nieuwe service gebruikt, of None als er geen is."""
+    a = (await db.execute(select(ApiConnection).where(ApiConnection.kind == kind).order_by(ApiConnection.id)
+                          .limit(1))).scalar_one_or_none()
+    if a is None:
+        a = (await db.execute(select(Service).where(Service.type == kind, Service.api_id.is_(None))
+                              .order_by(Service.id).limit(1))).scalar_one_or_none()
+    if a is None:
+        return None
+    return decrypt_json(a.secrets) if a.secrets else {}
+
+
+async def nieuweservice_row(db: AsyncSession) -> dict:
+    """Een nieuwe service in één keer: NPM met een eigen schrijfgebruiker, Cloudflare DNS en AdGuard. Geen calls."""
+    title, fix = "Nieuwe service in één keer", {"window": "api"}
+    npm = await _first_secrets(db, "npm")
+    if npm is None:
+        return row("nieuweservice", "netwerk", title, "none", "Nog geen NPM-API: een nieuwe service in één keer kan niet.",
+                   ["API van type npm in API-beheer"], fix, optional=True)
+    todo = []
+    if not (npm.get("action_username") and npm.get("action_password")):
+        todo.append("Eén NPM-gebruiker voor alles: maak een tweede met Proxy Hosts en Certificates op Manage en Item "
+                    "Visibility op All Items (README → Nieuwe service)")
+    if await _first_secrets(db, "cloudflare") is None:
+        todo.append("Geen Cloudflare DNS-API: alleen diensten voor thuis")
+    if await _first_secrets(db, "adguard") is None:
+        todo.append("Namen voor thuis zet je zelf in je LAN-DNS")
+    last = next(iter(ns.runs_of(await _state(db, ns.STATE_KEY))), None)
+    if last and ns.effective(last)["status"] in ("gestopt", "onderbroken") and not last.get("undone_by"):
+        todo.append("De laatste run stopte halverwege: Beheer → Nieuwe service → geschiedenis")
+    if todo:
+        return row("nieuweservice", "netwerk", title, "half", "Werkt deels.", todo, fix, optional=True)
+    return row("nieuweservice", "netwerk", title, "ok", "NPM met een eigen schrijfgebruiker en Cloudflare DNS: klaar.",
+               fix=fix, optional=True)
+
+
 async def exposure_row(db: AsyncSession) -> dict:
     """Netwerk › publiek: ziet het dashboard welke namen publiek zijn, en mag het token alles lezen wat nodig is?"""
     title, fix = "Wat is publiek (Cloudflare en NPM)", {"window": "net", "tab": "publiek"}
@@ -700,6 +737,7 @@ async def run(db: AsyncSession, clients, results: dict[int, dict]) -> dict:
                      ["Tegel of API van type npm met je NPM-login: een eigen gebruiker die alle items ziet, met View op "
                       "Proxy Hosts, Redirection Hosts, 404 Hosts, Access Lists en SSL Certificates."],
                      "Proxy hosts, import en de nachtelijke kopie werken."),
+        await nieuweservice_row(db),
         _integration("cloudflared", "netwerk", "Cloudflare-tunnels", of("cloudflared"), results,
                      "Nog geen Cloudflare-tegel: de status van je tunnels zie je niet.",
                      ["Cloudflare API-token met Account → Cloudflare Tunnel → Read, plus je account-id (README). Voor "
