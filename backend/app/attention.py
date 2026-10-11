@@ -182,15 +182,16 @@ async def backups(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
                         {"window": "detail", "service_id": svc.id}, sig=",".join(sorted(probs))))
     rt = await _state(db, restoretest.STATE_KEY)
     last = (rt.get("history") or [None])[0]
+    # Het moment van die test zelf: last_at schuift ook op bij een proef en bij het aanzetten.
+    at = (last or {}).get("at") or rt.get("last_at")
     if last and not last.get("ok"):
         what = f"{last.get('name') or 'CT'} ({last.get('source_vmid') or '?'})"
         out.append(item("restoretest", "err", "back-ups", f"Hersteltest mislukt: {what}",
-                        f"Bij {last.get('step')}: {last.get('error')}", {"window": "restoretest"}, sig=rt.get("last_at"),
-                        since=rt.get("last_at")))
+                        f"Bij {last.get('step')}: {last.get('error')}", {"window": "restoretest"}, sig=at, since=at))
     if last and last.get("cleanup_error"):
         out.append(item("restoretest:opruimen", "warn", "back-ups", f"Test-CT {last.get('vmid')} niet opgeruimd",
                         f"{last['cleanup_error']}. Verwijder hem zelf in Proxmox.", {"window": "restoretest"},
-                        sig=rt.get("last_at")))
+                        sig=at))
     return out + await backup_coverage(db)
 
 

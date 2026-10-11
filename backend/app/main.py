@@ -7,11 +7,12 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from . import logring
 from .config import get_settings
 from .db import get_db, get_maker
 from .deps import COOKIE, csrf_guard, secure_cookie
 from .monitoring import watchdog
-from .routers import (apis, attention, auth, backups, capacity, configs, cron, heal, health, hooks, importexport, integrations, layout, logs, monitoring, network, notifications,
+from .routers import (apis, attention, auth, backups, capacity, configs, cron, diagnose, heal, health, hooks, importexport, integrations, layout, logs, monitoring, network, notifications,
                       netmap, npmroutes, oidc, outside, planning, restoretest, search, securitycheck, ssh, timeline, upgrade, versie, webpush, zabbix)
 from .routers import push
 
@@ -35,6 +36,8 @@ async def _startup() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    # De laatste logregels in het geheugen, voor de diagnose (en homepage.* blijft naar journald gaan).
+    logring.install("api")
     await _startup()
     # De API bewaakt de worker (en omgekeerd, zie monitoring/watchdog.py).
     watch = asyncio.create_task(watchdog.api_loop(get_maker())) if get_settings().watchdog else None
@@ -86,6 +89,7 @@ app.include_router(backups.router)
 app.include_router(push.router)
 app.include_router(webpush.router)
 app.include_router(npmroutes.router)
+app.include_router(diagnose.router)
 
 
 @app.middleware("http")

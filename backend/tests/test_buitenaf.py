@@ -69,10 +69,12 @@ def test_welke_routes_van_buitenaf_uit_staan():
         "PUT /api/updates/settings": "updates",
         "POST /api/services/{service_id}/integration/action": "acties", "POST /api/services/{service_id}/wol": "acties",
         "POST /api/heal": "acties", "PUT /api/heal/{rule_id}": "acties", "POST /api/heal/{rule_id}/test": "acties",
+        # De proef van zelfherstel kijkt met de bewaarde login via SSH op de machine.
+        "POST /api/heal/proef": "acties", "POST /api/heal/{rule_id}/proef": "acties",
         "POST /api/health/snapshots/delete": "acties",
         "PUT /api/restoretest/settings": "acties", "POST /api/restoretest/run": "acties",
         "POST /api/devices/{mac}/scan": "acties",
-        "GET /api/configs/versions/{vid}/download": "downloads",
+        "GET /api/configs/versions/{vid}/download": "downloads", "GET /api/diagnose": "downloads",
         "POST /api/cron/jobs/{job_id}/monitor": "terminal", "POST /api/logs/rollout": "terminal",
         "GET /api/ssh/ready": "terminal", "POST /api/ssh/pin/check": "terminal", "POST /api/ssh/pin": "terminal",
         # De instellingen van de terminal: een host naar een ander adres zetten kan een wachtwoord laten weglekken.
@@ -81,6 +83,8 @@ def test_welke_routes_van_buitenaf_uit_staan():
         "POST /api/ssh/hosts/{host_id}/forget-hostkey": "terminal", "PUT /api/ssh/defaults": "terminal",
         "PUT /api/ssh/snippets": "terminal", "POST /api/ssh/import": "terminal",
         "POST /api/backups/sync/create": "terminal",
+        # De proef van de PBS-sync meldt zich via SSH aan op beide PBS'en (alleen lezen), net als de echte knop.
+        "POST /api/backups/sync/proef": "terminal",
     }
     ws = {r.path for r in _routes() if isinstance(r, WebSocketRoute)}
     assert ws == {"/api/ssh/ws/{host_id}", "/api/cron/ws/run/{job_id}", "/api/cron/ws/tail/{target}"}

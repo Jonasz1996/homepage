@@ -50,7 +50,9 @@ def make_engine(url: str | None = None, role: str = "api"):
                 "statement_timeout": str(max(0, s.db_statement_timeout) * 1000),
                 "idle_in_transaction_session_timeout": str(max(0, s.db_idle_in_transaction_timeout) * 1000),
             }}
-    return create_async_engine(url, pool_pre_ping=True, **extra)
+    # hide_parameters: een databasefout in de logs zonder de waarden (een cronregel, een header of syslogtekst kan
+    # een wachtwoord bevatten, en de logs gaan mee in de diagnose).
+    return create_async_engine(url, pool_pre_ping=True, hide_parameters=True, **extra)
 
 
 def init_engine(url: str | None = None, role: str = "api") -> None:

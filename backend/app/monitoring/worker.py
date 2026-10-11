@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from .. import logring
 from ..cron.scan import CRON_EVERY, run_scan as cron_scan
 from ..db import get_engine
 from ..health.diskguard import GUARD_EVERY, run_diskguard
@@ -190,7 +191,8 @@ class Worker:
             log.exception("snapshots van updates opruimen mislukt")
 
     async def auto_updates(self) -> None:
-        """Elke minuut kijken of het tijd is voor de nachtelijke beveiligingsupdates."""
+        """Elke minuut kijken of het tijd is voor de nachtelijke beveiligingsupdates. Als proef komt er niets terug:
+        dan ook geen nieuwe scan (die logt op elke machine in)."""
         try:
             ran = await auto_updates(self.maker, self.http)
         except Exception:
@@ -254,6 +256,14 @@ class Worker:
         async with self.maker() as db:
             await heartbeat(db, self.started)
             await db.commit()
+        # De laatste logregels voor de diagnose (alleen als er iets bijkwam). Apart van de hartslag: kan een regel
+        # niet in de database, dan mag dat de hartslag niet kosten.
+        try:
+            async with self.maker() as db:
+                if await logring.flush(db, "worker"):
+                    await db.commit()
+        except Exception:  # noqa: BLE001
+            log.exception("eigen logregels bewaren mislukt")
 
     async def tidy(self) -> None:
         from . import webpush
@@ -390,8 +400,9 @@ class Worker:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.basicConfig(level=logging.INFO, format=logring.FORMAT)
+    # Ook in het geheugen, voor de diagnose; httpx en asyncssh alleen vanaf WARNING.
+    logring.install("worker")
     maker = async_sessionmaker(get_engine("worker"), expire_on_commit=False)
     asyncio.run(Worker(maker).run())
 

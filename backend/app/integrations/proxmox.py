@@ -35,6 +35,10 @@ class Proxmox(Integration):
         """Twee tokens: lezen (monitoring, kaart, capaciteit) en een apart token voor wat iets verandert."""
         return bool(self.secrets.get("action_username") and self.secrets.get("action_password"))
 
+    def token_id(self, write: bool = False) -> str | None:
+        """Welk token headers(write) gebruikt, zonder het geheim: voor de proefmodus."""
+        return self.secrets.get("action_username" if write and self.split else "username")
+
     def headers(self, write: bool = False) -> dict:
         # Zonder actietoken doet het ene token alles, zoals vroeger.
         user, secret = self.need(*(("action_username", "action_password") if write and self.split else ("username", "password")))
@@ -44,8 +48,13 @@ class Proxmox(Integration):
         data = await self.request("GET", "/api2/json" + path, headers=self.headers(write))
         return (data or {}).get("data") or []
 
+    def resources_request(self) -> tuple[str, str]:
+        """De call van resources(): de proefmodus toont precies deze."""
+        return "GET", "/api2/json/cluster/resources"
+
     async def resources(self) -> list[dict]:
-        res = await self.get("/cluster/resources")
+        method, path = self.resources_request()
+        res = (await self.request(method, path, headers=self.headers()) or {}).get("data") or []
         node = self.config.get("node")
         if node:
             res = [r for r in res if r.get("node") == node]
@@ -128,7 +137,8 @@ class Proxmox(Integration):
              "columns": ["id", "naam", "type", "node", "status", "cpu", "ram", "uptime"], "rows": guest_rows},
         ]}
 
-    async def action(self, action: str, params: dict) -> str:
+    def action_request(self, action: str, params: dict) -> tuple[str, str, dict | None]:
+        """Methode, pad en inhoud van de call die action() stuurt (met het actietoken): de proefmodus toont precies deze."""
         if action not in self.actions:
             raise IntegrationError("Onbekende actie")
         node, kind, vmid = params.get("node"), params.get("type"), params.get("vmid")
@@ -138,5 +148,9 @@ class Proxmox(Integration):
             vmid = int(vmid)
         except (TypeError, ValueError) as e:
             raise IntegrationError("Ongeldig vmid") from e
-        await self.request("POST", f"/api2/json/nodes/{node}/{kind}/{vmid}/status/{action}", headers=self.headers(write=True))
-        return f"{action} gestart voor {vmid} op {node}"
+        return "POST", f"/api2/json/nodes/{node}/{kind}/{vmid}/status/{action}", None
+
+    async def action(self, action: str, params: dict) -> str:
+        method, path, _ = self.action_request(action, params)
+        await self.request(method, path, headers=self.headers(write=True))
+        return f"{action} gestart voor {int(params['vmid'])} op {params['node']}"

@@ -75,9 +75,9 @@ class Portainer(Integration):
                              "columns": ["container", "image", "staat", "status"], "rows": rows})
         return {"sections": sections}
 
-    async def action(self, action: str, params: dict) -> str:
-        if action not in self.actions:
-            raise IntegrationError("Onbekende actie")
+    @staticmethod
+    def target(params: dict) -> tuple[int, str]:
+        """Omgeving en container-id uit de parameters van een actie, nagekeken."""
         cid = str(params.get("id") or "")
         try:
             env = int(params.get("env"))
@@ -85,6 +85,23 @@ class Portainer(Integration):
             raise IntegrationError("Ongeldige omgeving") from e
         if not CID_RE.match(cid):
             raise IntegrationError("Ongeldig container-id")
-        await self.request("POST", f"/api/endpoints/{env}/docker/containers/{cid}/{action}", headers=self.headers())
+        return env, cid
+
+    async def inspect(self, params: dict) -> dict:
+        """De container zoals Docker hem nu kent (alleen lezen). Een container die opnieuw gemaakt is (update,
+        compose) heeft een ander id: dan HTTP 404."""
+        env, cid = self.target(params)
+        return await self.get(f"/endpoints/{env}/docker/containers/{cid}/json") or {}
+
+    def action_request(self, action: str, params: dict) -> tuple[str, str, dict | None]:
+        """Methode, pad en inhoud van de call die action() stuurt: de proefmodus toont precies deze."""
+        if action not in self.actions:
+            raise IntegrationError("Onbekende actie")
+        env, cid = self.target(params)
+        return "POST", f"/api/endpoints/{env}/docker/containers/{cid}/{action}", None
+
+    async def action(self, action: str, params: dict) -> str:
+        method, path, _ = self.action_request(action, params)
+        await self.request(method, path, headers=self.headers())
         verb = {"start": "gestart", "stop": "gestopt", "restart": "herstart"}[action]
-        return f"{params.get('name') or cid[:12]} {verb}"
+        return f"{params.get('name') or self.target(params)[1][:12]} {verb}"

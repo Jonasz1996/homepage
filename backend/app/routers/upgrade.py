@@ -87,19 +87,24 @@ class InstallIn(BaseModel):
     snapshot: bool = True
 
 
+async def _targets(db: AsyncSession, targets: list[str]) -> tuple[list[tuple[str, str | None]], list[dict]]:
+    """(sleutel, naam) van wat mag, en wat geweigerd is. Alleen machines uit de laatste scan. Uitzondering: een eigen
+    SSH-host (ssh:<id>…), die plan_for zelf opzoekt; na een installatie verdwijnt hij uit de scan maar opnieuw
+    installeren mag."""
+    st = await db.get(AppState, UPDATES_KEY)
+    names = {t["key"]: t["name"] for t in (st.value.get("targets", []) if st else [])}
+    wanted = list(dict.fromkeys(targets))
+    known = [k for k in wanted if k in names or k.startswith("ssh:")]
+    return ([(k, names.get(k)) for k in known],
+            [{"key": k[:200], "name": None, "why": "Staat niet in de laatste updatescan"} for k in wanted if k not in known])
+
+
 @router.post("/install", status_code=status.HTTP_202_ACCEPTED, dependencies=[outside.guard("updates")])
 async def install(body: InstallIn, request: Request, user: User = Depends(recent_auth),
                   db: AsyncSession = Depends(get_db)):
-    st = await db.get(AppState, UPDATES_KEY)
-    names = {t["key"]: t["name"] for t in (st.value.get("targets", []) if st else [])}
-    # Alleen machines uit de laatste scan. Uitzondering: een eigen SSH-host (ssh:<id>…), die plan_for
-    # zelf opzoekt; na een installatie verdwijnt hij uit de scan maar opnieuw installeren mag.
-    wanted = list(dict.fromkeys(body.targets))
-    known = [k for k in wanted if k in names or k.startswith("ssh:")]
-    runs, refused = await upgrade.create_runs(db, [(k, names.get(k)) for k in known], body.security_only,
-                                              body.snapshot, "manueel", user.id)
-    refused += [{"key": k[:200], "name": None, "why": "Staat niet in de laatste updatescan"}
-                for k in wanted if k not in known]
+    keys, unknown = await _targets(db, body.targets)
+    runs, refused = await upgrade.create_runs(db, keys, body.security_only, body.snapshot, "manueel", user.id)
+    refused += unknown
     if runs:
         await audit(db, request, user, "updates_install", targets=[r.target_name for r in runs],
                     security_only=body.security_only, snapshot=body.snapshot)
@@ -116,14 +121,28 @@ async def install(body: InstallIn, request: Request, user: User = Depends(recent
     return {"runs": [run_out(r) for r in runs], "refused": refused}
 
 
-@router.post("/runs/{run_id}/rollback", status_code=status.HTTP_202_ACCEPTED, dependencies=[outside.guard("updates")])
-async def rollback(run_id: int, request: Request, user: User = Depends(recent_auth),
-                   db: AsyncSession = Depends(get_db)):
+# Proef: dezelfde keuze als installeren, maar alleen tonen wat er zou gebeuren. Geen SSH, geen runs, geen audit;
+# daarom gewoon ingelogd volstaat (geen herbevestiging, ook van buitenaf).
+@router.post("/install/proef")
+async def install_proef(body: InstallIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    keys, unknown = await _targets(db, body.targets)
+    return await upgrade.describe_batch(db, clients, keys, security_only=body.security_only, snapshot=body.snapshot,
+                                        trigger="manueel", refused=unknown)
+
+
+async def _rollback_run(db: AsyncSession, run_id: int) -> UpdateRun:
     r = await db.get(UpdateRun, run_id)
     if r is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Niet gevonden")
     if not run_out(r)["can_rollback"]:
         raise HTTPException(status.HTTP_409_CONFLICT, "Terugdraaien kan niet (meer) voor deze run")
+    return r
+
+
+@router.post("/runs/{run_id}/rollback", status_code=status.HTTP_202_ACCEPTED, dependencies=[outside.guard("updates")])
+async def rollback(run_id: int, request: Request, user: User = Depends(recent_auth),
+                   db: AsyncSession = Depends(get_db)):
+    r = await _rollback_run(db, run_id)
     r.status = "terugdraaien"
     await audit(db, request, user, "updates_rollback", target=r.target_name, snapshot=r.snapshot.get("name"))
     await db.commit()
@@ -131,15 +150,40 @@ async def rollback(run_id: int, request: Request, user: User = Depends(recent_au
     return {"ok": True}
 
 
+@router.post("/runs/{run_id}/rollback/proef")
+async def rollback_proef(run_id: int, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    return await upgrade.describe_rollback(db, clients, await _rollback_run(db, run_id))
+
+
+@router.get("/auto/proef")
+async def auto_proef(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Wat de nachtelijke run vannacht zou doen, los van het uur."""
+    return await upgrade.describe_auto(db, clients)
+
+
+@router.get("/cleanup/proef")
+async def cleanup_proef(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Welke eigen snapshots het volgende opruimen zou verwijderen."""
+    return await upgrade.describe_cleanup(db, clients)
+
+
 class SettingsIn(BaseModel):
     auto: bool = False
     hour: int = Field(default=4, ge=0, le=23)
     keep_days: int = Field(default=7, ge=1, le=90)
+    # Alleen noteren wat de nachtelijke updates en het opruimen van snapshots zouden doen.
+    proef: bool = False
+    cleanup_proef: bool = False
 
 
 @router.get("/settings")
 async def get_settings_(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    return await upgrade.settings(db)
+    """De instellingen, met het laatste plan van de nachtelijke run en van het opruimen als die als proef liepen."""
+    last = {}
+    for k, key in (("auto", upgrade.AUTO_PROEF_KEY), ("cleanup", upgrade.CLEANUP_PROEF_KEY)):
+        st = await db.get(AppState, key)
+        last[k] = st.value if st else None
+    return {**await upgrade.settings(db), "last_proef": last}
 
 
 @router.put("/settings", dependencies=[outside.guard("updates")])

@@ -458,6 +458,9 @@ class HealRule(Base):
     fired: Mapped[list] = mapped_column(Json, default=list)
     last_at: Mapped[datetime | None]
     last_result: Mapped[str | None] = mapped_column(Text)
+    # Alleen proef: de regel gaat af zoals altijd (zelfde voorwaarden, wachttijd en limiet), maar zet alleen op de
+    # tijdlijn wat hij zou doen. Geen actie, geen melding.
+    dry_run: Mapped[bool] = mapped_column(Boolean, default=False, server_default=sa_false())
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
 
 
