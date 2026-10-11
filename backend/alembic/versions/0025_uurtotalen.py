@@ -10,8 +10,8 @@ tegen. Daarna telt de worker elke 10 minuten verder.
 Terug (downgrade): de checks die intussen weg zijn, komen niet terug; de 1j-grafiek toont dan alleen de laatste
 90 dagen tot er weer een jaar is.
 
-Revision ID: 0026
-Revises: 0023
+Revision ID: 0025
+Revises: 0024
 """
 import json
 from datetime import datetime, timedelta, timezone
@@ -19,8 +19,8 @@ from datetime import datetime, timedelta, timezone
 from alembic import op
 import sqlalchemy as sa
 
-revision = '0026'
-down_revision = '0023'
+revision = '0025'
+down_revision = '0024'
 branch_labels = None
 depends_on = None
 

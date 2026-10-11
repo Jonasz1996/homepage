@@ -186,6 +186,11 @@
     ssh_unpin: 'SSH-sleutel losgemaakt', secret_key_saved: 'kopie van secret.key bevestigd',
     oidc_linked: 'Authentik-account gekoppeld', oidc_unlinked: 'Authentik-account ontkoppeld', oidc_link_failed: 'Authentik koppelen mislukt',
     password_change_failed: 'wachtwoord wijzigen mislukt', attention_ignored: 'beveiligingspunt genegeerd', check_silenced: 'check stilgelegd',
+    device_forgotten: 'apparaat vergeten', check_paused: 'check gepauzeerd', check_resumed: 'check hervat',
+    npm_routes: 'NPM rechtstreeks aan/uit',
+    push_created: 'push-monitor aangemaakt', push_rotated: 'push-adres vernieuwd', push_changed: 'push-monitor gewijzigd',
+    webpush_added: 'gsm-meldingen aangezet', webpush_changed: 'gsm-meldingen gewijzigd', webpush_removed: 'gsm-meldingen uitgezet',
+    webpush_renewed: 'gsm-abonnement vernieuwd',
   }
   const BAD = /failed|mismatch|revoked|deleted/
   const detail = (d) => Object.entries(d || {}).map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join('  ')

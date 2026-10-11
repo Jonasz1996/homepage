@@ -9,7 +9,7 @@ De cijfers blijven dezelfde als uit de losse checks: per uur staan aantallen en 
 telt niet mee voor de uptime en het weekrapport; de latency-grafiek telt het wel mee, daarom apart opgeteld.
 
 De worker telt op (roll_up, elke 10 minuten). Tot waar staat in app_state 'check_hourly': elk uur voor `until` zit
-in de uurtotalen. Migratie 0026 telde op wat er al was.
+in de uurtotalen. Migratie 0025 telde op wat er al was.
 """
 
 from dataclasses import dataclass

@@ -135,7 +135,7 @@ async def test_gecomprimeerde_metingen(authed):
 
 
 async def test_migratie_telt_bestaande_checks_op(authed):
-    """Migratie 0026 telt de checks die er al zijn per uur op (ook in gecomprimeerde chunks, ook van meer dan 90
+    """Migratie 0025 telt de checks die er al zijn per uur op (ook in gecomprimeerde chunks, ook van meer dan 90
     dagen geleden: die wist het nieuwe bewaarbeleid) en zet de watermark: dezelfde uurtotalen als de worker maakt."""
     agen, db = await _db()
     page = (await authed.post("/api/pages", json={"name": "Thuis"})).json()["id"]
@@ -162,8 +162,8 @@ async def test_migratie_telt_bestaande_checks_op(authed):
     # Geen verbindingen die nog iets van de oude tabel weten (asyncpg onthoudt voorbereide queries).
     await engine_.dispose()
 
-    # Zonder de tabel terug naar voor 0026, dan weer op: de migratie telt alles op.
-    alembic("downgrade", "0026-1")
+    # Zonder de tabel terug naar voor 0025, dan weer op: de migratie telt alles op.
+    alembic("downgrade", "0025-1")
     alembic("upgrade", "head")
     agen, db = await _db()
     until = await rollup.watermark(db)

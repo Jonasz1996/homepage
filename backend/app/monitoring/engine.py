@@ -23,7 +23,7 @@ MASS_MIN = 5
 MASS_KEY = "massastoring"
 # Wat zo kort voor de massastoring apart als down gemeld werd, hoort bij dezelfde golf.
 MASS_WAVE = timedelta(minutes=15)
-# Hoelang wat bewaard blijft. Met TimescaleDB doet het bewaarbeleid van de hypertables dat (migraties 0026 en 0007,
+# Hoelang wat bewaard blijft. Met TimescaleDB doet het bewaarbeleid van de hypertables dat (migraties 0025 en 0007,
 # tests/test_timescale.py kijkt of het dezelfde getallen zijn); zonder ruimt de worker zelf op (cleanup).
 # Losse checks 90 dagen; per uur opgeteld (rollup.py) 400 dagen: genoeg voor de 1j-grafiek en de uptime over een jaar.
 KEEP_CHECKS_DAYS = 90
