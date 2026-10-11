@@ -652,3 +652,25 @@ async def test_proef_zonder_tegels(authed, monkeypatch, tmp_path):
     assert plan["steps"][-1]["call"].startswith(f"schrijft noodplan.html en noodplan.md naar {tmp_path}")
     assert plan["after"][0] == "Het eerste noodplan komt in het dashboard."
     await agen.aclose()
+
+
+async def test_worker(authed, monkeypatch, tmp_path):
+    from app.monitoring.worker import Worker
+    await _setup(authed, monkeypatch, tmp_path)
+    w = Worker(_maker())
+    w.http = HttpClients(httpx.MockTransport(World()))
+    # Net gestart: eerst de andere taken (dekking, cluster, apparaten, routes).
+    await w.noodplan_job()
+    agen, db = await _db()
+    assert await db.get(AppState, nood.STATE_KEY) is None
+    w.started -= nood.START_DELAY
+    await w.noodplan_job()
+    v = await _plan(db)
+    assert v["trigger"] == "week" and v["by"] is None and v["at"]
+    # Deze week is er al een: niet opnieuw.
+    at = v["at"]
+    await w.noodplan_job()
+    assert (await _plan(db))["at"] == at
+    ev = (await db.execute(select(Event).where(Event.title == "Noodplan bijgewerkt"))).scalars().all()
+    assert len(ev) == 1 and "op vraag van" not in ev[0].body
+    await agen.aclose()

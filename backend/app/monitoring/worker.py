@@ -27,7 +27,7 @@ from .network import NETWORK_EVERY, PUBLIC_IP_EVERY, sample_power, watch_gateway
 from .report import weekly_notification
 from .updates import UPDATES_EVERY, run_updates
 from .upgrade import auto_updates, cleanup_snapshots, mark_interrupted
-from . import cluster, configs, containerlogs, coverage, devices, healing, planned, restoretest, rollup, routes, zabbix
+from . import cluster, configs, containerlogs, coverage, devices, healing, noodplan, planned, restoretest, rollup, routes, zabbix
 from .watchers import watch_npm, watch_pbs
 
 log = logging.getLogger("homepage.worker")
@@ -252,6 +252,18 @@ class Worker:
                 await configs.run_configs(db, self.http)
                 await db.commit()
 
+    async def noodplan_job(self) -> None:
+        """Met de hartslag: is het noodplan van deze week er al (maandag vanaf 6 uur)? Anders nu maken. Niet vlak na de
+        start: eerst de back-updekking, de cluster, de apparaten en de routes van NPM."""
+        now = datetime.now(timezone.utc)
+        if now - self.started < noodplan.START_DELAY:
+            return
+        async with self.maker() as db:
+            st = await db.get(AppState, noodplan.STATE_KEY)
+            value = st.value if st else None
+        if noodplan.due(value, now):
+            await noodplan.run(self.maker, self.http, trigger="week")
+
     async def beat(self) -> None:
         async with self.maker() as db:
             await heartbeat(db, self.started)
@@ -395,6 +407,7 @@ class Worker:
                     self.job("planned", lambda: self.step("gepland onderhoud", planned.apply))
                     self.job("restoretest", self.restoretest)
                     self.job("config_copy", self.config_copy)
+                    self.job("noodplan", self.noodplan_job)
                     self.job("auto_updates", self.auto_updates)
                 if time.monotonic() - last_rollup > rollup.ROLLUP_EVERY:
                     last_rollup = time.monotonic()
