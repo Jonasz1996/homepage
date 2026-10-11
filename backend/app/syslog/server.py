@@ -9,6 +9,12 @@ houdt de regels dan in zijn eigen wachtrij. UDP kan niet wachten: daar valt de n
 wachtrij staat blijft, ook de TCP-regels die de afzender als afgeleverd beschouwt). Wat verloren gaat, wordt geteld en
 elke minuut met een teken van leven bewaard in AppState "syslog"; Aandacht en Gezondheid › homepage tonen het. Lukt
 dat bij het stoppen niet meer (database weg), dan wacht het in een klein bestand tot de volgende start (keep_loss).
+
+Een regel houdt zijn eigen tijd (RFC 5424, zoals het dashboard rsyslog uitrolt) als die hoogstens een uur van de
+ontvangsttijd ligt. Tot een dag in het verleden alleen als rsyslog hem vastgehouden kan hebben: op een TCP-verbinding
+die net open is (na het opnieuw verbinden stuurt rsyslog eerst zijn wachtrij, bv. na een herstart van de ontvanger) of
+kort nadat de wachtrij hier vol zat (dan las de ontvanger niet en wachtte rsyslog). Anders is het een klok die
+achterloopt, en krijgt de regel de ontvangsttijd (zie HELD_AFTER_CONNECT en parse).
 """
 
 import asyncio
@@ -53,6 +59,13 @@ DRAIN_SECONDS = 10
 LOSS_HOURS = 24
 # Waarom regels niet in de database kwamen (loss.why in AppState "syslog").
 FULL, REJECTED, STOPPED = "vol", "geweigerd", "gestopt"
+# Zo lang na het openen van een TCP-verbinding, en zo lang nadat de wachtrij vol zat, mag een regel tot een dag oud
+# zijn: rsyslog kan hem vastgehouden hebben (parse: held). Daarna, en op UDP altijd, hoogstens een uur (zie bovenaan).
+HELD_AFTER_CONNECT = 5 * 60
+HELD_AFTER_FULL = 10 * 60
+# Een ontvangen regel: ruw, het adres van de afzender, de ontvangsttijd (time.time()) en of de afzender hem vastgehouden
+# kan hebben.
+Line = tuple[bytes, str, float, bool]
 
 
 class Rules:
@@ -147,7 +160,9 @@ class Receiver:
     def __init__(self, maker: async_sessionmaker) -> None:
         self.maker = maker
         # Ruwe regels met hun bron en ontvangsttijd. Begrensd: zie accept (UDP) en accept_wait (TCP).
-        self.queue: asyncio.Queue[tuple[bytes, str, float]] = asyncio.Queue(QUEUE_MAX)
+        self.queue: asyncio.Queue[Line] = asyncio.Queue(QUEUE_MAX)
+        # Wanneer (time.monotonic()) de wachtrij voor het laatst vol zat: zie HELD_AFTER_FULL.
+        self.full_at = -1e9
         self.rules = Rules()
         self.nets = allowed_networks()
         # Ruimt de ontvanger zelf oude regels op? Niet op TimescaleDB (die heeft een retentiebeleid). None: nog niet
@@ -155,7 +170,7 @@ class Receiver:
         self.self_cleanup: bool | None = None
         self.started = _iso()
         # De batch die de schrijver in handen heeft: uit de wachtrij, nog niet in de database.
-        self.current: list[tuple[bytes, str, float]] = []
+        self.current: list[Line] = []
         self.closing = False
         self._wake = asyncio.Event()
         self.clients: set[asyncio.Task] = set()
@@ -188,23 +203,32 @@ class Receiver:
             return
         self.received += 1
         if self.queue.full():
+            self.full_at = time.monotonic()
             self.lose(1, FULL)
             return
-        self.queue.put_nowait((data[:MAX_RAW], addr, time.time()))
+        # Over UDP houdt niemand iets vast: wat meer dan een uur achter ligt, is een klok die achterloopt.
+        self.queue.put_nowait((data[:MAX_RAW], addr, time.time(), False))
 
-    async def accept_wait(self, data: bytes, ip: str) -> None:
+    async def accept_wait(self, data: bytes, ip: str, opened: float) -> None:
         """TCP: zit de wachtrij vol, dan wachten tot er plaats is. Zolang leest deze verbinding niets: de afzender
-        merkt dat (het TCP-venster gaat dicht) en houdt de regels in zijn eigen wachtrij."""
+        merkt dat (het TCP-venster gaat dicht) en houdt de regels in zijn eigen wachtrij. opened: wanneer
+        (time.monotonic()) de verbinding openging, zie HELD_AFTER_CONNECT."""
         addr = self._allowed(ip)
         if addr is None:
             return
         self.received += 1
+        now = time.monotonic()
+        full = self.queue.full()
+        held = full or now - opened < HELD_AFTER_CONNECT or now - self.full_at < HELD_AFTER_FULL
         try:
-            await self.queue.put((data[:MAX_RAW], addr, time.time()))
+            await self.queue.put((data[:MAX_RAW], addr, time.time(), held))
         except asyncio.CancelledError:
             # Bij het stoppen, terwijl deze regel nog op plaats wachtte.
             self.lose(1, STOPPED)
             raise
+        if full:
+            # Vol tot nu: wat de afzender intussen niet kwijt kon, komt hierna.
+            self.full_at = time.monotonic()
 
     def lose(self, n: int, why: str) -> None:
         """n regels komen niet in de database: tellen, voor Aandacht en Gezondheid."""
@@ -223,7 +247,7 @@ class Receiver:
         async with self.maker() as db:
             self.rules.set(list((await db.execute(select(LogRule).where(LogRule.enabled))).scalars()))
 
-    async def prepare(self, items: list[tuple[bytes, str, float]]) -> Batch:
+    async def prepare(self, items: list[Line]) -> Batch:
         """Ontleden en de meldingsregels toepassen. Met de ontvangsttijd: een regel zonder bruikbare eigen tijd die pas
         na een storing weggeschreven wordt, krijgt niet het tijdstip van dan."""
         if not self.rules.ready or time.monotonic() - self.rules.loaded > 30:
@@ -237,9 +261,9 @@ class Receiver:
                 # De vorige regels blijven gelden; over 30 s opnieuw proberen.
                 self.rules.loaded = time.monotonic()
         rows, notes, fired = [], [], {}
-        for data, ip, at in items:
+        for data, ip, at, held in items:
             try:
-                p = parse(data, ip, datetime.fromtimestamp(at, timezone.utc))
+                p = parse(data, ip, datetime.fromtimestamp(at, timezone.utc), held)
             except Exception:  # noqa: BLE001 - één vreemde regel mag de rest niet tegenhouden
                 log.exception("Logregel van %s niet te ontleden", ip)
                 self.lose(1, REJECTED)
@@ -292,11 +316,11 @@ class Receiver:
             b.notes.pop(0)
         self.rules.last_fire.update(b.fired)
 
-    async def flush(self, items: list[tuple[bytes, str, float]]) -> None:
+    async def flush(self, items: list[Line]) -> None:
         """Eén poging, zonder opnieuw proberen (dat doet write)."""
         await self.store(await self.prepare(items))
 
-    async def write(self, items: list[tuple[bytes, str, float]]) -> None:
+    async def write(self, items: list[Line]) -> None:
         """Tot de batch in de database staat: bij een storing opnieuw, telkens iets later (tot RETRY_MAX). Zolang neemt
         de schrijver niets nieuws uit de wachtrij; die vangt op wat intussen binnenkomt."""
         batch, wait = None, RETRY_FIRST
@@ -345,7 +369,7 @@ class Receiver:
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(self._wake.wait(), seconds)
 
-    async def take(self) -> list[tuple[bytes, str, float]]:
+    async def take(self) -> list[Line]:
         """De volgende batch: tot BATCH regels, of wat er binnen FLUSH_SECONDS bijkomt."""
         self.current = [await self.queue.get()]
         deadline = time.monotonic() + FLUSH_SECONDS
@@ -525,6 +549,7 @@ async def handle_tcp(rx: Receiver, reader: asyncio.StreamReader, writer: asyncio
     """TCP-syslog: octet counting ("123 <34>1 ...") of één bericht per regel. Zit de wachtrij vol, dan leest deze
     verbinding niet verder tot er plaats is (zie Receiver.accept_wait)."""
     ip = writer.get_extra_info("peername")[0]
+    opened = time.monotonic()
     task = asyncio.current_task()
     rx.clients.add(task)
     try:
@@ -537,10 +562,10 @@ async def handle_tcp(rx: Receiver, reader: asyncio.StreamReader, writer: asyncio
                 length = int(digits[:-1])
                 if length > MAX_TCP_FRAME:
                     break
-                await rx.accept_wait(await reader.readexactly(length), ip)
+                await rx.accept_wait(await reader.readexactly(length), ip, opened)
             else:
                 line = first + await reader.readuntil(b"\n")
-                await rx.accept_wait(line, ip)
+                await rx.accept_wait(line, ip, opened)
     except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ValueError, ConnectionError):
         pass
     finally:
