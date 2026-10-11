@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import signal
 import socket
@@ -11,11 +12,13 @@ import pytest
 from sqlalchemy import event, func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.attention import syslog_items
 from app.config import get_settings
 from app.db import get_db
+from app.health import selfcheck as sc
 from app.main import app
 from app.models import AppState, Base, LogEntry, LogRule, Notification
-from app.syslog import server
+from app.syslog import rollout, server
 from app.syslog.parse import parse
 from app.syslog.server import Receiver, handle_tcp
 
@@ -192,6 +195,31 @@ async def test_receive_time_is_kept_until_written(receiver):
     assert abs(ts.replace(tzinfo=ts.tzinfo or timezone.utc).timestamp() - (at - 600)) < 1
 
 
+async def test_held_back_tcp_lines_keep_their_own_time(receiver):
+    """rsyslog houdt regels zelf vast zolang de ontvanger niet leest (wachtrij vol na een storing) en stuurt ze uren
+    later. Zoals het dashboard rsyslog uitrolt (RFC 5424, met tijdzone) houden ze hun eigen tijd; vroeger kregen ze
+    het moment waarop ze eindelijk gelezen werden."""
+    rx, _ = receiver
+    assert 'template="RSYSLOG_SyslogProtocol23Format"' in rollout.CLIENT
+    sent = datetime.now(timezone(timedelta(hours=2))) - timedelta(hours=3)
+    # Precies zoals rsyslog 8 het met die template over TCP stuurt (nagekeken met rsyslogd 8.2312).
+    line = f"<78>1 {sent.isoformat()} pve50 CRON 20082 - -  (root) CMD (run-parts /etc/cron.hourly)\n".encode()
+    srv = await asyncio.start_server(lambda r, w: handle_tcp(rx, r, w), "127.0.0.1", 0)
+    _, w = await asyncio.open_connection("127.0.0.1", srv.sockets[0].getsockname()[1])
+    w.write(line)
+    await w.drain()
+    await _until(lambda: rx.queue.qsize() == 1)
+    await rx.flush([rx.queue.get_nowait()])
+    w.close()
+    srv.close()
+    async with rx.maker() as s:
+        row = (await s.execute(select(LogEntry))).scalar_one()
+    assert (row.host, row.app, row.facility, row.severity) == ("pve50", "CRON", 9, 6)
+    assert row.msg == "(root) CMD (run-parts /etc/cron.hourly)"
+    ts = row.ts.replace(tzinfo=row.ts.tzinfo or timezone.utc)
+    assert abs(ts.timestamp() - sent.timestamp()) < 0.01
+
+
 async def test_long_host_and_rule_name_cut_to_the_title_column(receiver):
     """notifications.title is varchar(200): op PostgreSQL gaf een lange hostnaam een fout, en verloor de batch."""
     rx, db = receiver
@@ -233,13 +261,13 @@ async def test_rejected_row_does_not_block_the_rest(receiver, monkeypatch):
     assert rx.lost == 1 and rx._loss["why"] == server.REJECTED and rx.down_since is None
 
 
-async def test_udp_drops_the_oldest_and_tcp_waits(authed, monkeypatch):
+async def test_udp_drops_the_newest_and_tcp_waits(authed, monkeypatch):
     monkeypatch.setattr(server, "QUEUE_MAX", 4)
     rx = Receiver(None)
     for i in range(6):
         rx.accept(f"<14>udp {i}".encode(), "192.168.0.9")
     assert (rx.received, rx.lost, rx.queue.qsize()) == (6, 2, 4)
-    assert [rx.queue.get_nowait()[0] for _ in range(4)] == [f"<14>udp {i}".encode() for i in range(2, 6)]
+    assert [rx.queue.get_nowait()[0] for _ in range(4)] == [f"<14>udp {i}".encode() for i in range(4)]
 
     # TCP: bij een volle wachtrij leest de verbinding niet verder, en er valt niets weg.
     srv = await asyncio.start_server(lambda r, w: handle_tcp(rx, r, w), "127.0.0.1", 0)
@@ -258,6 +286,27 @@ async def test_udp_drops_the_oldest_and_tcp_waits(authed, monkeypatch):
     # Hoe lang een regel ook is: in de wachtrij hoogstens MAX_RAW bytes.
     rx.accept(b"<14>x " + b"a" * 100_000, "192.168.0.9")
     assert len(rx.queue.get_nowait()[0]) == server.MAX_RAW
+    w.close()
+    srv.close()
+
+
+async def test_udp_never_pushes_out_tcp_lines(authed, monkeypatch):
+    """Een volle wachtrij met TCP-regels (rsyslog heeft ze als afgeleverd geschrapt) en de router blijft via UDP
+    sturen: vroeger duwde elke UDP-regel de oudste TCP-regel eruit, tot de wachtrij alleen nog UDP bevatte."""
+    monkeypatch.setattr(server, "QUEUE_MAX", 4)
+    rx = Receiver(None)
+    srv = await asyncio.start_server(lambda r, w: handle_tcp(rx, r, w), "127.0.0.1", 0)
+    _, w = await asyncio.open_connection("127.0.0.1", srv.sockets[0].getsockname()[1])
+    w.write(b"".join(f"<14>tcp {i}\n".encode() for i in range(6)))
+    await w.drain()
+    await _until(lambda: rx.queue.qsize() == 4 and rx.received == 5)
+    for i in range(3):
+        rx.accept(f"<14>udp {i}".encode(), "192.168.0.9")
+    assert (rx.lost, rx._loss["n"], rx._loss["why"]) == (3, 3, server.FULL)
+    got = [rx.queue.get_nowait()[0] for _ in range(4)]
+    await _until(lambda: rx.queue.qsize() == 2)
+    got += [rx.queue.get_nowait()[0] for _ in range(2)]
+    assert got == [f"<14>tcp {i}\n".encode() for i in range(6)] and rx.lost == 3
     w.close()
     srv.close()
 
@@ -350,6 +399,78 @@ async def test_start_without_database(receiver, monkeypatch, tmp_path):
     assert v["stored"] == 2 and v["lost"] == 0 and v["last_error"]["until"]
     if own:
         await own.dispose()
+
+
+async def test_loss_survives_a_stop_while_the_database_is_away(receiver, monkeypatch, tmp_path):
+    """Herstart (de container, om een volle schijf op te lossen) terwijl de database weg is: ook het laatste teken van
+    leven raakt dan niet in de database. Vroeger verdween het verlies met het proces en stond er niets onder !."""
+    rx0, _ = receiver
+    real, own = rx0.maker, None
+    if not PG:
+        # Zoals in test_start_without_database: een verbinding per sessie.
+        own = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'syslog.db'}")
+        async with own.begin() as c:
+            await c.run_sync(Base.metadata.create_all)
+        real = async_sessionmaker(own, expire_on_commit=False)
+    for k, v in (("RETRY_FIRST", 0.01), ("RETRY_MAX", 0.05), ("FLUSH_SECONDS", 0.05), ("DRAIN_SECONDS", 0.2),
+                 ("QUEUE_MAX", 3)):
+        monkeypatch.setattr(server, k, v)
+    kept = tmp_path / "verlies.json"
+    monkeypatch.setattr(get_settings(), "syslog_state_file", kept)
+    dead = create_async_engine(DEAD)
+    first, stop = Receiver(async_sessionmaker(dead)), asyncio.Event()
+    task = asyncio.create_task(server.serve(first, "127.0.0.1", _free_port(), stop))
+    try:
+        await asyncio.sleep(0.1)
+        for i in range(5):
+            first.accept(f"<14>udp {i}".encode(), "192.168.0.9")  # 3 in de wachtrij, 2 vallen weg
+        await _until(lambda: first.down_since is not None)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 15)
+        await dead.dispose()
+    # De 2 van de volle wachtrij en de 3 die bij het stoppen niet meer weggeschreven raakten.
+    assert first.lost == 5 and json.loads(kept.read_text())["loss"]["n"] == 5
+
+    second, stop = Receiver(real), asyncio.Event()
+    task = asyncio.create_task(server.serve(second, "127.0.0.1", _free_port(), stop))
+    try:
+        # Meteen bij het starten meegeteld en het bestand weg; na het eerste teken van leven staat het in de database.
+        await _until(lambda: not kept.exists() and second._loss["n"] == 0)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 15)
+    async with real() as s:
+        v = (await s.get(AppState, server.STATE_KEY)).value
+    assert v["lost"] == 0 and v["loss"]["n"] == 5 and v["loss"]["why"] == server.STOPPED
+    # De fout van toen, en dat schrijven nu weer lukt.
+    assert v["last_error"]["error"] and v["last_error"]["until"]
+    [item] = syslog_items(sc.syslog_status(v, datetime.now(timezone.utc)), {})
+    assert item["title"] == "5 logregels niet bewaard" and "Laatste fout van de database" in item["text"]
+    assert not kept.exists()
+    if own:
+        await own.dispose()
+
+
+async def test_kept_loss_counts_once(monkeypatch, tmp_path):
+    kept = tmp_path / "verlies.json"
+    monkeypatch.setattr(get_settings(), "syslog_state_file", kept)
+    rx = Receiver(None)
+    rx.lose(2, server.FULL)  # sinds deze start: nieuwer dan wat in het bestand staat
+    kept.write_text(json.dumps({"loss": {"n": 5, "since": 1000.0, "at": 2000.0, "why": server.STOPPED},
+                                "last_error": {"since": "2026-10-03T18:00:00+00:00", "until": None, "error": "weg"}}))
+    rx.restore_loss()
+    assert (rx._loss["n"], rx._loss["since"], rx._loss["why"], rx.lost) == (7, 1000.0, server.FULL, 2)
+    assert rx.last_error["error"] == "weg" and not kept.exists()
+    rx.restore_loss()
+    assert rx._loss["n"] == 7
+    # Onleesbaar: niet meegeteld, en weg (anders bij elke start dezelfde waarschuwing).
+    kept.write_text("{kapot")
+    rx.restore_loss()
+    assert rx._loss["n"] == 7 and not kept.exists()
+    # Niets verloren en geen fout: geen bestand.
+    Receiver(None).keep_loss()
+    assert not kept.exists()
 
 
 async def _hypertable(maker) -> bool:

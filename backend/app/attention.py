@@ -311,8 +311,8 @@ def _n(n: int) -> str:
 
 LOSS_WHY = {
     rxs.FULL: f"De database was onbereikbaar en de wachtrij van de syslog-ontvanger ({_n(rxs.QUEUE_MAX)} regels) zat "
-              "vol: de oudste regels vielen weg. Machines die via TCP sturen (rsyslog uitgerold vanuit het dashboard) "
-              "houden hun regels dan zelf vast; apparaten die via UDP sturen (router, switch, NAS) niet.",
+              "vol: nieuwe regels van apparaten die via UDP sturen (router, switch, NAS) vielen weg. Machines die via "
+              "TCP sturen (rsyslog uitgerold vanuit het dashboard) houden hun regels dan zelf vast.",
     rxs.REJECTED: "De database weigerde ze (of ze waren onleesbaar); waarom staat in de logregels van de "
                   "syslog-ontvanger (diagnose).",
     rxs.STOPPED: "Bij het stoppen van de syslog-ontvanger (herstart of update) raakte de wachtrij niet op tijd leeg: "

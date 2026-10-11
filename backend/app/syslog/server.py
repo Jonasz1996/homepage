@@ -5,14 +5,16 @@ Schrijft in batches naar de database en maakt meldingen volgens de regels uit lo
 Is de database even weg (herstart van PostgreSQL, schijf vol), dan gaat er niets verloren zolang de wachtrij niet vol
 is: de schrijver houdt zijn batch vast en probeert opnieuw, telkens iets later (tot 30 s). Zit de wachtrij vol
 (QUEUE_MAX regels), dan leest de ontvanger niet verder op TCP: rsyslog op de afzender (uitgerold vanuit het dashboard)
-houdt de regels dan in zijn eigen wachtrij. UDP kan niet wachten: daar valt de oudste regel weg. Wat verloren gaat,
-wordt geteld en elke minuut met een teken van leven bewaard in AppState "syslog"; Aandacht en Gezondheid › homepage
-tonen het.
+houdt de regels dan in zijn eigen wachtrij. UDP kan niet wachten: daar valt de nieuwe regel weg (wat al in de
+wachtrij staat blijft, ook de TCP-regels die de afzender als afgeleverd beschouwt). Wat verloren gaat, wordt geteld en
+elke minuut met een teken van leven bewaard in AppState "syslog"; Aandacht en Gezondheid › homepage tonen het. Lukt
+dat bij het stoppen niet meer (database weg), dan wacht het in een klein bestand tot de volgende start (keep_loss).
 """
 
 import asyncio
 import contextlib
 import ipaddress
+import json
 import logging
 import os
 import re
@@ -179,14 +181,15 @@ class Receiver:
         return str(addr) if any(addr in n for n in self.nets) else None
 
     def accept(self, data: bytes, ip: str) -> None:
-        """UDP: kan niet wachten. Zit de wachtrij vol (de database is al lang weg), dan valt de oudste regel weg."""
+        """UDP: kan niet wachten. Zit de wachtrij vol (de database is al lang weg), dan valt deze regel weg. Niet de
+        oudste: die kan van een TCP-afzender zijn, en die heeft hem al uit zijn eigen wachtrij geschrapt."""
         addr = self._allowed(ip)
         if addr is None:
             return
         self.received += 1
         if self.queue.full():
-            self.queue.get_nowait()
             self.lose(1, FULL)
+            return
         self.queue.put_nowait((data[:MAX_RAW], addr, time.time()))
 
     async def accept_wait(self, data: bytes, ip: str) -> None:
@@ -397,7 +400,55 @@ class Receiver:
         self._loss["n"] -= n
         if not self._loss["n"]:
             self._loss.update(since=None, at=None, why=None)
+        # Een fout van voor de vorige stop (restore_loss) die toen nog niet voorbij was: schrijven lukt weer.
+        if self.down_since is None and self.last_error and not self.last_error.get("until"):
+            self.last_error["until"] = _iso()
         return True
+
+    def keep_loss(self) -> None:
+        """Bij het stoppen, als ook het laatste teken van leven niet in de database raakt (database weg): het verlies
+        dat er nog niet staat en de laatste databasefout naar een klein bestand, voor de volgende start. Anders
+        verdwijnt het met het proces, en dan staat er onder ! niets terwijl het juist dan om veel regels gaat."""
+        if not self._loss["n"] and not self.last_error:
+            return
+        path = get_settings().syslog_state_file
+        try:
+            path.write_text(json.dumps({"loss": self._loss, "last_error": self.last_error}))
+        except OSError as e:
+            log.error("Verlies van %d logregels niet bewaard in %s (%s): het staat alleen in deze logregel",
+                      self._loss["n"], path, e)
+            return
+        log.info("Verlies (%d logregels) en de laatste databasefout bewaard in %s, voor de volgende start",
+                 self._loss["n"], path)
+
+    def restore_loss(self) -> None:
+        """Bij het starten, vóór het eerste teken van leven: wat keep_loss bij de vorige stop bewaarde, telt mee. Het
+        bestand gaat eerst weg, zodat het hoe dan ook maar één keer telt."""
+        path = get_settings().syslog_state_file
+        try:
+            raw = path.read_text()
+            path.unlink()
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            log.warning("Bewaard verlies in %s niet te lezen of weg te halen (%s): niet meegeteld", path, e)
+            return
+        try:
+            kept = json.loads(raw)
+            loss, err = kept.get("loss") or {}, kept.get("last_error")
+            n = int(loss.get("n") or 0)
+            times = [float(loss[k]) for k in ("since", "at") if loss.get(k)]
+        except (ValueError, TypeError, AttributeError) as e:
+            log.warning("Bewaard verlies in %s onleesbaar (%s): niet meegeteld", path, e)
+            return
+        if n > 0 and times:
+            own = self._loss
+            # Wat sinds deze start al verloren ging, is nieuwer: dat bepaalt "laatst" en waarom.
+            own.update(n=own["n"] + n, since=min([own["since"], *times] if own["since"] else times),
+                       at=own["at"] or max(times), why=own["why"] or loss.get("why"))
+            log.warning("%d logregels die bij de vorige stop niet meer bewaard raakten, tellen mee", n)
+        if isinstance(err, dict) and self.last_error is None:
+            self.last_error = err
 
     async def status_loop(self) -> None:
         while True:
@@ -504,6 +555,8 @@ async def serve(rx: Receiver, bind: str, port: int, stop: asyncio.Event) -> None
     udp, _ = await loop.create_datagram_endpoint(lambda: Udp(rx), local_addr=(bind, port))
     server = await asyncio.start_server(lambda r, w: handle_tcp(rx, r, w), bind, port, limit=MAX_TCP_FRAME)
     log.info("Syslog luistert op %s:%d (udp+tcp), toegelaten: %s", bind, port, get_settings().syslog_allow)
+    # Pas nu: lukte het luisteren niet, dan blijft het bestand voor de volgende poging. Vanaf hier bewaart finally het.
+    rx.restore_loss()
     writer = asyncio.create_task(rx.writer())
     # De eigen logregels elke minuut in de database, voor de diagnose.
     forever = [writer, asyncio.create_task(rx.cleanup_loop()), asyncio.create_task(rx.status_loop()),
@@ -531,8 +584,11 @@ async def serve(rx: Receiver, bind: str, port: int, stop: asyncio.Event) -> None
         if left:
             log.warning("%d logregels niet meer weggeschreven bij het stoppen", left)
             rx.lose(left, STOPPED)
+        saved = False
         with contextlib.suppress(Exception):
-            await asyncio.wait_for(rx.save_status(), 3)
+            saved = await asyncio.wait_for(rx.save_status(), 3)
+        if not saved:
+            rx.keep_loss()
 
 
 async def main() -> None:

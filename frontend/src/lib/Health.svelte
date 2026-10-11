@@ -59,7 +59,7 @@
   const ago = (ts) => rel(ts, Math.max(now, Date.parse(ts)))
   const LEVEL = { ok: 'in orde', warn: 'opletten', err: 'probleem', unknown: 'onbekend' }
   // Waarom de syslog-ontvanger regels niet bewaarde (AppState "syslog", loss.why).
-  const LOSS = { vol: 'wachtrij vol terwijl de database weg was', geweigerd: 'geweigerd door de database', gestopt: 'niet weggeschreven bij het stoppen' }
+  const LOSS = { vol: 'wachtrij vol terwijl de database weg was: nieuwe UDP-regels vielen weg', geweigerd: 'geweigerd door de database', gestopt: 'niet weggeschreven bij het stoppen' }
   const num = (n) => (n ?? 0).toLocaleString('nl-BE')
   const age = (h) => h == null ? '—' : h >= 8760 ? `${(h / 8760).toFixed(1)} jaar` : h >= 720 ? `${Math.round(h / 720)} maanden` : `${Math.round(h / 24)} dagen`
   const day = (s) => s ? new Date(s).toLocaleDateString('nl-BE', { day: 'numeric', month: 'short', year: 'numeric' }) : '—'

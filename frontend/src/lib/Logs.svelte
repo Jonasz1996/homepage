@@ -11,6 +11,7 @@
   const RANGES = ['1h', '24h', '7d', '30d']
 
   let hosts = $state([])
+  let hostsError = $state('')
   let host = $state(null)
   let q = $state('')
   let qLive = $state('')
@@ -56,7 +57,8 @@
   }
 
   // Eerst de regels, dan de grafiek: die is het duurst. Mislukt de grafiek, dan blijven de regels staan; mislukt het
-  // zoeken, dan geen regels van de vorige filter onder de nieuwe.
+  // zoeken, dan geen regels van de vorige filter onder de nieuwe. Zo ook de grafiek: die van de vorige filter gaat weg
+  // zodra de nieuwe regels er zijn, niet pas als de nieuwe grafiek er is (tot 20 s later).
   async function search(my) {
     const p = params()
     let r
@@ -70,6 +72,8 @@
     items = r.items
     more = r.more
     error = ''
+    hist = null
+    histError = ''
     try {
       const h = await api('/logs/histogram?' + p)
       if (my === gen) { hist = h; histError = '' }
@@ -78,8 +82,11 @@
     }
   }
 
-  // De lijst met machines links: bij het openen en elke 30 s (onMount), niet bij elke filter.
-  const loadHosts = () => api('/logs/hosts').then((h) => (hosts = h)).catch(() => {})
+  // De lijst met machines links: bij het openen en elke 30 s (onMount), niet bij elke filter. Mislukt het (de server
+  // stopt na 5 s), dan blijft de vorige lijst staan, maar niet stil: zonder lijst stond er anders "nog geen logs".
+  const loadHosts = () => api('/logs/hosts')
+    .then((h) => { hosts = h; hostsError = '' })
+    .catch((e) => { hostsError = e.status === 503 ? 'te traag' : `niet geladen: ${e.message}` })
 
   async function loadMore() {
     const my = gen
@@ -168,7 +175,7 @@
     <div class="cols">
       <aside>
         <button class="hb" class:on={!host} onclick={() => (host = null)}>
-          <b>alle machines</b><small>{hosts.reduce((a, h) => a + h.count, 0).toLocaleString('nl-BE')} regels / 24 u</small>
+          <b>alle machines</b><small>{hostsError && !hosts.length ? 'aantal onbekend' : `${hosts.reduce((a, h) => a + h.count, 0).toLocaleString('nl-BE')} regels / 24 u`}</small>
         </button>
         {#each hosts as h (h.host)}
           <button class="hb" class:on={host === h.host} onclick={() => (host = host === h.host ? null : h.host)}>
@@ -176,8 +183,9 @@
             <small>{h.count.toLocaleString('nl-BE')}{#if h.errors}&nbsp;·&nbsp;<span class="e">{h.errors} fouten</span>{/if}</small>
           </button>
         {:else}
-          <p class="hint">Nog geen logs ontvangen. Kies <b>machines toevoegen</b>.</p>
+          {#if !hostsError}<p class="hint">Nog geen logs ontvangen. Kies <b>machines toevoegen</b>.</p>{/if}
         {/each}
+        {#if hostsError}<p class="hint">Lijst met machines {hostsError}{hosts.length ? '; de aantallen zijn van daarnet' : ''}. Nieuwe poging over 30 s.</p>{/if}
       </aside>
       <section>
         <div class="filters">
@@ -206,6 +214,8 @@
           </svg>
         {:else if histError}
           <p class="hnote">{histError}</p>
+        {:else if busy}
+          <p class="hnote">grafiek laden…</p>
         {/if}
         {#if error}<p class="err">{error}</p>{/if}
         <div class="list">
