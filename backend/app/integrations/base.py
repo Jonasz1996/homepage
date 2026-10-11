@@ -131,10 +131,16 @@ class Integration:
         """Zoals request, maar voor een bestand (bv. config.xml) in plaats van JSON."""
         return (await self._send(method, path, **kw)).text
 
+    def _error_detail(self, r: httpx.Response) -> str | None:
+        """De foutmelding van de API zelf bij een 4xx of 5xx (gemaskeerd, kort), of None: dan de algemene tekst."""
+        return None
+
     async def _send(self, method: str, path: str, **kw) -> httpx.Response:
+        # Een eigen time-out per call (een certificaat van Let's Encrypt aanvragen duurt tot anderhalve minuut).
+        timeout = kw.pop("timeout", TIMEOUT)
         try:
             # Nooit volgen: anders gaan headers als X-API-Key mee naar een ander adres.
-            r = await self.client.request(method, self.base + path, timeout=TIMEOUT, follow_redirects=False, **kw)
+            r = await self.client.request(method, self.base + path, timeout=timeout, follow_redirects=False, **kw)
         except httpx.TimeoutException as e:
             raise IntegrationError("Time-out") from e
         except httpx.HTTPError as e:
@@ -149,7 +155,7 @@ class Integration:
                                    "of rechtstreeks het adres van de API (bv. https://192.168.0.50:8006). "
                                    "Een login (Authentik) ervoor laat geen API-token door.")
         if r.status_code >= 400:
-            raise IntegrationError(f"HTTP {r.status_code} op {path.split('?')[0]}")
+            raise IntegrationError(self._error_detail(r) or f"HTTP {r.status_code} op {path.split('?')[0]}")
         return r
 
     async def summary(self) -> list[dict]:

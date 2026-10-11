@@ -285,3 +285,29 @@ async def test_errors_say_what_is_wrong():
             with pytest.raises(IntegrationError) as e:
                 await i.request("GET", path)
             assert text in str(e.value)
+
+
+async def test_eigen_timeout_en_foutdetail():
+    from app.integrations.base import Integration, IntegrationError
+
+    seen = []
+
+    def handler(req):
+        seen.append(req.extensions["timeout"])
+        if req.url.path == "/stuk":
+            return httpx.Response(400, json={"fout": "kapot"})
+        return httpx.Response(200, json={})
+
+    class Eigen(Integration):
+        def _error_detail(self, r):
+            return f"eigen: {r.json()['fout']}"
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+        i = Integration("https://x.jbogaert.be", {}, {}, c)
+        await i.request("GET", "/ok")
+        await i.request("GET", "/ok", timeout=120)
+        assert seen[0]["read"] == 8.0 and seen[1]["read"] == 120
+        with pytest.raises(IntegrationError, match="HTTP 400 op /stuk"):
+            await i.request("GET", "/stuk")
+        with pytest.raises(IntegrationError, match="eigen: kapot"):
+            await Eigen("https://x.jbogaert.be", {}, {}, c).request("GET", "/stuk")
