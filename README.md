@@ -119,7 +119,8 @@ Fase 6, logs (knop `logs` in de titelbalk):
 - alle regels in PostgreSQL; met TimescaleDB gecomprimeerd na 1 dag en 30 dagen bewaard. Zit de schijf van de
   container boven 75%, dan gaan de oudste logregels eerder weg (de laatste 3 dagen blijven altijd). De dagelijkse
   back-up neemt de logregels niet mee
-- logviewer: per machine, zoeken, filter op ernst, 1 u tot 30 dagen, histogram, live meekijken. Een zoekopdracht
+- logviewer: per machine, zoeken, filter op ernst, 1 u tot 30 dagen, histogram, live meekijken (nieuwe regels van
+  het laatste uur; een regel die rsyslog langer vasthield, staat er na een nieuwe zoekopdracht bij). Een zoekopdracht
   stopt na 20 seconden (live meekijken en de lijst met machines na 5) en gebruikt maar één processorkern; is het te
   traag, kies dan een kortere periode of één machine
 - valt de database even weg, dan houdt de ontvanger tot 50.000 regels in het geheugen en schrijft ze weg zodra ze
@@ -133,7 +134,8 @@ Fase 6, logs (knop `logs` in de titelbalk):
 - **machines toevoegen**: kies een SSH-host en het dashboard installeert en configureert rsyslog. Op een
   Proxmox-node kan dat meteen voor alle draaiende containers (via `pct`). Of plak het getoonde script zelf. rsyslog
   stuurt in RFC 5424 (tijd met jaar en tijdzone), zodat regels die het vasthield hun eigen tijd houden (tot een dag
-  oud); machines die vóór deze versie ingesteld werden, rol je daarvoor opnieuw uit
+  oud, als de ontvanger herstartte of zijn wachtrij vol zat; wijkt de klok van een machine meer dan een uur af, dan
+  krijgt de regel de ontvangsttijd). Machines die vóór deze versie ingesteld werden, rol je daarvoor opnieuw uit
 
 Extra's, deel 1 (checks en meldingen):
 
