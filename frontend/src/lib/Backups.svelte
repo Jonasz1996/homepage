@@ -4,6 +4,7 @@
   import { bytes, duration } from './format.js'
   import { rel } from './cronfmt.js'
   import CopyCmd from './CopyCmd.svelte'
+  import ProefPlan from './ProefPlan.svelte'
 
   // Back-updekking per VM/CT (job, kopieën per PBS, nieuwste, hersteltest) en een sync tussen twee PBS'en.
   let { onfix } = $props()
@@ -38,11 +39,14 @@
   let checked = $state.raw(null)
   let planErr = $state('')
   let steps = $state.raw(null)
+  let proef = $state.raw(null)
   $effect(() => { if (data?.sync?.plan && !plan) untrack(() => (plan = { ...data.sync.plan })) })
   let timer
   $effect(() => {
     if (!plan) return
     const body = $state.snapshot(plan)
+    // Een proef hoort bij het plan waarmee ze liep: na een wijziging is ze niet meer geldig.
+    proef = null
     clearTimeout(timer)
     timer = setTimeout(async () => {
       try { checked = await api('/backups/sync/plan', { method: 'POST', body }); planErr = '' } catch (e) { checked = null; planErr = e.message }
@@ -60,10 +64,21 @@
     if (!confirm(`Op ${checked.source} een sync-gebruiker met leesrecht maken, en op ${checked.target} een sync-job die elke dag om ${plan.schedule} ophaalt?`)) return
     busy = 'create'
     steps = null
+    proef = null
     try {
       const r = await withReauth(() => api('/backups/sync/create', { method: 'POST', body: $state.snapshot(plan) }))
       steps = r.log
       await refresh()
+    } catch (e) { planErr = e.message } finally { busy = '' }
+  }
+  // Proef: wat de knop hiernaast zou doen, zonder iets te veranderen. Met SSH-hosts kijkt ze op beide PBS'en (alleen
+  // lezen) wat er al bestaat; zonder toont ze wat vooraf te zien is, ook waarom de echte knop zou weigeren.
+  async function runProef() {
+    busy = 'proef'
+    proef = null
+    try {
+      proef = await api('/backups/sync/proef', { method: 'POST', body: $state.snapshot(plan) })
+      planErr = ''
     } catch (e) { planErr = e.message } finally { busy = '' }
   }
 </script>
@@ -161,12 +176,19 @@
         <li>Zet op {checked.target} ook een prune-job (Datastore → Prune &amp; GC), anders blijft de kopie groeien.</li>
       </ol>
       <div class="go">
-        <button class="btn" disabled={busy === 'create' || !checked.ssh.source || !checked.ssh.target || checked.level === 'err'}
+        <button class="btn alt" disabled={busy === 'proef' || busy === 'create'} onclick={runProef}
+                title="Toont per PBS wat er zou gebeuren en kijkt via SSH (alleen lezen) wat er al bestaat. Er verandert niets.">
+          {busy === 'proef' ? 'proef loopt…' : 'proef'}</button>
+        <button class="btn" disabled={busy === 'proef' || busy === 'create' || !checked.ssh.source || !checked.ssh.target || checked.level === 'err'}
                 onclick={create}>{busy === 'create' ? 'bezig…' : 'stap 1 en 2 zelf uitvoeren via SSH'}</button>
         <span class="hint">{#if checked.ssh.source && checked.ssh.target}Via de SSH-hosts {checked.ssh.source} en {checked.ssh.target}
           (als root). Vraagt je 2FA-code.{:else}Voor deze knop moeten {[!checked.ssh.source && checked.source, !checked.ssh.target && checked.target].filter(Boolean).join(' en ')}
           als SSH-host in de terminal staan. <button class="link" onclick={() => onfix?.({ window: 'terminal' })}>terminal openen</button>{/if}</span>
       </div>
+      {#if proef}
+        <ProefPlan plan={proef.plan} onclose={() => (proef = null)} />
+        {#if proef.log.length}<pre class="log">{proef.log.join('\n')}</pre>{/if}
+      {/if}
       {#if steps}<pre class="log">{steps.join('\n')}</pre>{/if}
     {/if}
   {/if}
