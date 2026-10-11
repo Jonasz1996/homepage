@@ -11,10 +11,11 @@ voorwaarden uit dezelfde gates() die check() gebruikt. Een regel op "alleen proe
 (zelfde wachttijd en limiet), maar zet alleen op de tijdlijn wat hij zou doen: geen actie, geen melding.
 
 Meldingen volgen "Melden" van de tegel, zoals de storing zelf (engine.alert): hier en op de gsm, alleen hier, of alleen
-de tijdlijn. Elke poging staat in 🔔 en op de tijdlijn, maar naar de gsm gaat per regel en per storing alleen de eerste
-poging, nog één keer als het erger wordt (de herstart lukte eerst, nu mislukt ze: zo krijgt ook een gsm die alleen
-storingen krijgt het te zien), en de eerste keer dat de limiet de regel pauzeert. Een lange storing met een herstart om
-de 10 min gaf anders de hele nacht door pushberichten.
+de tijdlijn. Elke poging staat op de tijdlijn (en in 🔔, tenzij Melden op niet staat), maar naar de gsm gaat per regel
+en per storing alleen de eerste poging, nog één keer als het erger wordt (de herstart lukte eerst, nu mislukt ze: zo
+krijgt ook een gsm die alleen storingen krijgt het te zien), en de eerste keer dat de limiet de regel pauzeert. Een
+lange storing met een herstart om de 10 min gaf anders de hele nacht door pushberichten. Wat er al naar de gsm ging,
+staat in AppState (zie _to_phone), niet in de meldingen: die kan je in 🔔 wissen.
 """
 
 import logging
@@ -34,7 +35,7 @@ from ..integrations import Integration, IntegrationError, build
 from ..integrations.adguard import AdGuard
 from ..integrations.portainer import Portainer
 from ..integrations.proxmox import Proxmox
-from ..models import CheckResult, HealRule, Notification, Service, ServiceState, SshHost
+from ..models import AppState, CheckResult, HealRule, Service, ServiceState, SshHost
 from ..ssh_exec import SshFail, command, connect, run
 from ..ssh_login import Login, defaults, login_for
 from .checks import HttpClients
@@ -385,33 +386,58 @@ def push_key(rule_id: int, what: str = "poging") -> str:
     return f"heal{rule_id}" if what == "poging" else f"heal{rule_id}:{what}"
 
 
+def sent_key(key: str) -> str:
+    """De AppState met wat er met deze push_key naar de gsm ging (wanneer en hoe erg)."""
+    return f"heal_push:{key}"
+
+
+def sent_keys(rule_id: int) -> list[str]:
+    """Alle AppState van een regel (voor als je ze verwijdert)."""
+    return [sent_key(push_key(rule_id)), sent_key(push_key(rule_id, "pauze"))]
+
+
 async def _to_phone(db: AsyncSession, key: str, service_id: int, level: str) -> bool:
     """Naar de gsm? Ja als er in deze storing nog niets met deze sleutel heen ging, of als dit erger is dan wat er
     heen ging: eerst "herstart gelukt" (warn), nu "mislukt" (err). Een gsm die alleen storingen krijgt, kreeg het
     eerste niet en ziet zo toch dat zelfherstel niet meer lukt.
-    Een nieuwe storing: de service had sinds de vorige melding een geslaagde check (buiten onderhoud). Binnen een
-    storing gaat er alleen iets ergers naar de gsm, dus de laatste met deze sleutel is ook de ergste.
-    Twee kleine opzoekingen: push_key heeft een index, en check_results begint met (service_id, ts)."""
-    last = (await db.execute(select(Notification.ts, Notification.level).where(Notification.push_key == key)
-                             .order_by(Notification.id.desc()).limit(1))).first()
-    if last is None or RANK.get(level, 0) > RANK.get(last.level, 0):
+    Een nieuwe storing: de service had sinds de vorige push een geslaagde check (buiten onderhoud). Binnen een
+    storing gaat er alleen iets ergers naar de gsm, dus de laatste push met deze sleutel is ook de ergste.
+    Wat er heen ging, staat in AppState (sent_key) en niet in de melding zelf: wis je die in 🔔 (of ruimt de worker
+    hem na 30 dagen op), dan blijft het toch één push per storing.
+    Twee kleine opzoekingen: AppState op zijn sleutel, en check_results begint met (service_id, ts)."""
+    st = await db.get(AppState, sent_key(key))
+    last = st.value if st else None
+    if not last or RANK.get(level, 0) > RANK.get(last["level"], 0):
         return True
     up = (await db.execute(select(CheckResult.ts).where(
         CheckResult.service_id == service_id, CheckResult.ok.is_(True), CheckResult.maintenance.isnot(True),
-        CheckResult.ts > last.ts).limit(1))).first()
+        CheckResult.ts > datetime.fromisoformat(last["at"])).limit(1))).first()
     return up is not None
+
+
+async def _sent(db: AsyncSession, key: str, level: str) -> None:
+    """Onthoudt dat er nu iets met deze sleutel naar de gsm gaat. Op de klok van de checks (zoals CheckResult.ts),
+    niet de now van check(): daar vergelijkt _to_phone mee."""
+    value = {"at": datetime.now(timezone.utc).isoformat(), "level": level}
+    st = await db.get(AppState, sent_key(key))
+    if st:
+        st.value = value
+    else:
+        db.add(AppState(key=sent_key(key), value=value))
 
 
 async def _say(db: AsyncSession, mode: str, key: str, title: str, body: str, level: str, service_id: int,
                data: dict | None = None) -> None:
     """Een melding over zelfherstel, zoals "Melden" van de tegel het wil (zie engine.alert). Naar de gsm alleen de
-    eerste met deze sleutel in deze storing, of iets ergers (_to_phone); de rest staat in 🔔 en op de tijdlijn.
-    Alleen wat naar de gsm gaat, krijgt de sleutel: daar kijkt _to_phone naar. Pushberichten met dezelfde sleutel
-    vervangen elkaar op de gsm. Wis je die melding in 🔔, dan kan de volgende poging nog één keer pushen."""
+    eerste met deze sleutel in deze storing, of iets ergers (_to_phone); de rest staat alleen in 🔔 en op de
+    tijdlijn. Alleen wat naar de gsm gaat, krijgt de sleutel: pushberichten met dezelfde sleutel vervangen elkaar op
+    de gsm."""
     if mode == "uit":
         event(db, "actie", title, body, level, service_id, data)
         return
     push = mode != "centrum" and await _to_phone(db, key, service_id, level)
+    if push:
+        await _sent(db, key, level)
     notify(db, title, body, level=level, source="herstel", service_id=service_id, data=data, push=push,
            key=key if push else None)
 

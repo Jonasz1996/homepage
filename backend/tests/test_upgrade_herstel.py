@@ -412,6 +412,53 @@ async def test_zelfherstel_erger_gaat_nog_een_keer_naar_de_gsm(authed):
     await agen.aclose()
 
 
+async def test_zelfherstel_wissen_in_de_bel_geeft_geen_nieuwe_push(authed):
+    """Wat er per storing al naar de gsm ging, staat niet in de meldingen: "wis gelezen" in 🔔 laat de volgende
+    poging (of pauze) niet nog eens pushen. Iets ergers gaat er wel nog één keer heen."""
+    webpush._sent.clear()
+    pve = BrokenPve()
+    pve.broken = False
+    plex, rid, agen, db, http, maker = await _heal_setup(authed, pve)
+    await _run(PushService([]))  # wat er al was, zoals door de worker
+    phone = Phone(A)
+    await _subscribe(authed, phone, "Pixel", "warn")
+    svc = PushService([phone])
+    attempt, failed, pause = ("Zelfherstel: Plex was 3× down", "Zelfherstel voor Plex mislukt",
+                              "Zelfherstel voor Plex gepauzeerd")
+
+    async def notes() -> list[tuple]:
+        return [(n.title, n.push_key, n.pushed_at is None) for n in await _heal_notes(db)]
+
+    async def wissen() -> None:
+        await _run(svc)  # pas als ze verstuurd zijn, wist "wis gelezen" ze
+        assert (await authed.post("/api/notifications/read-all")).status_code == 200
+        assert (await authed.delete("/api/notifications")).status_code == 200
+        assert await notes() == []
+
+    t0 = datetime.now(timezone.utc)
+    assert (await healing.check(maker, plex, http, t0)).startswith("ok")
+    await wissen()
+    # Erger dan wat er heen ging (de herstart lukte, nu mislukt ze): nog één keer naar de gsm, en de eerste pauze.
+    pve.broken = True
+    assert (await healing.check(maker, plex, http, t0 + timedelta(minutes=11))).startswith("mislukt")
+    assert await healing.check(maker, plex, http, t0 + timedelta(minutes=22)) is None
+    assert await notes() == [(failed, f"heal{rid}", True), (pause, f"heal{rid}:pauze", True)]
+    await wissen()
+    # Dezelfde storing: na het wissen gaat er niets meer naar de gsm, ook de volgende pauze niet.
+    for m in (75, 86, 97):
+        await healing.check(maker, plex, http, t0 + timedelta(minutes=m))
+    assert await notes() == [(failed, None, False), (failed, None, False), (pause, None, False)]
+    await _run(svc)
+    assert [m["title"] for m in svc.to(phone)] == [attempt, failed, pause]
+
+    # Een regel verwijderen ruimt ook dat op.
+    keys = select(AppState.key).where(AppState.key.in_(healing.sent_keys(rid)))
+    assert len((await db.execute(keys)).all()) == 2
+    assert (await authed.delete(f"/api/heal/{rid}")).status_code == 204
+    assert not (await db.execute(keys)).all()
+    await agen.aclose()
+
+
 async def test_zelfherstel_mislukt_en_melden_van_de_tegel(authed):
     plex, rid, agen, db, http, maker = await _heal_setup(authed, BrokenPve(), max_per_hour=5)
     t0 = datetime.now(timezone.utc)

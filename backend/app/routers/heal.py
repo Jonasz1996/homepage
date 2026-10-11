@@ -2,14 +2,14 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import outside
 from ..db import get_db
 from ..deps import audit, current_user, recent_auth
 from ..integrations import IntegrationError
-from ..models import HealRule, Service, User
+from ..models import AppState, HealRule, Service, User
 from ..monitoring import healing
 from ..ssh_exec import SshFail
 from .integrations import clients
@@ -109,6 +109,8 @@ async def update(rule_id: int, body: RuleIn, request: Request, user: User = Depe
 async def remove(rule_id: int, request: Request, user: User = Depends(recent_auth), db: AsyncSession = Depends(get_db)):
     r = await _rule(db, rule_id)
     await audit(db, request, user, "heal_rule_deleted", rule=r.id, what=healing.describe(r.action))
+    # Ook wat er van deze regel naar de gsm ging (zie healing._to_phone): dat ruimt anders niemand op.
+    await db.execute(delete(AppState).where(AppState.key.in_(healing.sent_keys(r.id))))
     await db.delete(r)
     await db.commit()
 
