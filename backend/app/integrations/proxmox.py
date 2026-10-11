@@ -35,6 +35,10 @@ class Proxmox(Integration):
         """Twee tokens: lezen (monitoring, kaart, capaciteit) en een apart token voor wat iets verandert."""
         return bool(self.secrets.get("action_username") and self.secrets.get("action_password"))
 
+    def token_id(self, write: bool = False) -> str | None:
+        """Welk token headers(write) gebruikt, zonder het geheim: voor de proefmodus."""
+        return self.secrets.get("action_username" if write and self.split else "username")
+
     def headers(self, write: bool = False) -> dict:
         # Zonder actietoken doet het ene token alles, zoals vroeger.
         user, secret = self.need(*(("action_username", "action_password") if write and self.split else ("username", "password")))
