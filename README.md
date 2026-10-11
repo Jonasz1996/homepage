@@ -5,11 +5,21 @@ waarin je alles vanuit de browser beheert.
 
 Fase 1 en 2 van het [stappenplan](https://claude.ai/code/artifact/fe2b226c-d5ef-4cef-9b02-6047fcc63504):
 
-- inloggen met wachtwoord en verplichte 2FA (TOTP), eerste account via een eenmalige setup-code
+- inloggen met wachtwoord en verplichte 2FA (TOTP), eerste account via een eenmalige setup-code. Bevestigen (een
+  actie, de terminal, een geheim wijzigen) gebeurt altijd met je 2FA-code, nooit met je wachtwoord
+- **bekende toestellen**: een toestel waarop je al met 2FA inlogde, krijgt een cookie (`hp_device`, een jaar geldig,
+  bij elke login vernieuwd). Daar geldt de limiet van 30 foute pogingen per gebruikersnaam niet, die iedereen kan
+  vullen, maar wel die per IP (5), per toestel (5) en op 2FA-codes (5). Zit de gebruikersnaam op slot, dan moeten
+  alleen nieuwe toestellen wachten, en krijg je één melding "Inloggen dicht voor nieuwe toestellen". Een
+  privévenster, een andere browser, gewiste cookies of de iPhone-app op je beginscherm (tot die één keer inlogde)
+  tellen als nieuw. Je wachtwoord wijzigen of `secret.key` vervangen maakt alle andere toestellen weer onbekend;
+  afmelden niet. Een herstart van `homepage-api` wist alle slots (de tellers staan in het geheugen). Hoogstens 8
+  wachtwoordcontroles wachten tegelijk; daarboven antwoordt het dashboard "Even te druk, probeer zo opnieuw"
 - pagina's, groepen en services, aanpasbaar in een edit mode met slepen
 - import van je homepage.dev `services.yaml` (widget-wachtwoorden en API-sleutels worden versleuteld bewaard)
 - export naar YAML, en een versiegeschiedenis van de layout waarmee je elke wijziging terugzet
-- eigen meldingencentrum in de titelbalk (bv. login vanaf een nieuw IP)
+- eigen meldingencentrum in de titelbalk (bv. login vanaf een nieuw IP). *Wis gelezen* laat meldingen staan die nog
+  niet naar je gsm gestuurd zijn
 - zoeken met `Ctrl+K` of `/`, Enter opent het eerste resultaat
 - dagelijkse back-up van de database, zonder de logregels (`/var/backups/homepage`, de 5 nieuwste blijven)
 
@@ -90,7 +100,10 @@ Fase 5, SSH-terminal (knop `>_` in de titelbalk):
   is wat de host zelf als afzender ziet (`SSH_CLIENT`). Het oude bestand blijft als
   `~/.ssh/authorized_keys.homepage-bak`; kan het dashboard er daarna niet meer in, dan zet het dat meteen terug. Op
   een Proxmox-node is `authorized_keys` een link naar `/etc/pve/priv` en geldt het voor de hele cluster. Gebruik je
-  een geïmporteerde sleutel ook vanaf je pc, zet hem dan niet vast
+  een geïmporteerde sleutel ook vanaf je pc, zet hem dan niet vast. In `from=` komen alleen losse IP-adressen: wat
+  de host als afzender ziet, wat andere hosts zagen en het eigen IP van de container. Geeft een host iets anders door,
+  dan zet het dashboard niets vast. Een `from=` met een patroon, netwerk of naam toont het als *elk IP*: zet die
+  sleutel opnieuw vast
 - hostsleutel wordt bij de eerste verbinding getoond en pas na jouw bevestiging bewaard; verandert hij
   later, dan weigert de terminal te verbinden (bescherming tegen man-in-the-middle)
 - een terminal openen vraagt je 2FA-code als je langer dan 15 minuten niet bevestigd hebt;
@@ -124,7 +137,7 @@ Extra's, deel 2 (beheer):
 
 - **beveiliging** (⚿ in de titelbalk): alle apparaten waar je ingelogd bent, met IP, land (van Cloudflare),
   browser en laatst actief; één of alle andere afmelden (vraagt 2FA). Plus de auditlog met filter, en
-  je wachtwoord wijzigen (meldt andere apparaten af)
+  je wachtwoord wijzigen (vraagt je 2FA-code, meldt andere apparaten af en geeft een melding)
 - **notities** per service in Markdown (mini dashboard → Notities): hoe herstellen, waar de config staat, ...
   Zoeken met `Ctrl+K` doorzoekt ook de notities
 - **snelle acties** in de zoekbalk: typ bv. `herstart vaultwarden` of `start 101` en klik, zonder het mini
@@ -212,10 +225,15 @@ Later, deel 3 (Authentik en gsm):
   ingesteld) met als redirect-URI `https://homepage.jbogaert.be/api/auth/oidc/callback`, en een application met slug
   bv. `homepage`. Vul in het dashboard bij ⚿ → *authentik* de issuer in
   (`https://auth.jbogaert.be/application/o/homepage/`), de client-id en het client secret en zet het aan; het
-  dashboard toont daar ook de exacte redirect-URI. Alleen bestaande gebruikers met 2FA kunnen zo binnen, de
-  gebruikersnaam bij Authentik moet dezelfde zijn. Standaard moet Authentik in het ID-token melden dat er een tweede
-  factor gebruikt is (`amr`, zit erin als je flow een authenticator-validatie-stap heeft); dat kan je uitzetten als
-  je dat bewust bij Authentik regelt. Inloggen met wachtwoord en 2FA blijft altijd werken
+  dashboard toont daar ook de exacte redirect-URI. Alleen bestaande gebruikers met 2FA kunnen zo binnen, en
+  alleen met het Authentik-account dat ze zelf gekoppeld hebben: log in met wachtwoord en 2FA en kies ⚿ →
+  *authentik* → *Koppel Authentik-account* (vraagt je 2FA-code, en Authentik vraagt opnieuw wie je bent). Het
+  dashboard herkent het account aan zijn vaste ID (`sub`), niet aan de naam; zet in Authentik bij de provider
+  *Subject mode* op *Based on the User's hashed ID* (met username of e-mail weigert het dashboard te koppelen). Koppel
+  vanaf het adres in de redirect-URI. Maak je je Authentik-gebruiker opnieuw aan of verander je de issuer, koppel dan
+  opnieuw. *Naam tonen uit claim* dient alleen nog om de naam te tonen. Standaard moet Authentik in het ID-token
+  melden dat er een tweede factor gebruikt is (`amr`, zit erin als je flow een authenticator-validatie-stap heeft);
+  dat kan je uitzetten als je dat bewust bij Authentik regelt. Inloggen met wachtwoord en 2FA blijft altijd werken
 - **SSH-terminal** (knop `>_`), het beste van PuTTY en RDM in de browser:
   - **⟳ pve** haalt alle nodes, containers en VM's met hun IP uit je Proxmox-tegels (VM's via de QEMU guest agent),
     in mappen per node. Onder ⚙ standaard kan dat elk half uur automatisch: nieuwe machines erbij, IP's bijgewerkt
@@ -308,7 +326,8 @@ Later, deel 3 (Authentik en gsm):
   prune-job, anders blijft de kopie groeien
 - **gepland onderhoud**: in het mini dashboard van een service (of `Ctrl+K` → "gepland onderhoud" voor groepen)
   onderhoud vooraf plannen: eenmalig, elke dag of op vaste weekdagen (bv. elke zondag 3:00 tot 4:00 tijdens de
-  back-up). Tijdens het venster geen meldingen en telt de uptime het niet mee; het begin komt op de tijdlijn
+  back-up). Een herhalend venster duurt hoogstens 12 uur per keer. Tijdens het venster geen meldingen en telt de
+  uptime het niet mee; het begin komt op de tijdlijn
 - **incidentnotities**: bij een storing op de tijdlijn of in het mini dashboard noteer je de oorzaak en de oplossing.
   Gaat dezelfde service later weer down, dan toont het mini dashboard die notities meteen bovenaan
 - **overal zoeken** met `Ctrl+K`: naast tegels en acties ook notities, cronjobs, SSH-hosts, apparaten,
@@ -373,12 +392,14 @@ Later, deel 3 (Authentik en gsm):
 - **van buitenaf** (⚿ → van buitenaf): komt een bezoek via Cloudflare (NPM kreeg het met een `CF-Connecting-IP` van
   Cloudflare of een tunnel), met een vervalste header van Cloudflare of vanaf een publiek IP, dan staan de terminal
   (ook cronjobs starten of bewaken, rsyslog uitrollen, sleutels vastzetten), updates installeren, acties (aan/uit,
-  Wake-on-LAN, zelfherstel, snapshots verwijderen, hersteltest, API-calls die iets veranderen, poortscan) en
-  configuraties downloaden standaard uit. Kijken kan altijd; bovenaan staat dan "buiten". Per functie: uit, één uur
-  aan (ook onderweg, met je 2FA-code) of altijd aan (alleen thuis). Aanzetten geeft een melding. Je LAN, VPN en
-  Tailscale tellen als thuis, net als je eigen publieke IP (wie thuis via Cloudflare surft); extra thuisnetwerken (bv.
-  je IPv6-voorvoegsel) stel je daar ook in, alleen thuis. Een vervalste header van Cloudflare telt altijd als van
-  buitenaf en geeft een melding (zie Installeren → Cloudflare)
+  Wake-on-LAN, zelfherstel, snapshots verwijderen, hersteltest, API-calls die iets veranderen, poortscan, API's
+  instellen of calls uitproberen, een tegel met integratie maken, importeren of een ander adres geven) en
+  configuraties downloaden standaard uit. Die tegels en API's vragen van buitenaf ook altijd een verse 2FA-code,
+  ook als acties op *altijd aan* staat, want ze halen iets op bij een adres in je netwerk. Kijken kan altijd;
+  bovenaan staat dan "buiten". Per functie: uit, één uur aan (ook onderweg, met je 2FA-code) of altijd aan (alleen
+  thuis). Aanzetten geeft een melding. Je LAN, VPN en Tailscale tellen als thuis, net als je eigen publieke IP (wie
+  thuis via Cloudflare surft); extra thuisnetwerken (bv. je IPv6-voorvoegsel) stel je daar ook in, alleen thuis. Een
+  vervalste header van Cloudflare telt altijd als van buitenaf en geeft een melding (zie Installeren → Cloudflare)
 - **net → firewall**: welke IP's en poorten het dashboard echt gebruikt (uit de tegels, API-beheer, de SSH-hosts en
   de DNS-server), wat er binnenkomt, en een voorstel voor aliassen en regels in OPNsense voor de firewall tussen de
   VLAN's. Bovenaan staat of er een slot voor het dashboard stond bij het laatste bezoek van buitenaf: Cloudflare
@@ -486,8 +507,12 @@ Monitoring**:
   elke 4 uur of elke dag een herinnering. De melding over het certificaat kan per tegel uit
 - **pauzeren** (in het mini dashboard, of in bewerken): de check loopt niet en meldt niets. Pauzeren, de meldingen
   uitzetten, de check weghalen of een tegel (groep, pagina) met een lopende check verwijderen vraagt je 2FA en geeft
-  een melding, zodat wie je sessie steelt niet stilletjes de bewaking uitzet. Een gepauzeerde check staat ter info
-  in **!**
+  een melding, zodat wie je sessie steelt niet stilletjes de bewaking uitzet. Hetzelfde geldt voor onderhoud
+  beginnen of verlengen, gepland onderhoud aanzetten of verschuiven, een cronjob dempen, een webhook uitzetten,
+  vernieuwen of weghalen, een logregel uitzetten, lager zetten of weghalen, een beveiligingspunt in **!** negeren,
+  de meldingen over een certificaat uitzetten en een check onder een ouder hangen die down of in onderhoud is. Een
+  cronjob niet meer bewaken geeft alleen een melding. Een gepauzeerde check staat ter info in **!**, net als
+  onderhoud dat met de hand gezet is en meer dan een dag loopt of voor veel services tegelijk geldt
 - **uptime** over 24 u, 7 d, 30 d en 1 jaar in het mini dashboard; op de tegel als hij onder 99,9 % zakt
 - **afhankelijkheden**: hangt een tegel af van een andere (CT op een node, container op Portainer), dan krijg je één
   melding voor de ouder. Is de ouder terug en het kind niet, dan alsnog een melding voor het kind. Faalt het grootste
@@ -610,12 +635,23 @@ Het script toont op het einde de **setup-code** voor het eerste account.
 Maak daarna in Nginx Proxy Manager een proxy host (bv. `home.jbogaert.be` → `http://<IP van de container>:80`)
 met SSL en "Websockets Support" aan.
 
-Testen kan meteen op `http://<IP>`. Via NPM met HTTPS is de sessiecookie automatisch `Secure`
-(`HOMEPAGE_COOKIE_SECURE=auto`).
+Open het dashboard via zijn naam in NPM. Via NPM met HTTPS is de sessiecookie automatisch `Secure`
+(`HOMEPAGE_COOKIE_SECURE=auto`). Geef bij de eerste installatie het IP van NPM mee:
+`NPM_IP=192.168.0.245 bash <(curl ...)`; het komt in `/etc/homepage/homepage.env` (`HOMEPAGE_NPM_IP`).
 
-Zet in Proxmox de firewall van de container aan en laat poort 80 alleen toe vanaf NPM (192.168.0.245).
-nginx gelooft de `X-Forwarded-For`-header enkel van dat adres, maar zo kan niemand op het LAN NPM en Cloudflare
-omzeilen. Laat daarnaast poort 514 (udp en tcp) toe vanaf je LAN voor de logs.
+nginx laat zelf alleen dit binnen: van NPM en van de container zelf alles, van je LAN (privé-adressen) alleen
+`/api/push/`, `/api/hooks/` en `/api/healthz`, en de rest krijgt een 403 met uitleg. Zo kan niemand op het LAN NPM en
+Cloudflare omzeilen, en gaat je wachtwoord nooit onversleuteld over het netwerk. In **! → instellingen** staat dat
+als *Dashboard alleen via NPM*. Eerst testen op `http://<IP>` voor er een host in NPM is: zet `HOMEPAGE_LAN_OPEN=1`
+in `/etc/homepage/homepage.env`, voer `bash /opt/homepage/deploy/install.sh` uit, en zet het daarna terug op 0. Gaf
+je bij de eerste installatie geen `NPM_IP` mee, dan neemt het script 192.168.0.245 en laat het het LAN open tot jij
+`HOMEPAGE_LAN_OPEN=0` zet. Krijg je ook via NPM een 403, dan klopt `HOMEPAGE_NPM_IP` niet: zet het juiste IP en
+voer `install.sh` opnieuw uit in de container (`pct enter <CTID>`). Wat install.sh koos, staat in
+`/etc/homepage/nginx`.
+
+De firewall van de container in Proxmox is een extra laag: laat dan poort 80 toe vanaf NPM én vanaf de machines die
+push-monitors, webhooks of `/api/healthz` rechtstreeks aanroepen (Zabbix, Proxmox, PBS, Home Assistant, scripts).
+Laat daarnaast poort 514 (udp en tcp) toe vanaf je LAN voor de logs.
 
 **Cloudflare.** De headers van Cloudflare (`CF-Connecting-IP` met het echte IP, `CF-IPCountry` met het land,
 `Cf-Access-Jwt-Assertion` van Cloudflare Access) gelooft nginx alleen als het verzoek van NPM komt én NPM het zelf
@@ -624,8 +660,8 @@ van Cloudflare of een tunnel kreeg. Dat werkt voor allebei:
 - een poortdoorverwijzing naar NPM via de proxy van Cloudflare (oranje wolk): NPM krijgt het verzoek van een adres
   van Cloudflare. Die adresblokken staan in `deploy/nginx-map.conf` (bron: https://www.cloudflare.com/ips)
 - een Cloudflare Tunnel: cloudflared (in een CT of op de host van NPM) komt van een privé-adres bij NPM. Laat de
-  tunnel naar NPM wijzen, niet rechtstreeks naar de container. Op de host van NPM mag dat `localhost`, het
-  Docker-netwerk of het LAN-adres van NPM zelf zijn
+  tunnel naar NPM wijzen, niet rechtstreeks naar de container (die geeft dan een 403). Op de host van NPM mag dat
+  `localhost`, het Docker-netwerk of het LAN-adres van NPM zelf zijn
 
 Wie NPM rechtstreeks bereikt (poort 443 zonder Cloudflare, of vanaf het LAN) en zelf zo'n header meestuurt, bv. met
 je eigen publieke IP om als thuis te tellen, telt als van buitenaf en geeft een melding "Vervalste Cloudflare-header"
@@ -711,6 +747,7 @@ cd backend && ../.venv/bin/pytest            # tests op SQLite
 HOMEPAGE_TEST_DATABASE_URL=postgresql+asyncpg://... ../.venv/bin/pytest   # tests op PostgreSQL
 
 cd frontend && npm ci && npm run dev         # proxy't /api naar 127.0.0.1:8000
+cd frontend && npm test                      # unit-tests (node:test), bv. de Markdown van de notities
 ```
 
 Een bibliotheek toevoegen of bijwerken: in `backend/pyproject.toml`, en daarna `backend/requirements.lock` (en
