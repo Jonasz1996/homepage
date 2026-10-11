@@ -2,6 +2,7 @@
   import { untrack } from 'svelte'
   import { api, withReauth } from './api.js'
   import { FORMATS, SHOW, fieldValue, guess, lastKey, level, pick, starred } from './apicalls.js'
+  import { ask } from './dialog.svelte.js'
   import { value } from './format.js'
   import JsonTree from './JsonTree.svelte'
 
@@ -39,7 +40,7 @@
   }
 
   async function tryIt() {
-    if (method !== 'GET' && !window.confirm(`Dit voert de ${method}-call echt uit op ${conn.name}. Doorgaan?`)) return
+    if (method !== 'GET' && !(await ask(`Dit voert de ${method}-call echt uit op ${conn.name}. Doorgaan?`, { ok: 'Uitvoeren', danger: true }))) return
     busy = true
     error = ''
     try {
@@ -63,7 +64,7 @@
   }
 
   async function del() {
-    if (!window.confirm(`Call '${call.name}' verwijderen?`)) return
+    if (!(await ask(`Call '${call.name}' verwijderen?`, { ok: 'Verwijderen', danger: true }))) return
     try {
       await api(`/apis/calls/${call.id}`, { method: 'DELETE' })
       onsaved?.()
