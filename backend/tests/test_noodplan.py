@@ -98,6 +98,19 @@ def test_hersteltest_zonder_ct():
     assert "De maandelijkse hersteltest zette laatst CT 105 (dns) terug op 1/10: gelukt." in md
 
 
+def test_leestoken_ziet_geen_backups():
+    # De lijst van de PBS-opslag bleef leeg (PVEAuditor ziet geen back-ups), de dekking kent ze wel: dat zegt het plan.
+    v = _value()
+    g = v["data"]["clusters"][0]["guests"][0]
+    md = doc.to_md(doc.blocks(_value(clusters=[{**v["data"]["clusters"][0], "guests": [{**g, "volids": {}}]}])))
+    assert "Proxmox gaf geen lijst van de back-ups op pbs-pi" in md and "de tabel hieronder toont" not in md
+    assert "`pct restore 101 pbs-pi:backup/ct/101/<tijd uit pvesm list> --storage local-lvm`" in md
+    from app.masking import mask
+    assert mask(md) == md
+    md = doc.to_md(doc.blocks(v))
+    assert "Proxmox gaf geen lijst" not in md and "(de tabel hieronder toont die van 12/10)" in md
+
+
 def test_escape():
     bad = {"name": "<script>alert(1)</script>", "url": "javascript:alert(1)"}
     v = _value()

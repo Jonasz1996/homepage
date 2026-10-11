@@ -531,6 +531,9 @@ def _restore(value: dict, d: dict) -> list[tuple]:
                 + (f", fingerprint {sto['fingerprint']}" if sto.get("fingerprint") else "")
                 + (" en de encryptiesleutel (zie Sleutels)" if sto.get("encrypted") else ""))
     newest = max((b.get("last") for g in guests(d) for b in g.get("backups") or [] if b.get("last")), default=None)
+    # Proxmox toont een back-up in de lijst van de opslag alleen met Datastore.AllocateSpace en VM.Backup: met het
+    # leestoken (PVEAuditor) blijft die lijst dan leeg en kent de tabel geen enkele back-up bij naam.
+    blind = newest is not None and not any(g.get("volids") for g in guests(d))
     archs: dict[str, list[str]] = {}
     unknown = False
     for c in d.get("clusters") or []:
@@ -551,7 +554,7 @@ def _restore(value: dict, d: dict) -> list[tuple]:
         login,
         ["Kijk of de PBS-opslag er is: ", Code("pvesm status"), f" toont {sid} als active. {add}."],
         ["Nieuwste back-up: ", Code(f"pvesm list {sid} --vmid <ID>"),
-         f" (de tabel hieronder toont die van {day(newest)})." if newest else "."],
+         f" (de tabel hieronder toont die van {day(newest)})." if newest and not blind else "."],
         ["Bestaat de CT/VM nog maar is hij stuk: eerst ", Code("pct stop <ID>"), " of ", Code("qm stop <ID>"),
          ", en zet ", Code("--force 1"), " achter het commando (dat overschrijft hem). Anders een vrij ID: ",
          Code("pvesh get /cluster/nextid"), "."],
@@ -563,6 +566,11 @@ def _restore(value: dict, d: dict) -> list[tuple]:
          "aan."],
         f"Of in de webinterface: opslag {sid} → Backups → kies de nieuwste van het ID → Restore.",
     ]))
+    if blind:
+        out.append(("note", "warn", [f"Proxmox gaf geen lijst van de back-ups op {sid}: het leestoken ziet ze "
+                                     "waarschijnlijk niet (daarvoor zijn Datastore.AllocateSpace en VM.Backup nodig). "
+                                     "In de commando's staat daarom ", Code("<tijd uit pvesm list>"), ": zoek die op met ",
+                                     Code(f"pvesm list {sid} --vmid <ID>"), " als root op een node."]))
     multi = len(archs) > 1
     rows = []
     for c in d.get("clusters") or []:

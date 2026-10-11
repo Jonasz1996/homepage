@@ -482,10 +482,12 @@ Later, deel 3 (Authentik en gsm):
   is het noodplan ouder dan 15 dagen, dan staat het in **!**. Tonen en downloaden (html of Markdown) vraagt je
   2FA-code, staat van buitenaf uit en komt in het auditlog. Staat de kopie buiten de container aan, dan staan
   `noodplan.html` en `noodplan.md` ook in `/mnt/homepage-backup`, te openen zonder het dashboard. Rechten: niets
-  nieuws (het Proxmox-leestoken met PVEAuditor en de PBS-tegels met DatastoreAudit). Het IP van een VM komt uit de
-  config, OPNsense (ARP/DHCP), de SSH-hosts of de QEMU guest agent: dat laatste werkt op PVE 9 met PVEAuditor
-  (`VM.GuestAgent.Audit`, kijk het na met `pveum role list`) als `qemu-guest-agent` in de VM draait; PVE 8 vraagt er
-  `VM.Monitor` voor, geef dat het leestoken niet (OPNsense vindt die VM's ook). Zie [Noodplan
+  nieuws (het Proxmox-leestoken met PVEAuditor en de PBS-tegels met DatastoreAudit). Ziet het leestoken de back-ups
+  op de PBS-opslag niet bij naam (Proxmox vraagt daar Datastore.AllocateSpace en VM.Backup voor, geef die het
+  leestoken niet), dan staat in de commando's `<tijd uit pvesm list>` en zegt het noodplan dat. Het IP van een VM
+  komt uit de config, OPNsense (ARP/DHCP), de SSH-hosts of de QEMU guest agent: dat laatste werkt op PVE 9 met
+  PVEAuditor (`VM.GuestAgent.Audit`, kijk het na met `pveum role list`) als `qemu-guest-agent` in de VM draait; PVE 8
+  vraagt er `VM.Monitor` voor, geef dat het leestoken niet (OPNsense vindt die VM's ook). Zie [Noodplan
   instellen](#noodplan-instellen)
 - **gepland onderhoud**: in het mini dashboard van een service (of `Ctrl+K` → "gepland onderhoud" voor groepen)
   onderhoud vooraf plannen: eenmalig, elke dag of op vaste weekdagen (bv. elke zondag 3:00 tot 4:00 tijdens de
