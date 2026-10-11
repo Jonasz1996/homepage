@@ -26,12 +26,13 @@
     busy = d.mac
     try { await api(`/devices/${d.mac}/scan`, { method: 'POST' }); await load() } catch (e) { error = e.message } finally { busy = '' }
   }
-  // Onbekende apparaten en privé-adressen zonder naam verdwijnen na 30 dagen vanzelf; een gekend apparaat niet.
+  // Onbekende apparaten en het oude adres van een toestel met een privé-adres verdwijnen na 30 dagen vanzelf, tenzij ze
+  // een naam, notitie of "volgen" hebben; een ander gekend apparaat niet.
   async function forget(d) {
     if (!confirm(`${d.name || d.hostname || d.mac} vergeten? Komt het terug op je netwerk, dan krijg je opnieuw een melding.`)) return
     try { await api(`/devices/${d.mac}`, { method: 'DELETE' }); edit = null; await load() } catch (e) { error = e.message }
   }
-  const PRIVATE = 'Willekeurig MAC-adres (gsm of laptop met een privé-adres, of een VM/container): de fabrikant is niet te zien. Neemt een gekend toestel een nieuw adres met dezelfde hostnaam op dezelfde interface, dan houdt het zijn naam.'
+  const PRIVATE = 'Willekeurig MAC-adres (gsm of laptop met een privé-adres, of een VM/container): de fabrikant is niet te zien. Neemt een toestel met een naam een nieuw adres met dezelfde hostnaam op dezelfde interface, en staat het oude adres niet meer in de ARP-tabel, dan houdt het zijn naam.'
 
   const ago = (ts) => {
     const m = Math.round((Date.now() - new Date(ts).getTime()) / 60000)
