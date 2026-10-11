@@ -273,13 +273,16 @@ async def _setup(authed, monkeypatch, tmp_path, npm_pw="Npm-pw-8Lc", extra_tile=
     states = {
         "coverage": {"at": "2026-10-12T04:00:00+00:00", "clusters": [{
             "service_id": pve, "service": "PVE", "error": None, "nodes": ["pve50", "pve51"],
-            "rows": [{"vmid": 101, "type": "ct", "jobs": ["backup-nacht"], "level": "warn", "why": "maar één kopie",
+            "rows": [{"vmid": 101, "type": "ct", "name": "homepage", "pbs_count": 1, "stopped": False,
+                      "jobs": ["backup-nacht"], "level": "warn", "why": "maar één kopie",
                       "copies": [{"pbs": "PBS pi", "service_id": pbs, "store": "backup", "ns": "", "age": 10800,
                                   "count": 14}], "restore": {"at": "2026-10-01T05:00:00+00:00", "ok": True}},
-                     {"vmid": 100, "type": "vm", "jobs": ["backup-nacht"], "level": "warn", "why": "maar één kopie",
+                     {"vmid": 100, "type": "vm", "name": "opnsense", "pbs_count": 1, "stopped": False,
+                      "jobs": ["backup-nacht"], "level": "warn", "why": "maar één kopie",
                       "copies": [{"pbs": "PBS pi", "service_id": pbs, "store": "backup", "ns": "", "age": 10200,
                                   "count": 14}]},
-                     {"vmid": 102, "type": "ct", "jobs": [], "copies": [], "level": "err",
+                     {"vmid": 102, "type": "ct", "name": "media", "pbs_count": 0, "stopped": False, "jobs": [],
+                      "copies": [], "level": "err",
                       "why": "zit in geen enkele back-upjob"}],
             "jobs": [{"id": "backup-nacht", "storage": "pbs-pi", "schedule": "01:00", "enabled": True, "all": True,
                       "node": None, "pool": None, "comment": "Cmt-x9", "pbs": True, "server": "192.168.0.60",
@@ -414,7 +417,10 @@ async def test_masker_woord(authed, monkeypatch, tmp_path):
     value = await _plan(db)
     md = (await nood.render(db, value, "md"))[0]
     assert "homepage-***" in md and value["masked"] > 0 and "bekend" in value["masked_kinds"]
-    assert ("masker", nood.problems(value, T0)[-1][1]) in nood.problems(value, T0)
+    assert [k for k, _ in nood.problems(value, T0)] == ["masker"]
+    from app import attention
+    items = await attention.noodplan_items(db, T0, {})
+    assert [i["level"] for i in items] == ["warn"] and "(bekend)" in items[0]["text"]
     assert not (await db.execute(select(Notification).where(Notification.level == "err"))).scalars().all()
     await agen.aclose()
 
@@ -673,4 +679,54 @@ async def test_worker(authed, monkeypatch, tmp_path):
     assert (await _plan(db))["at"] == at
     ev = (await db.execute(select(Event).where(Event.title == "Noodplan bijgewerkt"))).scalars().all()
     assert len(ev) == 1 and "op vraag van" not in ev[0].body
+    await agen.aclose()
+
+
+async def test_aandacht_en_checklist(authed, monkeypatch, tmp_path):
+    from app import attention, setupcheck
+    _, pbs = await _setup(authed, monkeypatch, tmp_path)
+    agen, db = await _db()
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+
+    async def items():
+        return [i for i in (await attention.collect(db))["items"] if i["key"] == "noodplan"]
+
+    # Nog nooit gemaakt: alleen de checklist.
+    assert await items() == []
+    row = await setupcheck.noodplan_row(db)
+    assert row["state"] == "none" and row["fix"] == {"window": "noodplan"} and row["group"] == "proxmox"
+    await agen.aclose()
+
+    # Gemaakt, maar de kopie buiten de container staat uit.
+    assert (await _run(World(), now - timedelta(days=16)))["ok"]
+    agen, db = await _db()
+    row = await setupcheck.noodplan_row(db)
+    assert row["state"] == "half" and row["fix"] == {"window": "health", "tab": "homepage"}
+    assert "alleen in het dashboard" in row["text"]
+    # 16 dagen oud: een punt in Aandacht.
+    [it] = await items()
+    assert it["level"] == "warn" and it["area"] == "back-ups" and it["fix"] == {"window": "noodplan"}
+    assert "16 dagen geleden" in it["text"] and it["text"].endswith("Infrastructuur → Noodplan → nu bijwerken.")
+
+    # De kopie aan, de map bestaat, maar de PBS geeft deze week geen antwoord: half, maar geen punt (één week).
+    (await ensure_state(db, "health_settings", {})).value = {"offsite": True}
+    await db.commit()
+    (tmp_path / "offsite").mkdir()
+    world = World()
+    assert (await _run(world, now - timedelta(days=1)))["ok"]
+    world.broken_pbs = True
+    assert (await _run(world, now))["ok"]
+    row = await setupcheck.noodplan_row(db)
+    assert row["state"] == "half" and row["text"].endswith("maar onvolledig.") and "PBS pi" in row["todo"][0]
+    assert await items() == []
+
+    # Alles in orde.
+    assert (await _run(World(), now + timedelta(minutes=1)))["ok"]
+    row = await setupcheck.noodplan_row(db)
+    assert row["state"] == "ok" and row["text"].endswith(f"kopie in {tmp_path / 'offsite'}.")
+    assert await items() == []
+    # De checklist zelf heeft de rij, na de hersteltest.
+    done = await setupcheck.run(db, HttpClients(httpx.MockTransport(World())), {})
+    keys = [r["key"] for g in done["groups"] for r in g["rows"]]
+    assert keys.index("noodplan") == keys.index("restoretest") + 1
     await agen.aclose()
