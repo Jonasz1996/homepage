@@ -131,6 +131,12 @@ def by_role(d: dict, role: str) -> dict | None:
     return next((g for g in guests(d) if role in (g.get("roles") or [])), None)
 
 
+def pbs_label(name: str | None) -> str:
+    """PBS pi, maar geen "PBS PBS pi"."""
+    name = name or "?"
+    return name if "pbs" in name.lower() else f"PBS {name}"
+
+
 def _join(parts: list, sep: str = ", ") -> list:
     out: list = []
     for i, p in enumerate(parts):
@@ -209,7 +215,7 @@ def _first(value: dict, d: dict) -> list[tuple]:
         items.append("Proxmox: geen Proxmox-tegel in het dashboard.")
     pbs = d.get("pbs") or []
     if pbs:
-        items.append(["Back-ups: ", *_join([[f"PBS {p['name']} ", Link(p["url"]) if p.get("url") else "adres onbekend",
+        items.append(["Back-ups: ", *_join([[f"{pbs_label(p['name'])} ", Link(p["url"]) if p.get("url") else "adres onbekend",
                                               f" ({p.get('runs_on') or 'eigen toestel'})"] for p in pbs])])
     for a in (a for a in acc if a.get("kind") == "npm"):
         items.append([f"Proxy: {a['name']} ", *([a["ip"], " "] if a.get("ip") else []),
@@ -234,7 +240,8 @@ def _first(value: dict, d: dict) -> list[tuple]:
 
 HOW = {"ip": "IP in de tegel", "npm": "rechtstreeks, zoals NPM het doorstuurt", "node": "IP van de node",
        "corosync": "corosync-IP (het IP van de webinterface is onbekend)", "vorig": "uit een vorig noodplan",
-       "lan": "rechtstreeks (het LAN mag erbij)", "onbekend": "onbekend: zet het IP in de tegel"}
+       "lan": "rechtstreeks (het LAN mag erbij)", "via_npm": "alleen via NPM (nginx laat het LAN niet rechtstreeks toe)",
+       "onbekend": "onbekend: zet het IP in de tegel"}
 
 
 def _how(a: dict, at) -> str:
@@ -279,7 +286,7 @@ def _node_title(n: dict) -> str:
                        "online" if n.get("online") else "offline"])
 
 
-STATUS = {"running": "draait", "stopped": "staat uit", "paused": "gepauzeerd"}
+STATUS = {"running": "draait", "stopped": "staat uit", "paused": "gepauzeerd", "unknown": "status onbekend"}
 
 
 def _disk(k: dict) -> list:
@@ -427,12 +434,12 @@ def _backups(value: dict, d: dict) -> list[tuple]:
         out.append(("table", ["naam", "adres", "draait op", "datastore (pad)", "gebruikt", "sync"], rows, "pbs"))
         for p in pbs:
             if p.get("stale_from"):
-                out.append(("note", "warn", f"PBS {p.get('name')}: uit het noodplan van {day(p['stale_from'])}."))
+                out.append(("note", "warn", f"{pbs_label(p.get('name'))}: uit het noodplan van {day(p['stale_from'])}."))
             if p.get("fingerprint"):
-                out.append(("meta", f"PBS {p.get('name')}: TLS-vingerafdruk {p['fingerprint']}."))
+                out.append(("meta", f"{pbs_label(p.get('name'))}: TLS-vingerafdruk {p['fingerprint']}."))
             for s in p.get("stores") or []:
                 if s.get("path"):
-                    out.append(("p", [f"PBS {p.get('name')} opnieuw geïnstalleerd en de schijf met de datastore is er "
+                    out.append(("p", [f"{pbs_label(p.get('name'))} opnieuw geïnstalleerd en de schijf met de datastore is er "
                                       f"nog: koppel die schijf weer op {s['path']} en ",
                                       Code(f"proxmox-backup-manager datastore create {s.get('store')} {s['path']} "
                                            "--reuse-datastore true"), " (PBS 3.3 of nieuwer)."]))
@@ -563,6 +570,8 @@ def _restore(value: dict, d: dict) -> list[tuple]:
         for g in sorted(c.get("guests") or [], key=lambda g: (g.get("node") or "", g.get("vmid") or 0)):
             volid, s = pick_volid(g, sto.get("storage") if sto else None)
             notes: list = []
+            if (g.get("coverage") or {}).get("level") == "err":
+                notes.append(Bad("geen back-up"))
             if miss := _uncovered(g):
                 notes.append(Bad("niet in de back-up: " + ", ".join(k["key"] for k in miss)))
             if multi and arch_of.get(g.get("node")):
@@ -612,11 +621,13 @@ def _configs(value: dict, d: dict) -> list[tuple]:
     for e in (cfg.get("last") or {}).get("errors") or []:
         out.append(("note", "warn", f"Laatste kopie mislukt voor {e.get('source')}. {e.get('error')}"))
     hour = cfg.get("hour", 2)
+    dash = d.get("dashboard") or {}
+    where_dump = (f"dus ook in {dash.get('offsite_dir')}" if dash.get("offsite_on") else
+                  f"in {dash.get('backup_dir') or 'de container'} (de kopie buiten de container staat uit)")
     out.append(("p", f"Elke nacht om {int(hour):02d}:00 bewaart het dashboard een kopie als er iets veranderde, "
                      "versleuteld in zijn database (tabel config_versions). Die database zit in elke nachtelijke dump, "
-                     f"dus ook in {(d.get('dashboard') or {}).get('offsite_dir') or '/mnt/homepage-backup'}. Lezen kan "
-                     "alleen met het dashboard (Beheer → Configuratiewijzigingen → ↓, vraagt 2FA) of na het terugzetten "
-                     "van een dump met secret.key (sectie 8)."))
+                     f"{where_dump}. Lezen kan alleen met het dashboard (Beheer → Configuratiewijzigingen → ↓, vraagt "
+                     "2FA) of na het terugzetten van een dump met secret.key (sectie 8)."))
     out.append(("p", "OPNsense: installeer OPNsense opnieuw, dan System → Configuration → Backups → Restore met de "
                      "config.xml. OPNsense houdt zelf ook vorige versies bij onder System → Configuration → History."))
     npm = by_role(d, "npm")

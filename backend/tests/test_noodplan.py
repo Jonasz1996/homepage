@@ -1,7 +1,22 @@
+import json
+import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
+import httpx
+from sqlalchemy import select
+
+from app.config import get_settings
+from app.db import ensure_state
+from app.integrations import IntegrationError
+from app.models import AppState, ConfigVersion, Device, Event, Notification
 from app.monitoring import noodplan as nood, noodplan_doc as doc
+from app.monitoring.checks import HttpClients
+from app.security import encrypt
+
+from .test_integrations import _group, _svc
+from .test_kaart_hersteltest import _maker
+from .test_meldingen_onderhoud import _db
 
 
 # Een noodplan zoals de worker het bewaart, met de hand geschreven (voor het document alleen).
@@ -164,3 +179,350 @@ def test_pick_config_en_parsers():
     crashed = {**last_week, "running": {"at": ago(minutes=70)}, "tried": ago(minutes=70)}
     assert nood.due(crashed, mon)
     assert nood.next_slot(mon + timedelta(hours=1)) == mon + timedelta(days=7)
+
+
+# --- een cluster met twee nodes, een PBS, OPNsense en NPM -------------------------------------------------------------
+
+PVE_URL, PBS_URL = "https://192.168.0.50:8006", "https://192.168.0.60:8007"
+T0 = datetime(2026, 10, 12, 4, 2, 11, tzinfo=timezone.utc)
+# Geheimen die nooit in het noodplan mogen staan (willekeurig, zodat ze nergens toevallig in de tekst voorkomen).
+SECRETS = ("Xq7-pve-9Zt", "Kd2-pbs-4Wm", "Opn-key-7Rk", "Opn-sec-3Vb", "Npm-pw-8Lc", "hunter2", "cloudgeheim-Q1", "Cmt-x9",
+           "Blob-zout-5Tq")
+RES = [{"type": "node", "node": "pve50", "status": "online"}, {"type": "node", "node": "pve51", "status": "offline"},
+       {"type": "lxc", "vmid": 101, "name": "homepage", "node": "pve50", "status": "running"},
+       {"type": "qemu", "vmid": 100, "name": "opnsense", "node": "pve50", "status": "running"},
+       {"type": "lxc", "vmid": 102, "name": "media", "node": "pve51", "status": "unknown"},
+       {"type": "qemu", "vmid": 9000, "name": "sjabloon", "node": "pve50", "status": "stopped", "template": 1}]
+CONF = {
+    "/api2/json/nodes/pve50/lxc/101/config": {
+        "net0": "name=eth0,bridge=vmbr0,hwaddr=BC:24:11:00:00:01,ip=192.168.10.156/24,gw=192.168.10.1,tag=10,type=veth",
+        "rootfs": "local-lvm:vm-101-disk-0,size=32G", "mp0": "/mnt/tank/media,mp=/media",
+        "mp1": "local-lvm:vm-101-disk-1,mp=/data,size=8G", "mp2": "local-lvm:vm-101-disk-2,mp=/srv,size=4G,backup=1",
+        "arch": "amd64", "onboot": 1, "startup": "order=3", "description": "wachtwoord=hunter2", "digest": "abc"},
+    "/api2/json/nodes/pve50/qemu/100/config": {
+        "net0": "virtio=BC:24:11:00:00:02,bridge=vmbr0", "net1": "virtio=BC:24:11:00:00:03,bridge=vmbr1,tag=20",
+        "scsi0": "local-lvm:vm-100-disk-0,size=32G", "scsi1": "local-lvm:vm-100-disk-1,size=100G,backup=0",
+        "hostpci0": "0000:01:00.0,pcie=1", "cipassword": "cloudgeheim-Q1", "onboot": 1, "startup": "order=1"},
+}
+CONF_102 = "arch: amd64\nnet0: name=eth0,bridge=vmbr0,hwaddr=BC:24:11:00:00:04,ip=dhcp\nrootfs: local-lvm:vm-102-disk-0,size=8G\n"
+CONTENT = [{"volid": "pbs-pi:backup/ct/101/2026-10-10T01:00:05Z", "subtype": "lxc", "vmid": 101, "ctime": 1760058005},
+           {"volid": "pbs-pi:backup/ct/101/2026-10-11T01:00:05Z", "subtype": "lxc", "vmid": 101, "ctime": 1760144405},
+           {"volid": "pbs-pi:backup/vm/100/2026-10-11T01:10:00Z", "subtype": "qemu", "vmid": 100, "ctime": 1760145000}]
+
+
+def _ok(data):
+    return httpx.Response(200, json={"data": data})
+
+
+class World:
+    def __init__(self):
+        self.seen: list[str] = []
+        self.broken_pbs = False
+
+    def __call__(self, req: httpx.Request) -> httpx.Response:
+        p = req.url.path
+        self.seen.append(p)
+        if req.url.host == "192.168.0.99":
+            raise httpx.ConnectError("geen route naar de host", request=req)
+        if req.url.host == "192.168.0.60":
+            if p == "/api2/json/config/datastore":
+                if self.broken_pbs:
+                    return httpx.Response(403, json={"data": None})
+                return _ok([{"name": "backup", "path": "/mnt/datastore/backup", "comment": "Cmt-x9"}])
+            return httpx.Response(404)
+        if p == "/api2/json/cluster/resources":
+            return _ok(RES)
+        if p == "/api2/json/storage":
+            return _ok([{"storage": "pbs-pi", "type": "pbs", "server": "192.168.0.60", "datastore": "backup",
+                         "fingerprint": "ab:cd", "username": "pve@pbs", "encryption-key": "12:34:56"},
+                        {"storage": "local-lvm", "type": "lvmthin"}])
+        if p == "/api2/json/nodes/pve50/status":
+            return _ok({"current-kernel": {"machine": "x86_64"}, "cpuinfo": {"model": "Intel i5", "cpus": 6},
+                        "memory": {"total": 34359738368}})
+        if p == "/api2/json/nodes/pve50/network":
+            return _ok([{"iface": "vmbr0", "type": "bridge", "address": "192.168.0.50", "gateway": "192.168.0.1",
+                         "active": 1}, {"iface": "vmbr1", "type": "bridge", "address": "10.10.10.50", "active": 1}])
+        if p in CONF:
+            return _ok(CONF[p])
+        if p == "/api2/json/nodes/pve50/storage/pbs-pi/content":
+            return _ok(CONTENT)
+        if p.startswith("/api2/json/nodes/pve51/"):
+            return httpx.Response(500, json={"data": None})
+        return httpx.Response(404)
+
+
+async def _setup(authed, monkeypatch, tmp_path, npm_pw="Npm-pw-8Lc", extra_tile=None):
+    s = get_settings()
+    monkeypatch.setattr(s, "syslog_target", "192.168.10.156")
+    monkeypatch.setattr(s, "offsite_dir", tmp_path / "offsite")
+    (tmp_path / "nginx").write_text("lan=dicht\nnpm=192.168.0.245\n")
+    monkeypatch.setattr(s, "nginx_file", tmp_path / "nginx")
+    g = await _group(authed)
+    pve = await _svc(authed, g, "proxmox", PVE_URL, {"insecure": True},
+                     {"username": "homepage@pve!dash", "password": "Xq7-pve-9Zt"}, name="PVE")
+    pbs = await _svc(authed, g, "proxmoxbackupserver", PBS_URL, {"insecure": True},
+                     {"username": "homepage@pbs!dash", "password": "Kd2-pbs-4Wm"}, name="PBS pi")
+    await _svc(authed, g, "opnsense", "https://192.168.0.20", secrets={"key": "Opn-key-7Rk", "secret": "Opn-sec-3Vb"},
+               name="OPNsense")
+    await _svc(authed, g, "npm", "http://192.168.0.245:81", secrets={"username": "jonas@jbogaert.be", "password": npm_pw},
+               name="NPM")
+    await _svc(authed, g, "link", "https://home.jbogaert.be", name=extra_tile or "Homepage")
+    agen, db = await _db()
+    states = {
+        "coverage": {"at": "2026-10-12T04:00:00+00:00", "clusters": [{
+            "service_id": pve, "service": "PVE", "error": None, "nodes": ["pve50", "pve51"],
+            "rows": [{"vmid": 101, "type": "ct", "jobs": ["backup-nacht"], "level": "warn", "why": "maar één kopie",
+                      "copies": [{"pbs": "PBS pi", "service_id": pbs, "store": "backup", "ns": "", "age": 10800,
+                                  "count": 14}], "restore": {"at": "2026-10-01T05:00:00+00:00", "ok": True}},
+                     {"vmid": 100, "type": "vm", "jobs": ["backup-nacht"], "level": "warn", "why": "maar één kopie",
+                      "copies": [{"pbs": "PBS pi", "service_id": pbs, "store": "backup", "ns": "", "age": 10200,
+                                  "count": 14}]},
+                     {"vmid": 102, "type": "ct", "jobs": [], "copies": [], "level": "err",
+                      "why": "zit in geen enkele back-upjob"}],
+            "jobs": [{"id": "backup-nacht", "storage": "pbs-pi", "schedule": "01:00", "enabled": True, "all": True,
+                      "node": None, "pool": None, "comment": "Cmt-x9", "pbs": True, "server": "192.168.0.60",
+                      "datastore": "backup"}]}],
+            "pbs": [{"service_id": pbs, "name": "PBS pi", "host": "192.168.0.60", "port": 8007, "fingerprint": "ab:cd",
+                     "stores": [{"store": "backup", "used": 812e9, "total": 1.8e12, "groups": 34}], "syncs": [],
+                     "remotes": [], "error": None}]},
+        "cluster": {"items": [{"service_id": pve, "cluster": "thuis", "quorate": True,
+                               "qdevice": {"host": "192.168.0.61", "state": "Connected"},
+                               "nodes": [{"name": "pve50", "online": True, "ip": "10.10.10.50", "version": "8.4.1"},
+                                         {"name": "pve51", "online": False, "ip": "10.10.10.51"}]}]},
+        "npm_routes": {"hosts": {"home.jbogaert.be": {"host": "192.168.10.156", "port": 80, "scheme": "http"}}},
+        "selfcheck": {"backups": [{"name": "homepage-2026-10-12.dump", "at": "2026-10-12T01:30:00+00:00", "size": 9}],
+                      "verified": {"ok": True, "why": "93 tabellen"},
+                      "offsite": {"enabled": True, "dir": "/mnt/homepage-backup", "error": None, "count": 3,
+                                  "latest": {"name": "homepage-2026-10-12.dump"}, "key": True}},
+        "offsite_key": {"at": "2026-09-03T18:10:00+00:00", "blob": {"salt": "Blob-zout-5Tq"}, "sha256": "ff"},
+        "secret_key_saved": {"at": "2026-09-01T10:00:00+00:00"},
+    }
+    for key, value in states.items():
+        (await ensure_state(db, key, {})).value = value
+    db.add(Device(mac="bc:24:11:00:00:02", ip="192.168.0.20", last_seen=T0 - timedelta(hours=1)))
+    db.add(Device(mac="a0:8c:fd:11:22:33", ip="192.168.0.50", last_seen=T0 - timedelta(hours=1)))
+    db.add(ConfigVersion(item=f"pve:{pve}:102", name="CT 102 media · 102.conf", kind="pve", ts=T0 - timedelta(days=1),
+                         sha="0" * 64, size=len(CONF_102), content=encrypt(CONF_102)))
+    await db.commit()
+    await agen.aclose()
+    return pve, pbs
+
+
+async def _plan(db) -> dict:
+    return (await db.get(AppState, nood.STATE_KEY, populate_existing=True)).value
+
+
+async def _run(world, now=T0, **kw):
+    return await nood.run(_maker(), HttpClients(httpx.MockTransport(world)), now=now, **kw)
+
+
+async def test_noodplan_inhoud(authed, monkeypatch, tmp_path):
+    await _setup(authed, monkeypatch, tmp_path)
+    world = World()
+    assert (await _run(world, trigger="knop", user="jonas"))["ok"]
+    agen, db = await _db()
+    value = await _plan(db)
+    html, masked, kinds = await nood.render(db, value, "html")
+    md = (await nood.render(db, value, "md"))[0]
+    assert value["trigger"] == "knop" and value["by"] == "jonas" and value["running"] is None
+    assert "https://192.168.0.50:8006" in html and "pve50 · 192.168.0.50 (corosync 10.10.10.50) · x86_64" in md
+    assert "Proxmox 8.4.1 · online" in md and "MAC a0:8c:fd:11:22:33 (Wake-on-LAN) · Intel i5 · 6 cpu · 32 GB" in md
+    # pve51 is offline en had nog nooit een noodplan: het corosync-IP, en de architectuur uit de kopie van CT 102.
+    assert "pve51 · 10.10.10.51 (corosync-IP) · x86_64" in md and "offline" in md
+    row101 = next(line for line in md.splitlines() if line.startswith("| 101 |"))
+    assert "192.168.10.156 (vast)" in row101 and "bc:24:11:00:00:01 vmbr0 VLAN 10" in row101
+    assert "rootfs local-lvm 32G" in row101 and "mp0 bind /mnt/tank/media op /media **niet in de back-up**" in row101
+    assert "| rootfs local-lvm 32G; mp0 bind" in row101 and "mp1 local-lvm 8G /data **niet in de back-up**" in row101
+    assert "mp2 local-lvm 4G /srv |" in row101
+    assert row101.rstrip(" |").endswith("PBS pi 12/10 01:00") and "autostart 3" in row101
+    row100 = next(line for line in md.splitlines() if line.startswith("| 100 |"))
+    assert "192.168.0.20 (ARP/DHCP (OPNsense), gezien 12/10)" in row100 and "net1 bc:24:11:00:00:03 vmbr1 VLAN 20" in row100
+    assert "scsi1 local-lvm 100G **niet in de back-up**" in row100
+    assert "**gebonden aan pve50** (PCI 0000:01:00.0)" in md and "dit is OPNsense" in md
+    assert "↳ diensten: Homepage (<https://home.jbogaert.be>) · dit is het dashboard" in md
+    assert "`pct restore 101 pbs-pi:backup/ct/101/2026-10-11T01:00:05Z --storage local-lvm`" in md
+    assert "`qmrestore pbs-pi:backup/vm/100/2026-10-11T01:10:00Z 100`" in md
+    assert "`pct restore 102 pbs-pi:backup/ct/102/<tijd uit pvesm list> --storage local-lvm` | **geen back-up** |" in md
+    assert "| 102 | media | CT · status onbekend |" in md
+    assert "configuratie uit de kopie van 11/10 (de node gaf geen antwoord)" in md
+    assert "**onbekend** (node niet bereikbaar, IP via DHCP)" in md and "**geen back-up!** zit in geen enkele" in md
+    assert "met ID pbs-pi (dezelfde naam" in md and "fingerprint ab:cd" in md and "ja, vingerafdruk 12:34:56" in md
+    assert "key paperkey /etc/pve/priv/storage/pbs-pi.enc --output-format text" in md
+    assert "`proxmox-backup-manager datastore create backup /mnt/datastore/backup --reuse-datastore true`" in md
+    assert "| backup-nacht | 01:00 | pbs-pi (PBS 192.168.0.60, datastore backup) | alle behalve 102 |" in md
+    assert "cluster thuis, QDevice op 192.168.0.61" in md and "Nginx Proxy Manager" in md
+    assert "| OPNsense | <https://192.168.0.20> | IP in de tegel | VM 100 op pve50 |" in md
+    assert "| Dit dashboard | <https://home.jbogaert.be> | alleen via NPM" in md and "pct enter 101 op pve50" in md
+    assert "homepage-terugzetten" in md and "pg_restore -d homepage" in md
+    assert "versleuteld in /mnt/homepage-backup/secret.key.enc (wachtzin ingesteld 3/9)" in md
+    stored = json.dumps(value)
+    for secret in SECRETS + (get_settings().secret_key_file.read_text().strip(),):
+        assert secret not in html and secret not in md and secret not in stored, secret
+    assert "***" not in html and "***" not in md and masked == 0 and kinds == [] and value["masked"] == 0
+    # Eén config per VM/CT, ook niet opnieuw voor het IP; de template telt niet mee.
+    assert world.seen.count("/api2/json/nodes/pve50/lxc/101/config") == 1 and "/9000/" not in " ".join(world.seen)
+    assert nood.counts(value["data"]) == {"nodes": 2, "guests": 3, "pbs": 1, "domains": 1, "zonder_backup": 1,
+                                          "niet_in_backup": 3}
+    ev = (await db.execute(select(Event).where(Event.title == "Noodplan bijgewerkt"))).scalar_one()
+    assert ev.body == "2 nodes, 3 VM's en CT's (op vraag van jonas)" and ev.kind == "gezondheid"
+    await agen.aclose()
+
+
+async def test_live_ip():
+    class Px:
+        def __init__(self, answer):
+            self.answer, self.seen = answer, []
+
+        async def get(self, path):
+            self.seen.append(path)
+            if isinstance(self.answer, Exception):
+                raise self.answer
+            return self.answer
+    ct = Px([{"name": "lo", "inet": "127.0.0.1/8"}, {"name": "eth0", "inet": "192.168.0.31/24"}])
+    assert await nood._live_ip(ct, "pve50", "lxc", 103) == ("192.168.0.31", "CT-interfaces", None)
+    assert ct.seen == ["/nodes/pve50/lxc/103/interfaces"]
+    vm = Px({"result": [{"name": "ens18", "ip-addresses": [{"ip-address-type": "ipv4", "ip-address": "192.168.0.32"}]}]})
+    assert await nood._live_ip(vm, "pve50", "qemu", 104) == ("192.168.0.32", "guest agent", None)
+    assert vm.seen == ["/nodes/pve50/qemu/104/agent/network-get-interfaces"]
+    no = Px(IntegrationError("Geweigerd (HTTP 403)"))
+    assert (await nood._live_ip(no, "pve50", "qemu", 104))[2] == "geen rechten (VM.GuestAgent.Audit)"
+    agent = Px(IntegrationError("HTTP 500: QEMU guest agent is not running"))
+    assert (await nood._live_ip(agent, "pve50", "qemu", 104))[2] == "geen QEMU guest agent"
+
+
+async def test_masker_vangnet(authed, monkeypatch, tmp_path):
+    # (a) Een tegel met het geheim van het Proxmox-token als naam, op CT 101: in "diensten".
+    await _setup(authed, monkeypatch, tmp_path, extra_tile="Xq7-pve-9Zt")
+    assert (await _run(World()))["ok"]
+    agen, db = await _db()
+    value = await _plan(db)
+    html, n, kinds = await nood.render(db, value, "html")
+    assert "Xq7-pve-9Zt" not in html and "diensten: ***" in html and n > 0 and kinds == ["bekend"]
+    assert value["masked"] == n and value["masked_kinds"] == ["bekend"]
+    assert "op een geheim leek (bekend); dat is vervangen door ***" in html
+    assert "Xq7-pve-9Zt" not in (await nood.render(db, value, "md"))[0]
+    await agen.aclose()
+
+
+async def test_masker_woord(authed, monkeypatch, tmp_path):
+    # (b) Een geheim dat een gewoon woord is: vervangen, een waarschuwing, geen fout.
+    await _setup(authed, monkeypatch, tmp_path, npm_pw="terugzetten")
+    assert (await _run(World()))["ok"]
+    agen, db = await _db()
+    value = await _plan(db)
+    md = (await nood.render(db, value, "md"))[0]
+    assert "homepage-***" in md and value["masked"] > 0 and "bekend" in value["masked_kinds"]
+    assert ("masker", nood.problems(value, T0)[-1][1]) in nood.problems(value, T0)
+    assert not (await db.execute(select(Notification).where(Notification.level == "err"))).scalars().all()
+    await agen.aclose()
+
+
+async def test_vorige_versie_bij_fout(authed, monkeypatch, tmp_path):
+    _, pbs = await _setup(authed, monkeypatch, tmp_path)
+    world = World()
+    key = f"bron:pbs:{pbs}"
+    assert (await _run(world, T0))["ok"]
+    agen, db = await _db()
+    first = (await _plan(db))["data"]["pbs"]
+    assert first[0]["stores"][0]["path"] == "/mnt/datastore/backup" and first[0]["ip"] == "192.168.0.60"
+    world.broken_pbs = True
+    for days in (7, 15):
+        now = T0 + timedelta(days=days)
+        assert (await _run(world, now))["ok"]
+        v = await _plan(db)
+        assert v["at"] == now.isoformat()
+        assert v["data"]["pbs"] == [{**first[0], "stale_from": T0.isoformat()}]
+        src = next(s for s in v["sources"] if s["key"] == f"pbs:{pbs}")
+        assert not src["ok"] and src["from"] == T0.isoformat() and "403" in src["error"]
+        html = (await nood.render(db, v, "html"))[0]
+        assert "PBS pi: uit het noodplan van 12/10." in html and "dit deel komt uit het noodplan van 12/10" in html
+        assert (key in [k for k, _ in nood.problems(v, now)]) == (days == 15)
+    world.broken_pbs = False
+    assert (await _run(world, T0 + timedelta(days=16)))["ok"]
+    v = await _plan(db)
+    src = next(s for s in v["sources"] if s["key"] == f"pbs:{pbs}")
+    assert src == {"key": f"pbs:{pbs}", "name": "PBS pi", "ok": True} and v["data"]["pbs"][0]["stale_from"] is None
+    assert nood.problems(v, T0 + timedelta(days=16)) == []
+    await agen.aclose()
+
+
+async def test_nooit_gelukt_en_dubbele_tegel(authed, monkeypatch, tmp_path):
+    pve, _ = await _setup(authed, monkeypatch, tmp_path)
+    g = await _group(authed)
+    # Een tweede tegel naar dezelfde cluster, en een die nog nooit lukte.
+    await _svc(authed, g, "proxmox", PVE_URL, {"insecure": True},
+               {"username": "homepage@pve!dash", "password": "Xq7-pve-9Zt"}, name="PVE 2")
+    bad = await _svc(authed, g, "proxmox", "https://192.168.0.99:8006", {"insecure": True},
+                     {"username": "homepage@pve!dash", "password": "Xq7-pve-9Zt"}, name="Oud")
+    assert (await _run(World()))["ok"]
+    agen, db = await _db()
+    v = await _plan(db)
+    assert [c["key"] for c in v["data"]["clusters"]] == [f"pve:{pve}"]
+    src = next(s for s in v["sources"] if s["key"] == f"pve:{bad}")
+    assert not src["ok"] and src["from"] is None and src["failing_since"] == T0.isoformat()
+    assert "Oud" in src["name"] and "nog nooit gelukt, dit deel ontbreekt" in (await nood.render(db, v, "md"))[0]
+    assert nood.problems(v, T0 + timedelta(days=15))[0][0] == f"bron:pve:{bad}"
+    await agen.aclose()
+
+
+async def test_offsite(authed, monkeypatch, tmp_path):
+    await _setup(authed, monkeypatch, tmp_path)
+    dst = tmp_path / "offsite"
+    agen, db = await _db()
+    (await ensure_state(db, "health_settings", {})).value = {"offsite": True}
+    await db.commit()
+    world = World()
+
+    async def notices():
+        return [n.title for n in (await db.execute(select(Notification).where(
+            Notification.title.like("Noodplan%")).order_by(Notification.id))).scalars()]
+
+    # De map bestaat niet: een melding (alleen in het dashboard), één keer.
+    assert (await _run(world, T0))["ok"]
+    v = await _plan(db)
+    assert v["offsite"]["enabled"] and v["offsite"]["error"].startswith("map ") and v["offsite"]["at"] is None
+    n = (await db.execute(select(Notification).where(Notification.title == "Noodplan niet buiten de container"))).scalar_one()
+    assert n.source == "homepage" and n.level == "warn" and n.pushed_at is not None
+    assert (await _run(world, T0 + timedelta(hours=2)))["ok"]
+    assert await notices() == ["Noodplan niet buiten de container"]
+
+    dst.mkdir()
+    old = os.umask(0o077)
+    try:
+        assert (await _run(world, T0 + timedelta(hours=3)))["ok"]
+    finally:
+        os.umask(old)
+    v = await _plan(db)
+    assert v["offsite"]["error"] is None and v["offsite"]["files"] == list(nood.FILES)
+    assert v["offsite"]["at"] == (T0 + timedelta(hours=3)).isoformat()
+    html, md = (dst / "noodplan.html").read_text(), (dst / "noodplan.md").read_text()
+    assert html == (await nood.render(db, v, "html"))[0] and md == (await nood.render(db, v, "md"))[0]
+    assert f"Kopie: {dst}/noodplan.html en noodplan.md" in html
+    for f in nood.FILES:
+        assert (dst / f).stat().st_mode & 0o777 == 0o644
+    assert sorted(p.name for p in dst.iterdir()) == sorted(nood.FILES)
+    ev = (await db.execute(select(Event).where(Event.title == "Noodplan staat weer buiten de container"))).scalar_one()
+    assert ev.level == "ok" and await notices() == ["Noodplan niet buiten de container"]
+    last = (await db.execute(select(Event).where(Event.title == "Noodplan bijgewerkt").order_by(Event.id.desc()))
+            ).scalars().first()
+    assert last.body.endswith(f"kopie in {dst}")
+
+    # Mislukt ook de kopie van de dumps zelf, dan meldt de zelfcontrole het al: hier niet nog eens.
+    sc = await ensure_state(db, "selfcheck", {})
+    sc.value = {**sc.value, "offsite": {"enabled": True, "error": "map weg", "count": None}}
+    await db.commit()
+    monkeypatch.setattr(get_settings(), "offsite_dir", tmp_path / "weg")
+    assert (await _run(world, T0 + timedelta(hours=4)))["ok"]
+    assert (await _plan(db))["offsite"]["error"] and await notices() == ["Noodplan niet buiten de container"]
+
+    # Uit: niets geschreven.
+    (await ensure_state(db, "health_settings", {})).value = {"offsite": False}
+    await db.commit()
+    monkeypatch.setattr(get_settings(), "offsite_dir", dst)
+    for f in nood.FILES:
+        (dst / f).unlink()
+    assert (await _run(world, T0 + timedelta(hours=5)))["ok"]
+    v = await _plan(db)
+    assert not v["offsite"]["enabled"] and not any(dst.iterdir())
+    assert "de kopie buiten de container staat uit" in (await nood.render(db, v, "md"))[0]
+    await agen.aclose()

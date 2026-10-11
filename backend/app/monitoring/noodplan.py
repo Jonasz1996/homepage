@@ -20,11 +20,26 @@ import logging
 import os
 import re
 import socket
+import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
-from . import noodplan_doc as doc
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..config import get_settings
+from ..db import ensure_state, job_lock
+from ..deps import event, notify
+from ..health import scan as hw, selfcheck
+from ..health.security import SECRET_SAVED
+from ..integrations import IntegrationError, build
+from ..masking import mask, variants
+from ..models import AppState, ConfigVersion, Device, Service, SshHost
+from ..security import decrypt
+from ..ssh_discovery import pick_ipv4
+from . import configs, noodplan_doc as doc, restoretest
 from .noodplan_doc import day
 
 log = logging.getLogger("homepage.noodplan")
@@ -159,7 +174,7 @@ def pick_config(cfg: dict, kind: str, node: str | None = None) -> dict:
     keep = {k: v for k, v in (cfg or {}).items() if isinstance(k, str) and KEEP.match(k)}
     nets, ipc = {}, {}
     disks, bound = [], []
-    for k in sorted(keep, key=lambda k: (re.sub(r"\d+$", "", k), _int(re.sub(r"^\D+", "", k)) or 0)):
+    for k in sorted(keep, key=lambda k: (k != "rootfs", re.sub(r"\d+$", "", k), _int(re.sub(r"^\D+", "", k)) or 0)):
         v = keep[k]
         if k.startswith("net"):
             nets[k[3:]] = parse_net(k, v, kind)
@@ -414,3 +429,703 @@ def write_offsite(dst: Path, html: str, md: str) -> dict:
             return {"files": done, "error": str(e)[:300]}
         done.append(name)
     return {"files": done, "error": None}
+
+
+# --- wat het dashboard al weet -------------------------------------------------------------------------------------
+
+# Tegels met een beheerpagina die in "toegang zonder DNS" komt (naast de nodes, de PBS'en en het dashboard zelf).
+TILE_TYPES = {"opnsense": "OPNsense", "npm": "Nginx Proxy Manager", "zabbix": "Zabbix", "adguard": "AdGuard Home",
+              "homeassistant": "Home Assistant"}
+# Deze tegels krijgen geen plaats als "dienst" op een VM/CT: ze staan al apart in het noodplan.
+NOT_PLACED = ("proxmox", "proxmoxbackupserver", "opnsense", "npm")
+_FP = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2})+$", re.I)
+
+
+async def sources(db: AsyncSession) -> list[dict]:
+    """Elke Proxmox- en PBS-tegel: dezelfde lijst voor de run en de proef."""
+    rows = (await db.execute(select(Service).where(Service.type.in_(("proxmox", "proxmoxbackupserver")))
+                             .order_by(Service.id))).scalars()
+    out = []
+    for s in rows:
+        kind = "pve" if s.type == "proxmox" else "pbs"
+        out.append({"key": f"{kind}:{s.id}", "kind": kind, "service": s, "name": s.name})
+    return out
+
+
+def _connect(srcs: list[dict], http) -> None:
+    """Het integratie-object per bron (nog geen verzoek): met de sessie nog open, want een tegel aan een API uit
+    API-beheer leest die API mee."""
+    for s in srcs:
+        try:
+            s["integ"] = build(s["service"], http)
+            s["base"] = s["integ"].base
+        except IntegrationError as e:
+            s["integ"], s["base"], s["error"] = None, None, str(e)[:300]
+
+
+async def _value(db: AsyncSession, key: str) -> dict:
+    st = await db.get(AppState, key)
+    return dict(st.value) if st and isinstance(st.value, dict) else {}
+
+
+def _iso(dt: datetime | None) -> str | None:
+    if dt is None:
+        return None
+    return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).isoformat()
+
+
+def _lan_open() -> bool | None:
+    """Laat nginx het hele LAN rechtstreeks binnen (install.sh schrijft het in /etc/homepage/nginx)? None: onbekend."""
+    try:
+        text = get_settings().nginx_file.read_text()
+    except OSError:
+        return None
+    st = {k.strip(): v.strip() for k, _, v in (line.partition("=") for line in text.splitlines())}
+    return st.get("lan") != "dicht"
+
+
+async def _snapshot(db: AsyncSession) -> dict:
+    """Alles wat de worker al bijhoudt, als gewone dicts: daarna gaat de sessie dicht (geen transactie open tijdens
+    de API-vragen). Alleen wat in het noodplan komt: van de wachtzin van secret.key.enc alleen de datum, van OIDC
+    alleen of het aan staat en de host, van de kopieën van de config alleen naam, datum en aantal (de inhoud van de
+    nieuwste .conf per VM/CT blijft versleuteld tot de node zelf geen antwoord geeft)."""
+    from ..routers.versie import installed
+
+    s = get_settings()
+    oidc = await _value(db, "oidc")
+    rt = await _value(db, restoretest.STATE_KEY)
+    last_test = next(iter(rt.get("history") or []), None) or {}
+    tunnels = []
+    for st in (await db.execute(select(AppState).where(AppState.key.like("net_tunnel:%"))
+                                .order_by(AppState.key))).scalars():
+        sid = _int(st.key.split(":", 1)[1])
+        for t in (st.value or {}).get("items") or []:
+            tunnels.append({"service_id": sid, "name": t.get("name"), "status": t.get("status"),
+                            "connections": t.get("connections")})
+    by_mac, by_ip = {}, {}
+    for d in (await db.execute(select(Device).where(Device.ip.is_not(None)).order_by(Device.last_seen))).scalars():
+        by_mac[(d.mac or "").lower()] = {"ip": d.ip, "seen": _iso(d.last_seen)}
+        by_ip[d.ip] = (d.mac or "").lower()  # de laatst geziene wint
+    ssh = {}
+    for src, host in (await db.execute(select(SshHost.source, SshHost.host)
+                                       .where(SshHost.source.like("pve:%")))).all():
+        if _is_ip(host):
+            ssh[src.rsplit(":", 1)[-1]] = host
+    over = await configs.overview(db)
+    pve_items = {o["id"]: o for o in over if o["kind"] == "pve"}
+    conf: dict[int, list[dict]] = {}
+    if pve_items:
+        for item, ts, content in (await db.execute(select(ConfigVersion.item, ConfigVersion.ts, ConfigVersion.content)
+                                                   .where(ConfigVersion.id.in_(list(pve_items))))).all():
+            _, svc, vmid = (item.split(":") + ["", ""])[:3]
+            if (v := _int(vmid)) is not None:
+                conf.setdefault(v, []).append({"service_id": _int(svc), "at": _iso(ts), "content": content})
+    for copies in conf.values():
+        copies.sort(key=lambda c: c["at"] or "", reverse=True)
+    tiles = [{"id": t.id, "name": t.name, "type": t.type, "url": t.url, "parent_id": t.parent_id,
+              "check": {k: (t.check or {}).get(k) for k in ("type", "target")}}
+             for t in (await db.execute(select(Service).order_by(Service.id))).scalars()]
+    return {
+        "coverage": await _value(db, "coverage"), "cluster": await _value(db, "cluster"),
+        "routes": {"hosts": (await _value(db, "npm_routes")).get("hosts") or {}},
+        "selfcheck": await _value(db, selfcheck.STATE_KEY),
+        "offsite_key_at": (await _value(db, selfcheck.KEY_STATE)).get("at"),
+        "secret_saved_at": (await _value(db, SECRET_SAVED)).get("at"),
+        "restore_test": {k: last_test.get(k) for k in ("at", "ok", "name", "source_vmid")} if last_test else None,
+        "config_last": await _value(db, configs.LAST_KEY), "config_settings": await configs.settings(db),
+        "oidc": {"enabled": bool(oidc.get("enabled")), "issuer": oidc.get("issuer") or None},
+        "tunnels": tunnels, "by_mac": by_mac, "by_ip": by_ip, "ssh": ssh,
+        "configs": [{"kind": o["kind"], "name": o["name"], "ts": _iso(o["ts"]), "versions": o["versions"]} for o in over],
+        "pve_conf": conf, "tiles": tiles,
+        "offsite_on": bool((await hw.settings(db)).get("offsite")),
+        "versions": await selfcheck.db_versions(db), "versie": installed(), "lan_open": _lan_open(),
+        "settings": {"syslog_target": s.syslog_target or None, "npm_ip": s.npm_ip or None,
+                     "secret_key_file": str(s.secret_key_file), "backup_dir": str(s.backup_dir),
+                     "offsite_dir": str(s.offsite_dir)},
+    }
+
+
+# --- Proxmox -------------------------------------------------------------------------------------------------------
+
+def _encryption(v) -> str | bool:
+    """encryption-key uit storage.cfg: een vingerafdruk of 1. Iets anders wordt alleen "ja": nooit een sleutel
+    bewaren, ook niet als een versie van Proxmox er ooit meer zou teruggeven."""
+    if v in (None, "", 0, "0", False):
+        return False
+    return str(v) if _FP.match(str(v)) else True
+
+
+async def _live_ip(px, node: str, kind: str, vmid: int) -> tuple[str | None, str | None, str | None]:
+    """(IP, hoe, waarom niet) van een draaiende VM/CT zonder vast IP die OPNsense niet zag: de interfaces van een CT,
+    de guest agent van een VM (de config is er al, die wordt niet opnieuw gevraagd)."""
+    try:
+        if kind == "lxc":
+            ifs = await px.get(PVE_CALLS["lxc_ifs"].format(node=node, vmid=vmid))
+            ip = pick_ipv4([(i.get("name", ""), i.get("inet") or "") for i in ifs or [] if isinstance(i, dict)])
+            return (ip, "CT-interfaces", None) if ip else (None, None, "geen IPv4 in de CT")
+        data = await px.get(PVE_CALLS["agent"].format(node=node, vmid=vmid))
+        result = data.get("result", []) if isinstance(data, dict) else []
+        ip = pick_ipv4([(i.get("name", ""), a.get("ip-address", "")) for i in result if isinstance(i, dict)
+                        for a in i.get("ip-addresses") or [] if a.get("ip-address-type") == "ipv4"])
+        return (ip, "guest agent", None) if ip else (None, None, "geen IPv4 van de guest agent")
+    except IntegrationError as e:
+        text = str(e)
+        if "403" in text:
+            return None, None, "geen rechten (" + ("VM.Audit" if kind == "lxc" else "VM.GuestAgent.Audit") + ")"
+        if kind == "qemu" and ("500" in text or "agent" in text.lower()):
+            return None, None, "geen QEMU guest agent"
+        return None, None, text[:120]
+
+
+def _prev_nodes(prev: dict, names: set[str]) -> dict[str, dict]:
+    return {n["name"]: n for c in (prev.get("data") or {}).get("clusters") or [] for n in c.get("nodes") or []
+            if n.get("name") in names}
+
+
+def _copy(snap: dict, svc_id: int, vmid: int) -> dict | None:
+    """De nieuwste bewaarde .conf van deze VM/CT, bij voorkeur van dezelfde tegel."""
+    copies = snap["pve_conf"].get(vmid) or []
+    return next((c for c in copies if c["service_id"] == svc_id), copies[0] if copies else None)
+
+
+async def _pve(src: dict, px, snap: dict, prev: dict) -> dict:
+    """Eén Proxmox-tegel: nodes, VM's en CT's met hun config, IP en back-ups, de PBS-opslag en de back-upjobs.
+    Alleen de lijst van de cluster moet lukken; de rest mag elk apart mislukken (dan staat er "onbekend")."""
+    svc = src["service"]
+    sem = asyncio.Semaphore(PARALLEL)
+
+    async def get(path: str):
+        async with sem:
+            return await px.get(path)
+
+    async def safe(path: str):
+        try:
+            return await get(path)
+        except IntegrationError:
+            return None
+
+    res = [r for r in await get(PVE_CALLS["resources"]) if isinstance(r, dict)]
+    node_rows = sorted((r for r in res if r.get("type") == "node" and r.get("node")), key=lambda r: r["node"])
+    names = [r["node"] for r in node_rows]
+    online = [r["node"] for r in node_rows if r.get("status") == "online"]
+    guest_rows = sorted((r for r in res if r.get("type") in ("lxc", "qemu") and not r.get("template")
+                         and _int(r.get("vmid")) is not None), key=lambda r: int(r["vmid"]))
+
+    storage = await safe(PVE_CALLS["storage"])
+    stores = [{"storage": s.get("storage"), "server": s.get("server"), "datastore": s.get("datastore"),
+               "namespace": s.get("namespace") or "", "fingerprint": s.get("fingerprint"),
+               "username": s.get("username"),
+               "encrypted": _encryption(s.get("encryption-key")) if isinstance(storage, list) else None,
+               "master_key": bool(s.get("master-pubkey")), "enabled": str(s.get("disable") or "0").lower() not in ON,
+               "nodes": [n for n in str(s.get("nodes") or "").split(",") if n]}
+              for s in storage or [] if isinstance(s, dict) and s.get("type") == "pbs" and s.get("storage")]
+
+    async def node_info(name: str) -> tuple[dict | None, list | None]:
+        st, net = await asyncio.gather(safe(PVE_CALLS["status"].format(node=name)),
+                                       safe(PVE_CALLS["network"].format(node=name)))
+        return st if isinstance(st, dict) else None, net if isinstance(net, list) else None
+
+    async def config(r: dict) -> tuple[dict | None, str | None, str | None]:
+        kind, node, vmid = r["type"], r.get("node"), int(r["vmid"])
+        try:
+            cfg = await get(PVE_CALLS["config"].format(node=node, type=kind, vmid=vmid))
+            if isinstance(cfg, dict):
+                return pick_config(cfg, kind, node), "api", None
+        except IntegrationError:
+            pass
+        if copy := _copy(snap, svc.id, vmid):
+            try:
+                return pick_config(parse_conf_text(decrypt(copy["content"])), kind, node), "kopie", copy["at"]
+            except Exception:  # noqa: BLE001 - een andere secret.key of een kapotte kopie: dan onbekend
+                log.warning("noodplan: kopie van de config van %s niet te lezen", vmid)
+        return None, None, None
+
+    async def content(s: dict) -> tuple[str, dict]:
+        node = next((n for n in online if not s["nodes"] or n in s["nodes"]), None)
+        if not s["enabled"] or node is None:
+            return s["storage"], {}
+        items = await safe(PVE_CALLS["content"].format(node=node, storage=quote(s["storage"])))
+        return s["storage"], newest_volids(items if isinstance(items, list) else [])
+
+    infos, confs, vols = await asyncio.gather(
+        asyncio.gather(*(node_info(n) for n in online)), asyncio.gather(*(config(r) for r in guest_rows)),
+        asyncio.gather(*(content(s) for s in stores)))
+    infos = dict(zip(online, infos))
+    vols = dict(vols)
+    for s in stores:
+        # Geen sleutel in storage.cfg maar wel versleutelde back-ups: dan is de sleutel er toch nodig.
+        if not s["encrypted"]:
+            fp = next((enc for v in (vols.get(s["storage"]) or {}).values() if (enc := v[2])), None)
+            s["encrypted"] = _encryption(fp) if fp else s["encrypted"]
+
+    cov = next((c for c in snap["coverage"].get("clusters") or [] if set(c.get("nodes") or []) & set(names)), {})
+    cov_at = _at(snap["coverage"].get("at"))
+    rows = {int(r["vmid"]): r for r in cov.get("rows") or [] if _int(r.get("vmid")) is not None}
+    guests, live = [], []
+    for r, (cfg, frm, cat) in zip(guest_rows, confs):
+        kind, vmid, node = r["type"], int(r["vmid"]), r.get("node")
+        c, row = cfg or {}, rows.get(vmid) or {}
+        mine = {sto: v[(kind, vmid)] for sto, v in vols.items() if (kind, vmid) in v}
+        g = {"vmid": vmid, "type": kind, "name": r.get("name") or str(vmid), "node": node, "status": r.get("status"),
+             "onboot": bool(c.get("onboot")), "order": c.get("order"), "cores": c.get("cores"),
+             "memory": c.get("memory"), "arch": c.get("arch"), "unprivileged": c.get("unprivileged"),
+             "nets": c.get("nets") or [], "dns": c.get("dns") or {}, "disks": c.get("disks") or [],
+             "bound": c.get("bound") or [], "config_from": frm, "config_at": cat,
+             "ip": None, "ip_from": None, "ip_why": None,
+             "backups": [{"pbs": x.get("pbs"), "store": x.get("store"), "ns": x.get("ns"), "count": x.get("count"),
+                          "last": (cov_at - timedelta(seconds=x["age"])).replace(microsecond=0).isoformat()
+                          if cov_at and isinstance(x.get("age"), (int, float)) else None}
+                         for x in row.get("copies") or []],
+             "volids": {sto: v[0] for sto, v in mine.items()},
+             "encrypted": next((v[2] for v in mine.values() if v[2]), None),
+             "jobs": row.get("jobs") or [],
+             "coverage": {"level": row.get("level"), "why": row.get("why")} if row else None,
+             "restore_test": row.get("restore"), "services": [], "roles": []}
+        ip, how = static_ip(g["nets"])
+        if not ip:
+            for n in g["nets"]:
+                if d := snap["by_mac"].get((n.get("mac") or "").lower()):
+                    ip, how = d["ip"], f"ARP/DHCP (OPNsense), gezien {day(d['seen'])}"
+                    break
+        if not ip and (h := snap["ssh"].get(f"{kind}/{vmid}")):
+            ip, how = h, "SSH-host"
+        g["ip"], g["ip_from"] = ip, how
+        if not ip:
+            if g["status"] != "running":
+                g["ip_why"] = ("staat uit" if g["status"] == "stopped" else "node niet bereikbaar" if node not in online
+                               else f"status {g['status'] or 'onbekend'}") + (
+                    ", IP via DHCP" if any(n.get("ip") == "dhcp" for n in g["nets"]) else "")
+            elif kind == "qemu" and cfg is not None and not c.get("agent"):
+                g["ip_why"] = "geen QEMU guest agent (staat uit in de config)"
+            else:
+                live.append(g)
+        guests.append(g)
+
+    async def fill(g: dict) -> None:
+        async with sem:
+            g["ip"], g["ip_from"], g["ip_why"] = await _live_ip(px, g["node"], g["type"], g["vmid"])
+    await asyncio.gather(*(fill(g) for g in live))
+
+    clu = next((c for c in snap["cluster"].get("items") or []
+                if {n.get("name") for n in c.get("nodes") or []} & set(names)), {})
+    coro = {n.get("name"): n for n in clu.get("nodes") or []}
+    before = _prev_nodes(prev, set(names))
+    nodes = []
+    for r in node_rows:
+        name, on = r["node"], r.get("status") == "online"
+        st, net = infos.get(name, (None, None))
+        cn, pn = coro.get(name) or {}, before.get(name) or {}
+        ip, frm = node_ip(net, cn.get("ip"))
+        ip_at = None
+        if frm != "netwerk" and pn.get("ip") and pn.get("ip_from") in ("netwerk", "vorig"):
+            # Offline (of het netwerk van de node niet te lezen): het IP van de webinterface uit het vorige noodplan.
+            ip, frm = pn["ip"], "vorig"
+            ip_at = pn.get("ip_at") if pn.get("ip_from") == "vorig" else prev.get("at")
+        cpu = (st or {}).get("cpuinfo") or {}
+        nodes.append({"name": name, "ip": ip, "ip_from": frm, "ip_at": ip_at, "corosync_ip": cn.get("ip"),
+                      "mac": snap["by_ip"].get(ip) or pn.get("mac"), "online": on,
+                      "version": cn.get("version") or pn.get("version"),
+                      "arch": node_arch(st, [g.get("arch") for g in guests if g["node"] == name and g["type"] == "lxc"])
+                      or pn.get("arch"),
+                      "cpu": cpu.get("model") or pn.get("cpu"), "cpus": cpu.get("cpus") or pn.get("cpus"),
+                      "mem": ((st or {}).get("memory") or {}).get("total") or pn.get("mem")})
+    jobs = []
+    for j in cov.get("jobs") or []:
+        jobs.append({k: j.get(k) for k in ("id", "schedule", "storage", "enabled", "all", "node", "pool", "pbs",
+                                           "server", "datastore")} | job_targets(j, list(rows.values()), guests))
+    return {"key": src["key"], "service": svc.name, "name": clu.get("cluster"), "quorate": clu.get("quorate"),
+            "qdevice": (clu.get("qdevice") or {}).get("host"), "stale_from": None, "nodes": nodes, "guests": guests,
+            "pbs_storages": [{k: v for k, v in s.items() if k != "nodes"} for s in stores], "jobs": jobs}
+
+
+# --- PBS -----------------------------------------------------------------------------------------------------------
+
+async def _pbs(src: dict, integ, snap: dict, ips: dict) -> dict:
+    """Eén PBS-tegel: datastores met hun pad (niet de opmerking: vrije tekst), aangevuld met wat de back-updekking
+    al weet (gebruik, groepen, syncs, remotes, TLS-vingerafdruk)."""
+    svc = src["service"]
+    stores = [s for s in await integ.get(PBS_CALLS["datastores"]) or [] if isinstance(s, dict) and s.get("name")]
+    base = urlsplit(src.get("base") or "")
+    cov = next((p for p in snap["coverage"].get("pbs") or [] if p.get("service_id") == svc.id), None) or next(
+        (p for p in snap["coverage"].get("pbs") or [] if p.get("host") and p.get("host") == base.hostname
+         and p.get("port") == base.port), {})
+    used = {s.get("store"): s for s in cov.get("stores") or []}
+    ip, how, direct = ips.get(src.get("base")) or (None, "onbekend", None)
+    return {"key": src["key"], "name": svc.name, "url": direct or src.get("base"), "ip": ip, "how": how,
+            "fingerprint": cov.get("fingerprint"), "runs_on": None, "stale_from": None,
+            "stores": [{"store": s["name"], "path": s.get("path"), "used": (used.get(s["name"]) or {}).get("used"),
+                        "total": (used.get(s["name"]) or {}).get("total"),
+                        "groups": (used.get(s["name"]) or {}).get("groups")} for s in stores],
+            "syncs": [{k: x.get(k) for k in ("id", "store", "remote", "remote_store", "schedule", "direction")}
+                      for x in cov.get("syncs") or []],
+            "remotes": [{"name": x.get("name"), "host": x.get("host")} for x in cov.get("remotes") or []]}
+
+
+# --- samenvoegen, plaatsen, toegang --------------------------------------------------------------------------------
+
+def _source_name(src: dict, entry: dict | None) -> str:
+    if src["kind"] == "pve" and entry and entry.get("nodes"):
+        return "Proxmox " + ", ".join(n["name"] for n in entry["nodes"])
+    return doc.pbs_label(src["name"]) if src["kind"] == "pbs" else f"Proxmox-tegel {src['name']}"
+
+
+def _merge(srcs: list[dict], fresh: dict[str, dict | None], failures: dict[str, str], prev: dict,
+           now: datetime) -> tuple[dict, list[dict]]:
+    """De nieuwe delen, en voor elke bron die deze keer niet lukte het deel uit het vorige noodplan, met de datum van
+    het laatste noodplan waarin die bron wel lukte (die blijft staan, hoeveel weken het ook mislukt). Een oud deel
+    van een cluster die er via een andere tegel al vers staat, valt weg."""
+    pd = prev.get("data") or {}
+    old = {e.get("key"): e for e in (pd.get("clusters") or []) + (pd.get("pbs") or [])}
+    old_src = {s.get("key"): s for s in prev.get("sources") or []}
+    clusters = [c for c in fresh.values() if c and c["key"].startswith("pve:")]
+    pbs = [p for p in fresh.values() if p and p["key"].startswith("pbs:")]
+    live_nodes = {key: {n["name"] for n in c["nodes"]} for key, c in fresh.items() if c and key.startswith("pve:")}
+    by_key = {s["key"]: s for s in srcs}
+    out = []
+    for s in srcs:
+        key = s["key"]
+        if key not in failures:
+            out.append({"key": key, "name": _source_name(s, fresh.get(key)), "ok": True})
+            continue
+        pe, ps = old.get(key), old_src.get(key) or {}
+        row = {"key": key, "name": _source_name(s, pe) if pe else ps.get("name") or _source_name(s, None),
+               "ok": False, "error": failures[key]}
+        if pe and key.startswith("pve:"):
+            mine = {n.get("name") for n in pe.get("nodes") or []}
+            twin = next((k for k, ns in live_nodes.items() if ns & mine), None)
+            if twin:
+                row["covered"] = _source_name(by_key[twin], fresh[twin])
+                out.append(row)
+                continue
+        if pe:
+            since = pe.get("stale_from") or prev.get("at")
+            (clusters if key.startswith("pve:") else pbs).append({**pe, "stale_from": since})
+            row["from"] = since
+        else:
+            row["from"] = None
+            row["failing_since"] = ps.get("failing_since") or now.isoformat()
+        out.append(row)
+    order = {s["key"]: i for i, s in enumerate(srcs)}
+    clusters.sort(key=lambda e: order.get(e["key"], 0))
+    pbs.sort(key=lambda e: order.get(e["key"], 0))
+    return {"clusters": clusters, "pbs": pbs}, out
+
+
+def _access_urls(snap: dict, srcs: list[dict]) -> list[str]:
+    """De adressen waarvan het noodplan het IP zoekt (voor de run én de proef): elke PBS, de beheertegels en de
+    OIDC-provider."""
+    urls = [s["base"] for s in srcs if s["kind"] == "pbs" and s.get("base")]
+    urls += [t["url"] for t in snap["tiles"] if t["type"] in TILE_TYPES and t.get("url")]
+    if snap["oidc"]["enabled"] and snap["oidc"]["issuer"]:
+        urls.append(snap["oidc"]["issuer"])
+    return list(dict.fromkeys(urls))
+
+
+def _npm_ip(snap: dict) -> str | None:
+    if snap["settings"]["npm_ip"]:
+        return snap["settings"]["npm_ip"]
+    host = next((urlsplit(t["url"] or "").hostname for t in snap["tiles"] if t["type"] == "npm"), None)
+    return host if _is_ip(host) else None
+
+
+async def _lookup(urls: list[str], routes: dict, npm_ip: str | None) -> dict[str, tuple]:
+    found = await asyncio.gather(*(ip_from_url(u, routes, npm_ip) for u in urls))
+    return dict(zip(urls, found))
+
+
+def _place(snap: dict, data: dict, ips: dict) -> None:
+    """Welke tegels op welke VM/CT draaien (zonder de netwerkkaart): het IP in het adres of het doel van de check, of
+    het IP waar NPM die naam naartoe stuurt; een tegel onder een andere zonder eigen treffer gaat mee met zijn
+    ouder. En de rollen: het dashboard zelf, OPNsense, NPM, een PBS."""
+    from .routes import name_and_path
+
+    gs = doc.guests(data)
+    by_ip: dict[str, dict] = {}
+    for g in gs:
+        g["services"], g["roles"] = [], []
+        if g.get("ip"):
+            by_ip.setdefault(g["ip"], g)
+
+    def guest_for(host: str | None) -> dict | None:
+        if not host:
+            return None
+        if _is_ip(host):
+            return by_ip.get(host.strip("[]"))
+        e = _route(snap["routes"], host)
+        return by_ip.get(e["host"]) if e and _is_ip(e.get("host")) else None
+
+    tiles = [t for t in snap["tiles"] if t["type"] not in NOT_PLACED]
+    placed = {}
+    for t in tiles:
+        for host in (urlsplit(t.get("url") or "").hostname, name_and_path(t["check"], t.get("url"))[0]):
+            if g := guest_for(host):
+                placed[t["id"]] = g
+                break
+    for t in tiles:
+        if t["id"] not in placed and t.get("parent_id") in placed:
+            placed[t["id"]] = placed[t["parent_id"]]
+    for t in tiles:
+        if g := placed.get(t["id"]):
+            g["services"].append({"name": t["name"], "url": t.get("url")})
+
+    def role(ip: str | None, name: str) -> dict | None:
+        g = by_ip.get(ip) if ip else None
+        if g and name not in g["roles"]:
+            g["roles"].append(name)
+        return g
+    role(snap["settings"]["syslog_target"], "dashboard")
+    for t in snap["tiles"]:
+        if t["type"] in ("opnsense", "npm"):
+            role((ips.get(t.get("url")) or (None,))[0], t["type"])
+    role(snap["settings"]["npm_ip"], "npm")
+    node_of = {n.get("ip"): n["name"] for c in data["clusters"] for n in c.get("nodes") or [] if n.get("ip")}
+    for p in data["pbs"]:
+        g = role(p.get("ip"), f"pbs:{p['name']}")
+        p["runs_on"] = doc.where(g) if g else (f"node {node_of[p['ip']]}" if p.get("ip") in node_of else None)
+
+
+def _what(label: str, name: str) -> str:
+    return label if name.strip().lower() in (label.lower(), "") else f"{label} ({name})"
+
+
+def _access(snap: dict, data: dict, ips: dict) -> list[dict]:
+    """Toegang zonder DNS: elk systeem op zijn IP."""
+    by_ip = {g["ip"]: g for g in doc.guests(data) if g.get("ip")}
+    rows = []
+    for c in data["clusters"]:
+        for n in c.get("nodes") or []:
+            ip = n.get("ip")
+            rows.append({"kind": "pve", "name": n["name"], "what": f"Proxmox {n['name']}", "ip": ip,
+                         "url": f"https://{ip}:8006" if ip else None,
+                         "how": {"corosync": "corosync", "vorig": "vorig"}.get(n.get("ip_from"), "node") if ip else
+                         "onbekend", "note": f"ssh root@{ip}" if ip else "IP onbekend"})
+    for p in data["pbs"]:
+        rows.append({"kind": "pbs", "name": p["name"], "what": doc.pbs_label(p["name"]), "ip": p.get("ip"),
+                     "url": p.get("url"), "how": p.get("how") or "onbekend", "note": p.get("runs_on") or "",
+                     "runs_on": p.get("runs_on")})
+    for t in snap["tiles"]:
+        if t["type"] not in TILE_TYPES or not t.get("url"):
+            continue
+        ip, how, direct = ips.get(t["url"]) or (None, "onbekend", None)
+        on = doc.where(by_ip.get(ip)) if ip else None
+        rows.append({"kind": t["type"], "name": t["name"], "what": _what(TILE_TYPES[t["type"]], t["name"]), "ip": ip,
+                     "url": direct or t["url"], "how": how, "note": on or "", "runs_on": on})
+    o = data.get("oidc") or {}
+    if o.get("enabled") and snap["oidc"]["issuer"]:
+        ip, how, direct = ips.get(snap["oidc"]["issuer"]) or (None, "onbekend", None)
+        rows.append({"kind": "oidc", "name": "Authentik", "what": "Aanmelden (OIDC)", "ip": ip,
+                     "url": direct or snap["oidc"]["issuer"], "how": how,
+                     "note": "ligt het plat: meld je aan met wachtwoord en 2FA"})
+    dash = data.get("dashboard") or {}
+    me = dash.get("guest")
+    if dash.get("ip"):
+        if dash.get("lan_open"):
+            rows.append({"kind": "dashboard", "name": "dashboard", "what": "Dit dashboard", "ip": dash["ip"],
+                         "url": f"http://{dash['ip']}", "how": "lan", "note": doc.where(me) or ""})
+        else:
+            dom = next(iter(dash.get("domains") or []), None)
+            rows.append({"kind": "dashboard", "name": "dashboard", "what": "Dit dashboard", "ip": dash["ip"],
+                         "url": f"https://{dom}" if dom else None, "how": "via_npm",
+                         "note": (f"in de container: pct enter {me['vmid']} op {me['node']}" if me else
+                                  "in de container van het dashboard")})
+    return rows
+
+
+def _dashboard(snap: dict, data: dict) -> dict:
+    s, sc = snap["settings"], snap["selfcheck"]
+    me = doc.by_role(data, "dashboard")
+    ip = s["syslog_target"] or (me or {}).get("ip")
+    hosts = snap["routes"].get("hosts") or {}
+    off = sc.get("offsite") or {}
+    latest = off.get("latest")
+    ver, rs = sc.get("verified") or {}, sc.get("restore") or {}
+    return {"versie": snap["versie"].get("versie"), "kanaal": snap["versie"].get("kanaal"), "ip": ip,
+            "guest": {k: me.get(k) for k in ("type", "vmid", "node", "name")} if me else None,
+            "domains": sorted(n for n, e in hosts.items() if ip and not n.startswith("*") and (e or {}).get("host") == ip),
+            "lan_open": snap["lan_open"], "secret_key_file": s["secret_key_file"], "backup_dir": s["backup_dir"],
+            "offsite_on": snap["offsite_on"], "offsite_dir": s["offsite_dir"],
+            "dumps": [{k: d.get(k) for k in ("name", "at", "size")} for d in (sc.get("backups") or [])[:1]],
+            "verified": {"ok": ver.get("ok"), "why": ver.get("why")},
+            "restore": {"status": rs.get("status"), "at": rs.get("at"), "last_ok": rs.get("last_ok")},
+            "offsite": {"enabled": off.get("enabled"), "dir": off.get("dir"), "count": off.get("count"),
+                        "latest": latest.get("name") if isinstance(latest, dict) else latest, "key": off.get("key"),
+                        "key_stale": off.get("key_stale"), "at": off.get("at"), "error": off.get("error")},
+            "offsite_key_at": snap["offsite_key_at"], "secret_saved_at": snap["secret_saved_at"],
+            "versions": snap["versions"]}
+
+
+def _rest(snap: dict, data: dict, ips: dict) -> dict:
+    """Configkopieën, OIDC, tunnels, hersteltest, aantal namen in NPM."""
+    cfg, last = snap["config_settings"], snap["config_last"]
+    pve = [o for o in snap["configs"] if o["kind"] == "pve"]
+    issuer = snap["oidc"]["issuer"]
+    names = {t["id"]: t["name"] for t in snap["tiles"]}
+    return {
+        "configs": {"hour": cfg.get("hour", 2), "on": {k: bool(cfg.get(k)) for k in ("opnsense", "npm", "pve")},
+                    "last": {"at": last.get("at"), "errors": [{"source": e.get("source"), "error": e.get("error")}
+                                                             for e in last.get("errors") or []]},
+                    "items": [o for o in snap["configs"] if o["kind"] != "pve"],
+                    "pve": {"count": len(pve), "ts": max((o["ts"] for o in pve if o["ts"]), default=None)} if pve
+                    else None},
+        "oidc": {"enabled": snap["oidc"]["enabled"], "host": urlsplit(issuer).hostname if issuer else None,
+                 "ip": (ips.get(issuer) or (None,))[0] if issuer else None},
+        "tunnels": [{"service": names.get(t["service_id"], "Cloudflare"), "name": t["name"], "status": t["status"],
+                     "connections": t["connections"]} for t in snap["tunnels"]],
+        "restore_test": snap["restore_test"],
+        "npm": {"domains": len(snap["routes"].get("hosts") or {})},
+    }
+
+
+def counts(data: dict | None) -> dict:
+    d = data or {}
+    gs = doc.guests(d)
+    return {"nodes": sum(len(c.get("nodes") or []) for c in d.get("clusters") or []), "guests": len(gs),
+            "pbs": len(d.get("pbs") or []), "domains": (d.get("npm") or {}).get("domains") or 0,
+            "zonder_backup": sum(1 for g in gs if (g.get("coverage") or {}).get("level") == "err"),
+            "niet_in_backup": sum(1 for g in gs for k in g.get("disks") or [] if not k.get("in_backup"))}
+
+
+# --- het document, gemaskeerd --------------------------------------------------------------------------------------
+
+async def known(db: AsyncSession) -> list[str]:
+    from ..diagnose import known_secrets
+    return variants(await known_secrets(db))
+
+
+def render_with(value: dict, fmt: str, secrets: list[str]) -> tuple[str, int, list[str]]:
+    """Het document als HTML of Markdown, door de maskering. Vond die iets, dan nog eens met een opmerking bovenaan
+    (en weer gemaskeerd): (tekst, aantal vervangen, soorten)."""
+    def one(masked: list[str] | None = None) -> str:
+        bl = doc.blocks(value, masked)
+        return doc.to_html(bl, f"Noodplan {doc.day(value.get('at'))}") if fmt == "html" else doc.to_md(bl)
+    found: Counter = Counter()
+    text = mask(one(), secrets, found)
+    if not found:
+        return text, 0, []
+    kinds = sorted(found)
+    n = sum(found.values())
+    log.warning("noodplan: %s gemaskeerd (%s)", n, ", ".join(kinds))
+    return mask(one(kinds), secrets), n, kinds
+
+
+async def render(db: AsyncSession, value: dict, fmt: str) -> tuple[str, int, list[str]]:
+    return render_with(value, fmt, await known(db))
+
+
+# --- de run --------------------------------------------------------------------------------------------------------
+
+def _offsite_notice(db: AsyncSession, snap: dict, offsite: dict, alerts: dict) -> None:
+    """Eén melding (meldingencentrum, niet naar de gsm) als het noodplan niet buiten de container raakt terwijl de
+    kopie van de dumps daar wel lukt; mislukt die ook, dan meldt de zelfcontrole het al."""
+    err = offsite.get("error") if offsite.get("enabled") else None
+    own = (snap["selfcheck"].get("offsite") or {})
+    own_broken = bool(own.get("error")) and own.get("count") is None
+    if not offsite.get("enabled"):
+        alerts["offsite"] = None
+    elif err:
+        if not own_broken and alerts.get("offsite") != err:
+            notify(db, "Noodplan niet buiten de container", err, level="warn", source="homepage", push=False)
+            alerts["offsite"] = err
+    elif alerts.get("offsite"):
+        event(db, "gezondheid", "Noodplan staat weer buiten de container", f"noodplan.html en noodplan.md in "
+              f"{offsite.get('dir')}", level="ok")
+        alerts["offsite"] = None
+
+
+async def run(maker, http, trigger: str = "week", user: str | None = None, now: datetime | None = None) -> dict:
+    """Het noodplan maken en bewaren (en buiten de container zetten als die kopie aan staat). Eén tegelijk over API en
+    worker heen; geen transactie open tijdens de API-vragen of het schrijven naar de share."""
+    now = now or datetime.now(timezone.utc).replace(microsecond=0)
+    started = time.monotonic()
+    async with maker() as lk, job_lock(lk, "noodplan") as ok:
+        if not ok:
+            return {"skipped": "loopt al"}
+        async with maker() as db:
+            st = await ensure_state(db, STATE_KEY, {})
+            prev = dict(st.value or {})
+            if is_busy(prev, now):
+                return {"skipped": "loopt al"}
+            st.value = {**prev, "running": {"at": now.isoformat(), "by": user or "worker", "pid": os.getpid()},
+                        "tried": now.isoformat()}
+            snap, srcs = await _snapshot(db), await sources(db)
+            _connect(srcs, http)
+            await db.commit()
+        try:
+            ips = await _lookup(_access_urls(snap, srcs), snap["routes"], _npm_ip(snap))
+            fresh: dict[str, dict | None] = {}
+            failures: dict[str, str] = {}
+            seen: list[set] = []
+            for s in srcs:
+                if s["integ"] is None:
+                    failures[s["key"]] = s["error"]
+                    continue
+                try:
+                    if s["kind"] == "pve":
+                        c = await _pve(s, s["integ"], snap, prev)
+                        mine = {n["name"] for n in c["nodes"]}
+                        if any(mine & x for x in seen):
+                            continue  # een tweede tegel naar dezelfde cluster
+                        seen.append(mine)
+                    else:
+                        c = await _pbs(s, s["integ"], snap, ips)
+                    fresh[s["key"]] = c
+                except IntegrationError as e:
+                    failures[s["key"]] = str(e)[:300]
+            data, srcs_out = _merge(srcs, fresh, failures, prev, now)
+            _place(snap, data, ips)
+            data["dashboard"] = _dashboard(snap, data)
+            data |= _rest(snap, data, ips)
+            data["access"] = _access(snap, data, ips)
+            value = {"v": 1, "at": now.isoformat(), "trigger": trigger, "by": user,
+                     "seconds": round(time.monotonic() - started), "sources": srcs_out, "data": data}
+            # B: renderen (de bekende geheimen komen uit de database), niets schrijven.
+            async with maker() as db:
+                secrets = await known(db)
+            html, masked, kinds = render_with(value, "html", secrets)
+            md = render_with(value, "md", secrets)[0]
+            s = get_settings()
+            offsite = {"enabled": snap["offsite_on"], "dir": str(s.offsite_dir), "files": [], "error": None,
+                       "at": (prev.get("offsite") or {}).get("at")}
+            if snap["offsite_on"]:
+                w = await asyncio.to_thread(write_offsite, Path(s.offsite_dir), html, md)
+                # "at" = de laatste keer dat het lukte (zoals bij de zelfcontrole).
+                offsite |= w | ({"at": now.isoformat()} if not w.get("error") else {})
+            # C: bewaren en melden (alerts opnieuw gelezen: een andere run kan intussen gemeld hebben).
+            async with maker() as db:
+                st = await ensure_state(db, STATE_KEY, {})
+                alerts = dict((st.value or {}).get("alerts") or {})
+                _offsite_notice(db, snap, offsite, alerts)
+                n = counts(data)
+                bad = [x["name"] for x in srcs_out if not x["ok"] and not x.get("covered")]
+                event(db, "gezondheid", "Noodplan bijgewerkt",
+                      f"{n['nodes']} nodes, {n['guests']} VM's en CT's"
+                      + (f", kopie in {offsite['dir']}" if offsite["enabled"] and not offsite["error"] else "")
+                      + (f"; geen antwoord van {', '.join(bad)} (dat deel komt uit een vorig noodplan)" if bad else "")
+                      + (f" (op vraag van {user})" if user else ""), level="warn" if bad else "info")
+                st.value = {**value, "tried": now.isoformat(), "running": None, "offsite": offsite,
+                            "masked": masked, "masked_kinds": kinds, "alerts": alerts}
+                await db.commit()
+            return {"ok": True, "at": value["at"]}
+        except BaseException:
+            # Marker weg, "tried" blijft: de volgende poging pas na RETRY.
+            async with maker() as db:
+                st = await ensure_state(db, STATE_KEY, {})
+                st.value = {**(st.value or {}), "running": None}
+                await db.commit()
+            raise
+
+
+def status(value: dict | None, running: bool, now: datetime, offsite_on: bool, offsite_dir: str) -> dict:
+    """Wat GET /api/noodplan teruggeeft: nooit het document of de gegevens zelf, alleen datums, fouten en aantallen."""
+    v = value or {}
+    at = _at(v.get("at"))
+    busy = v.get("running") if is_busy(v, now) else None
+    return {"at": v.get("at"), "next": next_slot(now).isoformat() if at and at >= slot(now) else None,
+            "running": running, "running_by": (busy or {}).get("by") if running else None,
+            "trigger": v.get("trigger"), "by": v.get("by"), "seconds": v.get("seconds"),
+            "sources": [{k: x.get(k) for k in ("key", "name", "ok", "error", "from", "covered") if k in x}
+                        for x in v.get("sources") or []],
+            "offsite": v.get("offsite") or {"enabled": offsite_on, "dir": offsite_dir},
+            "counts": counts(v.get("data")) if at else None,
+            "masked": v.get("masked") or 0, "masked_kinds": v.get("masked_kinds") or [],
+            "problems": [t for _, t in problems(v, now)]}
