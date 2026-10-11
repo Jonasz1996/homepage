@@ -83,6 +83,8 @@ def test_welke_routes_van_buitenaf_uit_staan():
         "POST /api/ssh/hosts/{host_id}/forget-hostkey": "terminal", "PUT /api/ssh/defaults": "terminal",
         "PUT /api/ssh/snippets": "terminal", "POST /api/ssh/import": "terminal",
         "POST /api/backups/sync/create": "terminal",
+        # De proef van de PBS-sync meldt zich via SSH aan op beide PBS'en (alleen lezen), net als de echte knop.
+        "POST /api/backups/sync/proef": "terminal",
     }
     ws = {r.path for r in _routes() if isinstance(r, WebSocketRoute)}
     assert ws == {"/api/ssh/ws/{host_id}", "/api/cron/ws/run/{job_id}", "/api/cron/ws/tail/{target}"}
