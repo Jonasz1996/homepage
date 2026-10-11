@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, async_sessionmaker, create_a
 
 from app.db import get_db
 from app.main import app
+from app.monitoring import rollup
 from app.security import decrypt, encrypt, encrypt_json, hash_password, limiter
 
 from .conftest import BACKEND, H, PASSWORD, TEST_DB
@@ -252,7 +253,12 @@ async def test_update_met_gegevens():
                         "SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_name = 'check_results' "
                         "AND is_compressed"))).scalar() > 0
                 after = await tel(conn, since)
-                # Tabellen van na VAN zijn nieuw (en leeg); wat er al was, is er nog, rij voor rij geteld.
+                # 0025 telt de checks die er al waren per uur op, en zet tot waar in app_state.
+                assert after["check_hourly"] > 0
+                assert (await conn.execute(text("SELECT count(*) FROM app_state WHERE key = :k"),
+                                           {"k": rollup.KEY})).scalar() == 1
+                after["app_state"] -= 1
+                # Andere tabellen van na VAN zijn nieuw (en leeg); wat er al was, is er nog, rij voor rij geteld.
                 assert {t: after[t] for t in before} == before
                 # 0019: oude meldingen gaan nooit meer naar de gsm.
                 assert (await conn.execute(text(
