@@ -170,9 +170,11 @@ async def test_optellen_is_herhaalbaar_en_telt_late_checks_mee(authed):
 
     # Een check die later binnenkomt in een uur dat al opgeteld is (een push-signaal na een herstart): de volgende
     # ronde telt hem mee.
-    late = now - timedelta(minutes=90)
+    # Midden in een uur dat al opgeteld is, nooit vlak bij de grens: met now - 90 minuten kon de check een paar
+    # seconden in het volgende uur vallen, en dan keek de test naar het verkeerde uur.
+    late = rollup.floor_hour(now - timedelta(minutes=90)) + timedelta(minutes=30, seconds=7)
     assert rollup.floor_hour(late) < await rollup.watermark(db)
-    db.add(CheckResult(service_id=sids[0], ts=late + timedelta(seconds=7), ok=False, latency_ms=99.0, maintenance=False))
+    db.add(CheckResult(service_id=sids[0], ts=late, ok=False, latency_ms=99.0, maintenance=False))
     await db.commit()
     await rollup.roll_up(db, now)
     key = (sids[0], rollup.floor_hour(late))
