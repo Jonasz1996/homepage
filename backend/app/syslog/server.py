@@ -5,9 +5,9 @@ Schrijft in batches naar de database en maakt meldingen volgens de regels uit lo
 Is de database even weg (herstart van PostgreSQL, schijf vol), dan gaat er niets verloren zolang de wachtrij niet vol
 is: de schrijver houdt zijn batch vast en probeert opnieuw, telkens iets later (tot 30 s). Zit de wachtrij vol
 (QUEUE_MAX regels), dan leest de ontvanger niet verder op TCP: rsyslog op de afzender (uitgerold vanuit het dashboard)
-houdt de regels dan in zijn eigen wachtrij. UDP kan niet wachten: daar valt de oudste regel weg. Wat verloren gaat,
-wordt geteld en elke minuut met een teken van leven bewaard in AppState "syslog"; Aandacht en Gezondheid › homepage
-tonen het.
+houdt de regels dan in zijn eigen wachtrij. UDP kan niet wachten: daar valt de nieuwe regel weg (wat al in de
+wachtrij staat blijft, ook de TCP-regels die de afzender als afgeleverd beschouwt). Wat verloren gaat, wordt geteld en
+elke minuut met een teken van leven bewaard in AppState "syslog"; Aandacht en Gezondheid › homepage tonen het.
 """
 
 import asyncio
@@ -179,14 +179,15 @@ class Receiver:
         return str(addr) if any(addr in n for n in self.nets) else None
 
     def accept(self, data: bytes, ip: str) -> None:
-        """UDP: kan niet wachten. Zit de wachtrij vol (de database is al lang weg), dan valt de oudste regel weg."""
+        """UDP: kan niet wachten. Zit de wachtrij vol (de database is al lang weg), dan valt deze regel weg. Niet de
+        oudste: die kan van een TCP-afzender zijn, en die heeft hem al uit zijn eigen wachtrij geschrapt."""
         addr = self._allowed(ip)
         if addr is None:
             return
         self.received += 1
         if self.queue.full():
-            self.queue.get_nowait()
             self.lose(1, FULL)
+            return
         self.queue.put_nowait((data[:MAX_RAW], addr, time.time()))
 
     async def accept_wait(self, data: bytes, ip: str) -> None:

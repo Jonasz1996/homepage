@@ -233,13 +233,13 @@ async def test_rejected_row_does_not_block_the_rest(receiver, monkeypatch):
     assert rx.lost == 1 and rx._loss["why"] == server.REJECTED and rx.down_since is None
 
 
-async def test_udp_drops_the_oldest_and_tcp_waits(authed, monkeypatch):
+async def test_udp_drops_the_newest_and_tcp_waits(authed, monkeypatch):
     monkeypatch.setattr(server, "QUEUE_MAX", 4)
     rx = Receiver(None)
     for i in range(6):
         rx.accept(f"<14>udp {i}".encode(), "192.168.0.9")
     assert (rx.received, rx.lost, rx.queue.qsize()) == (6, 2, 4)
-    assert [rx.queue.get_nowait()[0] for _ in range(4)] == [f"<14>udp {i}".encode() for i in range(2, 6)]
+    assert [rx.queue.get_nowait()[0] for _ in range(4)] == [f"<14>udp {i}".encode() for i in range(4)]
 
     # TCP: bij een volle wachtrij leest de verbinding niet verder, en er valt niets weg.
     srv = await asyncio.start_server(lambda r, w: handle_tcp(rx, r, w), "127.0.0.1", 0)
@@ -258,6 +258,27 @@ async def test_udp_drops_the_oldest_and_tcp_waits(authed, monkeypatch):
     # Hoe lang een regel ook is: in de wachtrij hoogstens MAX_RAW bytes.
     rx.accept(b"<14>x " + b"a" * 100_000, "192.168.0.9")
     assert len(rx.queue.get_nowait()[0]) == server.MAX_RAW
+    w.close()
+    srv.close()
+
+
+async def test_udp_never_pushes_out_tcp_lines(authed, monkeypatch):
+    """Een volle wachtrij met TCP-regels (rsyslog heeft ze als afgeleverd geschrapt) en de router blijft via UDP
+    sturen: vroeger duwde elke UDP-regel de oudste TCP-regel eruit, tot de wachtrij alleen nog UDP bevatte."""
+    monkeypatch.setattr(server, "QUEUE_MAX", 4)
+    rx = Receiver(None)
+    srv = await asyncio.start_server(lambda r, w: handle_tcp(rx, r, w), "127.0.0.1", 0)
+    _, w = await asyncio.open_connection("127.0.0.1", srv.sockets[0].getsockname()[1])
+    w.write(b"".join(f"<14>tcp {i}\n".encode() for i in range(6)))
+    await w.drain()
+    await _until(lambda: rx.queue.qsize() == 4 and rx.received == 5)
+    for i in range(3):
+        rx.accept(f"<14>udp {i}".encode(), "192.168.0.9")
+    assert (rx.lost, rx._loss["n"], rx._loss["why"]) == (3, 3, server.FULL)
+    got = [rx.queue.get_nowait()[0] for _ in range(4)]
+    await _until(lambda: rx.queue.qsize() == 2)
+    got += [rx.queue.get_nowait()[0] for _ in range(2)]
+    assert got == [f"<14>tcp {i}\n".encode() for i in range(6)] and rx.lost == 3
     w.close()
     srv.close()
 
