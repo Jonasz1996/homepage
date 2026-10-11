@@ -303,7 +303,7 @@
   .ln { display: block }
   .more .mini { min-height: 36px }
   @media (min-width: 480px) {
-    dl { grid-template-columns: 9.5em 1fr }
+    dl { grid-template-columns: 11.5em 1fr }
     dt { margin-top: 0 }
   }
 </style>
