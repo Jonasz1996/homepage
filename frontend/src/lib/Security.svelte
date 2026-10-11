@@ -201,6 +201,12 @@
     push_created: 'push-monitor aangemaakt', push_rotated: 'push-adres vernieuwd', push_changed: 'push-monitor gewijzigd',
     webpush_added: 'gsm-meldingen aangezet', webpush_changed: 'gsm-meldingen gewijzigd', webpush_removed: 'gsm-meldingen uitgezet',
     webpush_renewed: 'gsm-abonnement vernieuwd',
+    buitencheck_settings: 'check van buitenaf: instellingen', buitencheck_off: 'check van buitenaf: uitgezet',
+    buitencheck_url: 'check van buitenaf: Worker-adres gewijzigd', buitencheck_tiles: 'check van buitenaf: tegels gewijzigd',
+    buitencheck_tiles_removed: 'check van buitenaf: tegels weggehaald', buitencheck_token_next: 'check van buitenaf: nieuw geheim klaargezet',
+    buitencheck_token_next_cancelled: 'check van buitenaf: nieuw geheim geannuleerd', buitencheck_token_in_gebruik: 'check van buitenaf: nieuw geheim in gebruik',
+    buitencheck_deploy_proef: 'check van buitenaf: proef bekeken', buitencheck_deployed: 'check van buitenaf: in Cloudflare gezet',
+    buitencheck_deploy_failed: 'check van buitenaf: zetten mislukt', buitencheck_workers_token_removed: 'check van buitenaf: Workers-token weggehaald',
   }
   const BAD = /failed|mismatch|revoked|deleted/
   const detail = (d) => Object.entries(d || {}).map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join('  ')

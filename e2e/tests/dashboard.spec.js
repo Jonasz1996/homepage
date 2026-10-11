@@ -318,6 +318,77 @@ test('gsm: knoppen achter het menu', async () => {
   await page.setViewportSize({ width: 1400, height: 900 })
 })
 
+// Check van buitenaf, ingesteld (nagebootst): één tegel die thuis werkt en van buitenaf niet.
+const VB_NOW = new Date().toISOString()
+const VB_FIXTURE = {
+  enabled: true, ready: true, name: 'homepage-buitencheck-1a2b3c4d',
+  worker_url: 'https://homepage-buitencheck-1a2b3c4d.jonas.workers.dev', how: 'api', token_set: true,
+  token_at: VB_NOW, token_next_at: null, suffixes: ['jbogaert.be'],
+  api: { id: 3, name: 'Cloudflare', workers_token: true, account: true },
+  apis: [{ id: 3, name: 'Cloudflare', workers_token: true, account: true }],
+  deployed: { at: VB_NOW, by: 'jonas', version: 1 }, script_version: 1,
+  worker: { ok_at: VB_NOW, colo: 'BRU', script: 1, error: null, error_at: null, fail: 0 },
+  mass: null, groups: [],
+  limits: { per_call: 45, rounds: 5, max: 225, calls_per_day: 1440 },
+  tiles: [{ id: 12, name: 'Jellyfin', url: 'https://jellyfin.jbogaert.be/', inside: 'up', problem: null,
+            vanbuiten: { status: 'down', since: VB_NOW, at: VB_NOW, why: 'de Cloudflare Tunnel is niet verbonden (1033)',
+                         note: null, colo: 'BRU', ms: 41, code: 530, quiet: null } }],
+}
+
+test('check van buitenaf: uitleg, proef zonder token, en op de gsm', async () => {
+  await menu('Infrastructuur', 'Netwerk')
+  const win = page.getByRole('dialog')
+  await win.getByRole('tab', { name: /check van buitenaf/ }).click()
+  await expect(win.getByText('Alle checks lopen nu van binnenuit')).toBeVisible()
+  await win.getByRole('button', { name: 'proef' }).click()
+  await expect(win.getByText('er is niets uitgevoerd')).toBeVisible()
+  await expect(win.getByText(/workers_token/).first()).toBeVisible()
+  await expect(win.getByText('Er zou niets gebeuren.')).toBeVisible()
+  await win.getByText('script bekijken').click()
+  await expect(win.locator('pre')).toContainText('homepage-buitencheck')
+  await page.route('**/api/buitencheck', (r) => r.fulfill({ json: VB_FIXTURE }))
+  await win.getByRole('tab', { name: 'internet' }).click()
+  await win.getByRole('tab', { name: /check van buitenaf/ }).click()
+  await expect(win.getByText('thuis ✓ · buiten ✕')).toBeVisible()
+  await expect(win.getByText('Worker in orde')).toBeVisible()
+  await page.setViewportSize({ width: 393, height: 852 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.setViewportSize({ width: 1400, height: 900 })
+  await page.unroute('**/api/buitencheck')
+  await page.keyboard.press('Escape')
+  await expect(win).toHaveCount(0)
+})
+
+test('check van buitenaf: tegel, bolletje, detail en gsm', async () => {
+  const layout = await page.evaluate(() => fetch('/api/layout').then((r) => r.json()))
+  const id = layout.pages.flatMap((p) => p.groups).flatMap((g) => g.services).find((s) => s.name === 'Back-up').id
+  const down = { status: 'down', since: new Date().toISOString(), at: new Date().toISOString(),
+                 why: 'de Cloudflare Tunnel is niet verbonden (1033)', colo: 'BRU', code: 530, quiet: null }
+  await page.route('**/api/overzicht**', async (r) => {
+    const res = await r.fetch()
+    const j = await res.json()
+    if (j.delen?.status) j.delen.status[id] = { ...(j.delen.status[id] || {}), status: 'up', fail_count: 0, vanbuiten: down }
+    await r.fulfill({ response: res, json: j })
+  })
+  await page.reload()
+  const tile = page.locator('.tile', { hasText: 'Back-up' })
+  await expect(tile.getByText('thuis ok · buiten down')).toBeVisible()
+  await expect(tile.locator('.vb.down')).toBeVisible()
+  await menu('Infrastructuur', 'Netwerk')
+  await expect(page.getByRole('tab', { name: /check van buitenaf/ }).locator('.dot.err')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await tile.hover()
+  await page.getByRole('button', { name: 'Details van Back-up' }).click()
+  await expect(page.getByText(/Van buitenaf: onbereikbaar sinds/)).toBeVisible()
+  await page.keyboard.press('Escape')
+  await page.setViewportSize({ width: 393, height: 852 })
+  await expect(tile.getByText('thuis ok · buiten down')).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.setViewportSize({ width: 1400, height: 900 })
+  await page.unroute('**/api/overzicht**')
+  await page.reload()
+})
+
 // Netwerk › publiek: een rij en een antwoord zoals GET /api/exposure ze geeft (voor page.route).
 function pubRow(name, state, level, base = state) {
   const slot = state === 'slot'

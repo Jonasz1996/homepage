@@ -12,7 +12,7 @@ export const WINDOWS = [
     hint: 'schijven, temperatuur, snapshots, domeinen, cluster, back-ups', load: () => import('./Health.svelte') },
   { id: 'capacity', menu: 'infra', label: 'Capaciteit', code: 'df', hint: 'opslag, cpu, ram, stroom en prognose',
     load: () => import('./Capacity.svelte') },
-  { id: 'network', menu: 'infra', label: 'Netwerk', code: 'net', hint: 'internet, publiek, apparaten, kaart, firewall, Wake-on-LAN',
+  { id: 'network', menu: 'infra', label: 'Netwerk', code: 'net', hint: 'internet, publiek, apparaten, kaart, firewall, Wake-on-LAN, check van buitenaf',
     load: () => import('./Network.svelte') },
   { id: 'cron', menu: 'infra', label: 'Cronjobs', code: 'cron', big: true, hint: 'geplande taken op al je machines',
     load: () => import('./Cron.svelte') },
@@ -71,6 +71,7 @@ const ALIASES = {
   apparaten: { id: 'network', tab: 'apparaten' },
   kaart: { id: 'network', tab: 'kaart' },
   firewall: { id: 'network', tab: 'firewall' },
+  buitencheck: { id: 'network', tab: 'buitencheck' },
   publiek: { id: 'network', tab: 'publiek' },
   report: { id: 'history', tab: 'report' },
   tijdlijn: { id: 'history' },
@@ -110,6 +111,7 @@ const SOURCES = {
   domein: { id: 'health', tab: 'domeinen' },
   homepage: { id: 'health', tab: 'homepage' },
   cluster: { id: 'health', tab: 'cluster' },
+  buitencheck: { id: 'network', tab: 'buitencheck' },
   blootstelling: { id: 'network', tab: 'publiek' },
 }
 export const sourceWindow = (source) => (SOURCES[source] ? { ...SOURCES[source] } : null)

@@ -17,6 +17,7 @@ from .integrations.zabbix import RED_FROM
 from .models import AppState, CronJob, Device, MaintenanceWindow, Service, ServiceState, UpdateRun
 from .monitoring import (cluster, coverage, devices, exposure as expo, planned, restoretest, rollup, updates as upd,
                          zabbix as zbx)
+from .monitoring import buitencheck as bc
 from .monitoring.engine import KEEP_CHECKS_DAYS, MASS_KEY, active
 from .syslog import server as rxs
 
@@ -495,6 +496,62 @@ async def network(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
     return out
 
 
+async def outside_checks(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
+    """De check van buitenaf: precies wat gemeld werd. Een stille tegel (thuis al stuk, onderhoud, pauze, tunnel, NPM,
+    in een groep of bij een massastoring) krijgt geen eigen punt."""
+    cfg = await _state(db, bc.CONFIG_KEY)
+    if not cfg.get("enabled") or not cfg.get("worker_url") or not cfg.get("token"):
+        return []
+    s = await bc.state(db)
+    fix = {"window": "net", "tab": "buitencheck"}
+    out = []
+    w = s["worker"]
+    # Zoals de melding: niet als het dashboard zelf geen internet heeft of thuis bijna niets bereikt.
+    if (int(w.get("fail") or 0) >= bc.WORKER_FAIL_AFTER and not (await _state(db, "public_ip")).get("error")
+            and not (await _state(db, MASS_KEY)).get("since")):
+        out.append(item("buiten:worker", "warn", "netwerk", "De check van buitenaf werkt niet", w.get("error") or "",
+                        fix, sig=w.get("error")))
+    if mass := s["mass"]:
+        out.append(item("buiten:massa", "err", "netwerk", "Van buitenaf is bijna niets bereikbaar",
+                        f"{mass.get('failing')} van de {mass.get('total')} checks · {mass.get('why')}", fix,
+                        since=mass.get("since")))
+        return out
+    for cause, g in s["groups"].items():
+        since = bc._dt(g.get("since")) or now
+        out.append(item(f"buiten:groep:{cause}", "err", "netwerk",
+                        f"{len(g.get('tiles') or [])} tegels van buitenaf onbereikbaar",
+                        f"{g.get('why') or cause} · al {ago(now - since)}", fix, since=since))
+    down = {int(k): e for k, e in s["tiles"].items()
+            if e.get("status") == "down" and not e.get("quiet") and bc._fresh(e, now)}
+    if not down:
+        return out
+    svcs = {r[0]: r for r in (await db.execute(select(Service.id, Service.name, Service.parent_id,
+                                                      Service.maintenance_until, Service.check))).all()}
+    up = {st.service_id for st in (await db.execute(select(ServiceState).where(ServiceState.service_id.in_(down))))
+          .scalars() if st.status == "up" and st.service_id in svcs and active(svcs[st.service_id][4])}
+
+    def quiet(sid: int) -> bool:
+        seen, x = set(), sid
+        while x and x in svcs and x not in seen:
+            seen.add(x)
+            if (_aware(svcs[x][3]) or now) > now:
+                return True
+            x = svcs[x][2]
+        check = svcs[sid][4] or {}
+        return bool(check.get("type") and check.get("paused"))
+
+    tiles = []
+    for sid, e in sorted(down.items(), key=lambda x: (svcs[x[0]][1].lower() if x[0] in svcs else "")):
+        if sid not in svcs or sid in ctx.get("down", set()) or quiet(sid):
+            continue
+        since = bc._dt(e.get("since")) or now
+        tiles.append(item(f"buiten:{sid}", "err", "netwerk", f"{svcs[sid][1]}: van buitenaf onbereikbaar",
+                          f"{bc._cap(e.get('why')) or 'onbereikbaar'} · al {ago(now - since)}."
+                          + (" Thuis werkt het wel." if sid in up else ""), fix, sig=f"buiten:{e.get('since')}",
+                          since=since))
+    return out + _cap(tiles, "netwerk", "Nog {n} tegels van buitenaf onbereikbaar", fix, key="buiten")
+
+
 async def zabbix(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
     z = await _state(db, zbx.STATE_KEY)
     if not z:
@@ -638,8 +695,8 @@ async def public_names(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]
     return out
 
 
-SOURCES = (services, backups, clusters, hardware, capacity, network, homepage, zabbix, cron_jobs, updates, safety,
-           maintenance, public_names)
+SOURCES = (services, backups, clusters, hardware, capacity, network, outside_checks, homepage, zabbix, cron_jobs, updates,
+           safety, maintenance, public_names)
 
 
 async def collect(db: AsyncSession, errors: dict[int, str] | None = None) -> dict:

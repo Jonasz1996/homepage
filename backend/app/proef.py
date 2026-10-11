@@ -29,7 +29,7 @@ from .ssh_login import Login
 EVENT_PREFIX = "Proef: "
 
 VIA = {"ssh": "SSH", "proxmox-api": "Proxmox-API", "portainer-api": "Portainer-API", "adguard-api": "AdGuard-API",
-       "pbs-api": "PBS-API", "api": "API", "dashboard": "dashboard"}
+       "pbs-api": "PBS-API", "api": "API", "dashboard": "dashboard", "cloudflare-api": "Cloudflare-API"}
 
 
 def ssh_who(login: Login) -> str:
