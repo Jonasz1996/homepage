@@ -1,6 +1,6 @@
 <script>
   import { storm } from './fx.js'
-  import { onMount, untrack } from 'svelte'
+  import { untrack } from 'svelte'
   import { api, poll, withReauth } from './api.js'
   import IntegrationPanel from './IntegrationPanel.svelte'
   import LatencyChart from './LatencyChart.svelte'
@@ -50,14 +50,16 @@
     }
   }
 
+  // Hoe vaak opnieuw laden: bij 1 u en 24 u elke 30 s. Een week, een maand of een jaar (tijdvakken van een uur tot
+  // een dag) verandert nauwelijks per halve minuut; de status van nu staat ook op de tegel.
+  const REFRESH = { '1h': 30000, '24h': 30000, '7d': 300000, '30d': 600000, '1y': 600000 }
+
   $effect(() => {
     range
     load()
   })
 
-  onMount(() => {
-    return poll(load, 30000)
-  })
+  $effect(() => poll(load, REFRESH[range]))
 
   const pct = (v) => (v == null ? '—' : `${(Math.floor(v * 1000) / 10).toFixed(1)}%`)
   const ms = (v) => (v == null ? '—' : v < 10 ? `${v.toFixed(1)} ms` : `${Math.round(v)} ms`)
