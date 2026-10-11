@@ -29,6 +29,7 @@ from urllib.parse import quote, urlsplit
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import proef
 from ..config import get_settings
 from ..db import ensure_state, job_lock
 from ..deps import event, notify
@@ -410,13 +411,20 @@ def dns_names(urls: list[str | None], routes: dict | None) -> list[str]:
 
 # --- bestanden buiten de container ---------------------------------------------------------------------------------
 
+def dir_problem(dst: Path) -> str | None:
+    """Waarom er niet in de map van de kopie buiten de container geschreven kan worden (zoals de zelfcontrole)."""
+    if not dst.is_dir():
+        return f"map {dst} bestaat niet (koppel er een NAS-share, PBS-opslag of USB-schijf aan)"
+    if not os.access(dst, os.W_OK):
+        return f"geen schrijfrechten op {dst} voor gebruiker homepage"
+    return None
+
+
 def write_offsite(dst: Path, html: str, md: str) -> dict:
     """noodplan.html en noodplan.md naar de map van de kopie buiten de container, leesbaar (0644) zoals de dumps, wat
     het umask van het proces ook is. Eerst als .part, dan in één keer op zijn plaats."""
-    if not dst.is_dir():
-        return {"files": [], "error": f"map {dst} bestaat niet (koppel er een NAS-share, PBS-opslag of USB-schijf aan)"}
-    if not os.access(dst, os.W_OK):
-        return {"files": [], "error": f"geen schrijfrechten op {dst} voor gebruiker homepage"}
+    if err := dir_problem(dst):
+        return {"files": [], "error": err}
     done = []
     for name, text in zip(FILES, (html, md)):
         part = dst / f".{name}.part"
@@ -1129,3 +1137,89 @@ def status(value: dict | None, running: bool, now: datetime, offsite_on: bool, o
             "counts": counts(v.get("data")) if at else None,
             "masked": v.get("masked") or 0, "masked_kinds": v.get("masked_kinds") or [],
             "problems": [t for _, t in problems(v, now)]}
+
+
+def _call(table: dict, key: str, calls: list[str], prefix: str, **kw) -> str:
+    """Een pad uit PVE_CALLS of PBS_CALLS zoals de run het vraagt, met {node}, {vmid} ... waar die per keer verschillen."""
+    if f"{prefix}:{key}" not in calls:
+        calls.append(f"{prefix}:{key}")
+    return "GET /api2/json" + table[key].format(**kw)
+
+
+async def proef_plan(db: AsyncSession, http, now: datetime | None = None) -> dict:
+    """Wat "nu bijwerken" zou doen, zonder één verzoek naar buiten en zonder DNS: uit de tegels, de back-updekking en
+    de cluster die de worker al heeft, met dezelfde paden en dezelfde lijst namen als de run."""
+    now = now or datetime.now(timezone.utc)
+    value = await _value(db, STATE_KEY)
+    snap, srcs = await _snapshot(db), await sources(db)
+    _connect(srcs, http)
+    calls: list[str] = []
+    steps, skipped = [], []
+    pve = [x for x in srcs if x["kind"] == "pve"]
+    for src in pve:
+        machine = f"{src['name']} ({src['base'] or 'adres onbekend'})"
+        if src["integ"] is None:
+            skipped.append(proef.skip(machine, src["error"]))
+            continue
+        who = proef.api_who(src["integ"].token_id())
+        svc = src["service"]
+        cov = next((c for c in snap["coverage"].get("clusters") or [] if c.get("service_id") == svc.id), {})
+        clu = next((c for c in snap["cluster"].get("items") or [] if c.get("service_id") == svc.id), {})
+        names = sorted(cov.get("nodes") or [n.get("name") for n in clu.get("nodes") or [] if n.get("name")])
+        n = len(cov.get("rows") or [])
+        stores = sorted({j["storage"] for j in cov.get("jobs") or [] if j.get("pbs") and j.get("storage")})
+        lines = [_call(PVE_CALLS, "resources", calls, "pve"), _call(PVE_CALLS, "storage", calls, "pve"),
+                 f"{_call(PVE_CALLS, 'status', calls, 'pve', node='{node}')} en "
+                 f"{_call(PVE_CALLS, 'network', calls, 'pve', node='{node}')}  ({', '.join(names) or 'elke node'})",
+                 _call(PVE_CALLS, "config", calls, "pve", node="{node}", type="{qemu|lxc}", vmid="{vmid}")
+                 + (f"  ({n} keer, één per VM/CT)" if n else "  (één per VM/CT)")]
+        lines += [_call(PVE_CALLS, "content", calls, "pve", node=names[0] if names else "{node}", storage=sto)
+                  for sto in stores] or [_call(PVE_CALLS, "content", calls, "pve", node="{node}", storage="{PBS-opslag}")
+                                         + "  (per PBS-opslag)"]
+        steps.append(proef.step(machine, "proxmox-api", "\n".join(lines), who=who,
+                                note="alleen lezen, met het leestoken"))
+        steps.append(proef.step(machine, "proxmox-api",
+                                _call(PVE_CALLS, "lxc_ifs", calls, "pve", node="{node}", vmid="{vmid}") + "\n"
+                                + _call(PVE_CALLS, "agent", calls, "pve", node="{node}", vmid="{vmid}")
+                                + (f"  (hoogstens {n} keer samen)" if n else ""), who=who,
+                                when="voor een draaiende VM/CT zonder vast IP die OPNsense niet zag",
+                                on_fail="het IP blijft onbekend in het noodplan"))
+    for src in (x for x in srcs if x["kind"] == "pbs"):
+        machine = f"{doc.pbs_label(src['name'])} ({src['base'] or 'adres onbekend'})"
+        if src["integ"] is None:
+            skipped.append(proef.skip(machine, src["error"]))
+            continue
+        steps.append(proef.step(machine, "pbs-api", _call(PBS_CALLS, "datastores", calls, "pbs"),
+                                who=proef.api_who(src["integ"].secrets.get("username")),
+                                note="alleen lezen; de opmerking bij een datastore komt niet in het noodplan"))
+    here = "dashboard (deze container)"
+    names = dns_names(_access_urls(snap, srcs), snap["routes"])
+    if names:
+        steps.append(proef.step(here, "dashboard", f"DNS opzoeken ({DNS_WAIT} s per naam): {', '.join(names)}",
+                                when="tegels met een naam die niet in NPM staat"))
+    else:
+        skipped.append(proef.skip("DNS opzoeken", "elke tegel heeft een IP of staat in NPM"))
+    dst = Path(get_settings().offsite_dir)
+    if snap["offsite_on"]:
+        steps.append(proef.step(here, "dashboard", f"schrijft {' en '.join(FILES)} naar {dst} (leesbaar: 0644, zoals "
+                                "de dumps)", when="de kopie buiten de container aan staat",
+                                on_fail="een melding in het dashboard (niet naar de gsm); het noodplan in het dashboard "
+                                        "is er wel"))
+        err = await asyncio.to_thread(dir_problem, dst)
+        dir_check = proef.check(f"Map {dst}", err is None, err or "bestaat en is beschrijfbaar")
+    else:
+        skipped.append(proef.skip(f"{' en '.join(FILES)} naar {dst}", "de kopie buiten de container staat uit"))
+        dir_check = proef.check(f"Map {dst}", None, "kopie buiten de container staat uit")
+    cov_at = snap["coverage"].get("at")
+    busy = value.get("running") if is_busy(value, now) else None
+    checks = [dir_check,
+              proef.check("Back-updekking", True if cov_at else None,
+                          f"van {doc.when(cov_at)}" if cov_at else "nog niet opgehaald: zonder dekking staat bij elke "
+                                                                   "VM/CT \"onbekend\" als back-up"),
+              proef.check("Er loopt geen ander noodplan", not busy,
+                          f"bezig sinds {doc.when(busy.get('at'))} ({busy.get('by')})" if busy else None)]
+    after = [f"Het noodplan in het dashboard wordt vervangen (nu: van {doc.when(value['at'])})." if value.get("at")
+             else "Het eerste noodplan komt in het dashboard.", "Een regel op de tijdlijn."]
+    warnings = [] if pve else ["Geen Proxmox-tegel: het noodplan bevat dan alleen het dashboard zelf."]
+    return proef.plan("Noodplan bijwerken", steps, checks=checks, skipped=skipped, after=after, warnings=warnings,
+                      now=now, calls=calls)

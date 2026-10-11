@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import re
@@ -9,11 +10,12 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.db import ensure_state
 from app.integrations import IntegrationError
-from app.models import AppState, ConfigVersion, Device, Event, Notification
+from app.models import AppState, AuditLog, ConfigVersion, Device, Event, Notification
 from app.monitoring import noodplan as nood, noodplan_doc as doc
 from app.monitoring.checks import HttpClients
 from app.security import encrypt
 
+from .test_buitenaf import CF, _stale
 from .test_integrations import _group, _svc
 from .test_kaart_hersteltest import _maker
 from .test_meldingen_onderhoud import _db
@@ -525,4 +527,128 @@ async def test_offsite(authed, monkeypatch, tmp_path):
     v = await _plan(db)
     assert not v["offsite"]["enabled"] and not any(dst.iterdir())
     assert "de kopie buiten de container staat uit" in (await nood.render(db, v, "md"))[0]
+    await agen.aclose()
+
+
+async def test_api(authed, monkeypatch, tmp_path):
+    from app.routers import noodplan as router
+    await _setup(authed, monkeypatch, tmp_path)
+    world = World()
+    gate, reached = asyncio.Event(), asyncio.Event()
+
+    async def gated(req):
+        if req.url.path == "/api2/json/cluster/resources":
+            reached.set()
+            await gate.wait()
+        return world(req)
+    monkeypatch.setattr(router, "clients", HttpClients(httpx.MockTransport(gated)))
+    st = (await authed.get("/api/noodplan")).json()
+    assert st["at"] is None and st["counts"] is None and not st["running"] and st["sources"] == []
+    assert st["offsite"] == {"enabled": False, "dir": str(tmp_path / "offsite")} and st["problems"] == []
+    assert (await authed.get("/api/noodplan/document")).json()["detail"] == "Nog geen noodplan"
+
+    # Nu bijwerken: 202, en zolang het loopt 409.
+    assert (await authed.post("/api/noodplan/run")).status_code == 202
+    # Pas kijken als de run bij Proxmox is: SQLite in de tests heeft maar één verbinding voor alle sessies.
+    await asyncio.wait_for(reached.wait(), 10)
+    st = (await authed.get("/api/noodplan")).json()
+    assert st["running"] and st["running_by"] == "jonas"
+    r = await authed.post("/api/noodplan/run")
+    assert r.status_code == 409 and r.json()["detail"] == "Loopt al"
+    gate.set()
+    await router._task
+    st = (await authed.get("/api/noodplan")).json()
+    assert st["at"] and not st["running"] and st["trigger"] == "knop" and st["by"] == "jonas"
+    assert st["counts"] == {"nodes": 2, "guests": 3, "pbs": 1, "domains": 1, "zonder_backup": 1, "niet_in_backup": 3}
+    assert all(x["ok"] for x in st["sources"]) and "data" not in st and st["masked"] == 0
+    assert st["next"] is None or st["next"] > st["at"]
+
+    # Een run van de worker: de knop ziet hem (en een run naast een lopende stopt meteen).
+    agen, db = await _db()
+    now = datetime.now(timezone.utc)
+    row = await db.get(AppState, nood.STATE_KEY, populate_existing=True)
+    row.value = {**row.value, "running": {"at": now.isoformat(), "by": "worker", "pid": 1}}
+    await db.commit()
+    st = (await authed.get("/api/noodplan")).json()
+    assert st["running"] and st["running_by"] == "worker"
+    assert (await authed.post("/api/noodplan/run")).status_code == 409
+    assert await nood.run(_maker(), HttpClients(httpx.MockTransport(world))) == {"skipped": "loopt al"}
+    row = await db.get(AppState, nood.STATE_KEY, populate_existing=True)
+    row.value = {**row.value, "running": {"at": (now - timedelta(minutes=10)).isoformat(), "by": "worker", "pid": 1}}
+    await db.commit()
+    assert not (await authed.get("/api/noodplan")).json()["running"]
+    assert (await authed.post("/api/noodplan/run")).status_code == 202
+    await router._task
+
+    # Het document: als bijlage, niet bewaard door de browser, in het auditlog.
+    r = await authed.get("/api/noodplan/document")
+    assert r.status_code == 200 and r.text.startswith("<!doctype html>") and r.headers["content-type"].startswith("text/html")
+    assert re.fullmatch(r'attachment; filename="noodplan-\d{4}-\d\d-\d\d\.html"', r.headers["content-disposition"])
+    assert r.headers["cache-control"] == "no-store"
+    r = await authed.get("/api/noodplan/document", params={"formaat": "md"})
+    assert r.text.startswith("# Noodplan") and r.headers["content-disposition"].endswith('.md"')
+    assert r.headers["content-type"].startswith("text/markdown")
+    rows = (await db.execute(select(AuditLog).where(AuditLog.action.like("noodplan%")).order_by(AuditLog.id))).scalars().all()
+    assert [a.action for a in rows] == ["noodplan_run", "noodplan_run", "noodplan_view", "noodplan_view"]
+    assert rows[-1].detail["formaat"] == "md" and rows[-1].detail["masked"] == 0 and rows[-1].detail["kinds"] == []
+    assert (await authed.get("/api/noodplan/document", params={"formaat": "pdf"})).status_code == 422
+
+    # Van buitenaf: het document staat uit, de stand en de proef niet.
+    r = await authed.get("/api/noodplan/document", headers=CF)
+    assert r.status_code == 403 and r.json()["detail"] == "buiten:downloads"
+    assert (await authed.get("/api/noodplan", headers=CF)).status_code == 200
+    assert (await authed.post("/api/noodplan/proef", headers=CF)).status_code == 200
+
+    # De proef: alle paden die de run vroeg, zonder zelf iets te vragen.
+    seen, before = set(world.seen), len(world.seen)
+    plan = (await authed.post("/api/noodplan/proef")).json()
+    assert len(world.seen) == before and plan["proef"] is True and plan["title"] == "Noodplan bijwerken"
+    first = plan["steps"][0]
+    assert first["via"] == "proxmox-api" and first["who"] == "API-token homepage@pve!dash"
+    assert first["machine"] == "PVE (https://192.168.0.50:8006)"
+    assert "GET /api2/json/cluster/resources" in first["call"] and "/nodes/{node}/network" in first["call"]
+    assert "(pve50, pve51)" in first["call"] and "(3 keer, één per VM/CT)" in first["call"]
+    assert "GET /api2/json/nodes/pve50/storage/pbs-pi/content?content=backup" in first["call"]
+    live = plan["steps"][1]
+    assert "/agent/network-get-interfaces" in live["call"] and live["when"] and live["on_fail"]
+    pbs = next(x for x in plan["steps"] if x["via"] == "pbs-api")
+    assert pbs["call"] == "GET /api2/json/config/datastore" and pbs["who"] == "API-token homepage@pbs!dash"
+    asked = set()
+    for prefix, table in (("pve", nood.PVE_CALLS), ("pbs", nood.PBS_CALLS)):
+        for key, path in table.items():
+            rx = re.compile("/api2/json" + re.sub(r"\\\{[^}]*\\\}", "[^/]+", re.escape(path.split("?")[0])) + "$")
+            if any(rx.match(p) for p in seen):
+                asked.add(f"{prefix}:{key}")
+    assert {"pve:resources", "pve:storage", "pve:status", "pve:network", "pve:config", "pve:content",
+            "pbs:datastores"} <= asked <= set(plan["calls"])
+    assert {"pve:lxc_ifs", "pve:agent"} <= set(plan["calls"])
+    assert [s["what"] for s in plan["skipped"]] == ["DNS opzoeken", f"noodplan.html en noodplan.md naar {tmp_path / 'offsite'}"]
+    checks = {c["what"]: c for c in plan["checks"]}
+    assert checks["Back-updekking"]["ok"] is True and checks["Er loopt geen ander noodplan"]["ok"] is True
+    assert checks[f"Map {tmp_path / 'offsite'}"]["ok"] is None
+    assert plan["after"][0].startswith("Het noodplan in het dashboard wordt vervangen (nu: van ")
+    dumped = json.dumps(plan)
+    assert not any(x in dumped for x in SECRETS)
+
+    # Herbevestiging verlopen: het document vraagt opnieuw 2FA, de stand niet.
+    await _stale(authed)
+    r = await authed.get("/api/noodplan/document")
+    assert r.status_code == 403 and r.json()["detail"] == "reauth_required"
+    assert (await authed.get("/api/noodplan")).status_code == 200
+    await agen.aclose()
+
+
+async def test_proef_zonder_tegels(authed, monkeypatch, tmp_path):
+    s = get_settings()
+    monkeypatch.setattr(s, "offsite_dir", tmp_path)
+    agen, db = await _db()
+    (await ensure_state(db, "health_settings", {})).value = {"offsite": True}
+    await db.commit()
+    plan = (await authed.post("/api/noodplan/proef")).json()
+    assert plan["warnings"] == ["Geen Proxmox-tegel: het noodplan bevat dan alleen het dashboard zelf."]
+    checks = {c["what"]: c for c in plan["checks"]}
+    assert checks[f"Map {tmp_path}"] == {"what": f"Map {tmp_path}", "ok": True, "detail": "bestaat en is beschrijfbaar"}
+    assert checks["Back-updekking"]["ok"] is None and plan["calls"] == []
+    assert plan["steps"][-1]["call"].startswith(f"schrijft noodplan.html en noodplan.md naar {tmp_path}")
+    assert plan["after"][0] == "Het eerste noodplan komt in het dashboard."
     await agen.aclose()
