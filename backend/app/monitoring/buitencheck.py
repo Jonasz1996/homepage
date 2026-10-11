@@ -221,15 +221,16 @@ def _decrypt(v: str | None) -> str | None:
         return None
 
 
-async def promote(db: AsyncSession, secret: str, now: datetime | None = None) -> bool:
+async def promote(db: AsyncSession, secret: str, now: datetime | None = None, **extra) -> bool:
     """Het wachtende geheim in gebruik nemen, alleen als het nog altijd het geheim is dat net werkte (vergelijken en
-    wisselen onder het slot op de rij: een nieuw geheim dat intussen klaargezet werd, blijft wachten)."""
+    wisselen onder het slot op de rij: een nieuw geheim dat intussen klaargezet werd, blijft wachten). extra komt
+    alleen in de instellingen als het lukt (bv. enabled bij de eerste keer zelf plakken)."""
     now = now or datetime.now(timezone.utc)
     st = await config_for_update(db)
     v = dict(st.value)
     if not v.get("token_next") or _decrypt(v["token_next"]) != secret:
         return False
-    v.update(token=v["token_next"], token_at=iso(now), token_next=None, token_next_at=None)
+    v.update(token=v["token_next"], token_at=iso(now), token_next=None, token_next_at=None, **extra)
     st.value = v
     event(db, "wijziging", "Nieuw geheim voor de check van buitenaf in gebruik",
           "Cloudflare had het nieuwe geheim al; het vorige werkt niet meer.")
