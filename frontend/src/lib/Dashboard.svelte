@@ -1,249 +1,30 @@
 <script>
   import { onMount } from 'svelte'
-  import { api, poll, withReauth } from './api.js'
-  import { AREA } from './attention.js'
-  import { boom, fxEnabled, flash, RED, setFx, storm } from './fx.js'
+  import { api } from './api.js'
+  import { boom } from './fx.js'
   import { CHANGELOG } from './changelog.js'
+  import { dash, PARTS } from './dash.svelte.js'
+  import { byId, resolve } from './windows.js'
+  import AttentionStrip from './AttentionStrip.svelte'
   import Card from './Card.svelte'
-  import Lazy from './Lazy.svelte'
-  import NameForm from './NameForm.svelte'
-  import Notifications from './Notifications.svelte'
   import OutsideDialog from './OutsideDialog.svelte'
+  import PageView, { endDrag, newPage } from './PageView.svelte'
   import ReauthDialog from './ReauthDialog.svelte'
-  import ServiceTile from './ServiceTile.svelte'
+  import SearchPanel from './SearchPanel.svelte'
+  import Topbar from './Topbar.svelte'
+  import WindowHost from './WindowHost.svelte'
 
+  // Het hoofdscherm. De onderdelen staan elk in een eigen bestand; de gedeelde toestand in dash.svelte.js en welke
+  // vensters er zijn in windows.js.
   let { user, onlogout } = $props()
 
-  let layout = $state({ pages: [] })
-  let loaded = $state(false)
-  let pageId = $state(readPref('page'))
-  let editing = $state(false)
   let query = $state('')
-  let modal = $state(null)
-  let error = $state('')
   let now = $state(new Date())
   let searchEl = $state()
-  // Wordt bij elke poll volledig vervangen, nooit aangepast: geen diepe proxy nodig.
-  let status = $state.raw({})
-  let widgets = $state.raw({})
-  let zbx = $state.raw({})
-  let updates = $state.raw({ total: 0, security: 0, by_service: {} })
-  let net = $state(null)
-  let menuOpen = $state(false)
-  let termOpen = $state(false)
-  let termUsed = $state(false)
-  let termRequest = $state(null)
-  let logsOpen = $state(false)
-  let logsUsed = $state(false)
-  let logsInitial = $state(null)
-  // keep: met de knop logs bovenaan blijven periode en filters zoals je ze achterliet; van elders (zoekbalk, aandacht,
-  // checklist, een melding) begint de logviewer opnieuw bij 24 uur.
-  function openLogs(host = null, q = '', setup = false, keep = false) {
-    logsUsed = true
-    logsOpen = true
-    logsInitial = { host, q, setup, keep }
-  }
-  let cronOpen = $state(false)
-  let cronUsed = $state(false)
-  let cronInitial = $state(null)
-  let cron = $state({ fout: 0, gemist: 0 })
-  function openCron(initial = null) {
-    cronUsed = true
-    cronOpen = true
-    cronInitial = initial
-  }
-  async function loadCron() {
-    try { cron = await api('/cron/summary') } catch { /* volgende poging */ }
-  }
-  let healthOpen = $state(false)
-  let healthUsed = $state(false)
-  let healthInitial = $state(null)
-  let health = $state({ err: 0, warn: 0 })
-  function openHealth(initial = null) {
-    healthUsed = true
-    healthOpen = true
-    healthInitial = initial
-  }
-  async function loadHealth() {
-    try { health = await api('/health/summary') } catch { /* volgende poging */ }
-  }
-  // sub: een venster van de terminal openen (keys, defaults of discover).
-  function openTerminal(hostId = null, sub = null) {
-    termUsed = true
-    termOpen = true
-    if (hostId || sub) termRequest = { hostId, modal: sub }
-  }
-  // Van buitenaf (via Cloudflare of een publiek IP)? Dan staan terminal, updates, acties en downloads uit.
-  let where = $state.raw(null)
-  async function loadWhere() {
-    try { where = await api('/outside') } catch { /* oudere backend */ }
-  }
-  // Knoppen uit het aandacht-overzicht, de instellingen-checklist en de veiligheidscheck: het venster dat het oplost.
-  const SAME = ['updates', 'capacity', 'restoretest', 'planned', 'webhooks', 'configs', 'webpush']
-  function openFix(fix) {
-    const w = fix?.window
-    const svc = fix?.service_id && allServices.find((s) => s.id === fix.service_id)
-    // Terminal, cron, hw en logs zijn eigen vensters: het aandacht-venster eerst dicht.
-    if (modal?.kind === 'attention') modal = null
-    if (!w) modal = { kind: 'attention' }
-    else if (w === 'security') modal = { kind: 'security', tab: fix.tab }
-    else if (w === 'net') modal = { kind: 'network', tab: fix.tab }
-    else if (w === 'api') modal = { kind: 'apis' }
-    else if (w === 'ssh-keys') openTerminal(null, 'keys')
-    else if (w === 'ssh-defaults') openTerminal(null, 'defaults')
-    else if (w === 'ssh-discover') openTerminal(null, 'discover')
-    else if (w === 'terminal') openTerminal(fix.host_id)
-    else if (w === 'health') openHealth({ tab: fix.tab })
-    else if (w === 'cron') openCron(fix.job ? { job: fix.job } : fix.filter ? { filter: fix.filter } : null)
-    else if (w === 'logs' || w === 'logs-setup') openLogs(null, '', w === 'logs-setup')
-    else if (w === 'detail' && svc) modal = { kind: 'detail', service: svc }
-    else if (w === 'edit' && svc) modal = { kind: 'service', service: svc }
-    else if (SAME.includes(w)) modal = { kind: w }
-  }
+  let search = $state()
 
-  // Aandacht: alles wat nu mis is. De strook bovenaan toont de rode en oranje punten; ✕ verbergt ze tot er iets verandert.
-  let att = $state.raw({ items: [], ignored: [], counts: { err: 0, warn: 0, info: 0 } })
-  async function loadAtt() {
-    try { att = await api('/attention') } catch { /* volgende poging */ }
-  }
-  let urgent = $derived(att.items.filter((i) => i.level !== 'info'))
-  let stripId = $derived(hash(urgent.map((i) => i.key + i.sig).join('|')))
-  let stripHidden = $state(readStr('att-hide'))
-  function hideStrip() {
-    stripHidden = stripId
-    writePref('att-hide', stripId)
-  }
-  function hash(s) {
-    let h = 0
-    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0
-    return String(h >>> 0)
-  }
-
-  // Slepen: wat er gesleept wordt en waar het zou landen.
-  let drag = $state(null) // { kind: 'service' | 'group' | 'page', id }
-  let over = $state(null) // service: { groupId, index } · group: { groupId } of { pageId } · page: { pageId }
-
-  let page = $derived(layout.pages.find((p) => p.id === pageId) || layout.pages[0])
-  let groupOptions = $derived(
-    layout.pages.flatMap((p) => p.groups.map((g) => ({ id: g.id, label: `${p.name} / ${g.name}` })))
-  )
-  let allServices = $derived(layout.pages.flatMap((p) => p.groups.flatMap((g) => g.services)))
-  let results = $derived.by(() => {
-    const q = query.trim().toLowerCase()
-    if (!q) return []
-    return layout.pages
-      .flatMap((p) => p.groups.flatMap((g) => g.services))
-      .filter((s) => found.service_ids.includes(s.id) || [s.name, s.description, s.url, s.notes].some((v) => v && v.toLowerCase().includes(q)))
-      .slice(0, 40)
-  })
-
-  // Overal zoeken: notities, cronjobs, SSH-hosts, apparaten, configuratie en logregels (en IP/MAC opzoeken).
-  const NONE = { groups: [], service_ids: [] }
-  let found = $state.raw(NONE)
-  let searchGen = 0
-  let searchTimer
-  $effect(() => {
-    const q = query.trim()
-    clearTimeout(searchTimer)
-    const my = ++searchGen
-    if (q.length < 2) { found = NONE; return }
-    searchTimer = setTimeout(async () => {
-      try {
-        const r = await api(`/search?q=${encodeURIComponent(q)}`)
-        if (my === searchGen) found = r
-      } catch { /* de zoekbalk werkt verder op wat het dashboard zelf weet */ }
-    }, 250)
-  })
-  let foundGroups = $derived(query.trim().length >= 2 ? found.groups : [])
-  function openFound(kind, it) {
-    const k = it.kind || kind
-    if (k === 'note') {
-      const svc = allServices.find((s) => s.id === it.service_id)
-      if (svc) modal = { kind: 'detail', service: svc }
-    } else if (k === 'cron') openCron({ job: it.job_id })
-    else if (k === 'host') openTerminal(it.host_id)
-    else if (k === 'device') modal = { kind: 'network', tab: 'apparaten', q: it.mac }
-    else if (k === 'config') modal = { kind: 'configs', item: it.item }
-    else if (k === 'log') openLogs(it.host, found.ip || found.mac || query.trim())
-    else if (k === 'npm' && it.url) window.open(it.url, '_blank', 'noopener')
-  }
-
-  // Snelle acties in de zoekbalk: commando's van het dashboard zelf en knoppen van de integraties.
-  const COMMANDS = [
-    { label: 'aandacht: alles wat nu mis is', run: () => (modal = { kind: 'attention' }) },
-    { label: 'instellingen-checklist: wat werkt, half of nog niet ingesteld', run: () => (modal = { kind: 'attention', tab: 'instellingen' }) },
-    { label: 'logs openen', run: () => openLogs() },
-    { label: 'terminal openen', run: () => openTerminal() },
-    { label: 'cron: alle geplande taken, agenda, verbanden', run: () => openCron() },
-    { label: 'gezondheid: schijven, temperatuur, snapshots, domeinen, back-up', run: () => openHealth() },
-    { label: 'beveiliging: sessies en auditlog', run: () => (modal = { kind: 'security' }) },
-    { label: 'van buitenaf: wat mag er via cloudflare (terminal, updates, acties)', run: () => (modal = { kind: 'security', tab: 'outside' }) },
-    { label: 'veiligheidscheck: 2fa, tokens, sessies, ssh-sleutel', run: () => openHealth({ tab: 'beveiliging' }) },
-    { label: 'firewall: welke poorten het dashboard gebruikt', run: () => (modal = { kind: 'network', tab: 'firewall' }) },
-    { label: 'capaciteit: opslag, cpu en ram', run: () => (modal = { kind: 'capacity' }) },
-    { label: 'tijdlijn: storingen, herstarts, back-ups', run: () => (modal = { kind: 'history' }) },
-    { label: 'weekrapport', run: () => (modal = { kind: 'history', tab: 'report' }) },
-    { label: 'updates: openstaande pakketten en images', run: () => (modal = { kind: 'updates' }) },
-    { label: 'netwerk: publiek ip, wan, tunnels, wake-on-lan', run: () => (modal = { kind: 'network' }) },
-    { label: 'apparaten op het netwerk, poortscan', run: () => (modal = { kind: 'network', tab: 'apparaten' }) },
-    { label: 'netwerkkaart: wat valt er mee uit', run: () => (modal = { kind: 'network', tab: 'kaart' }) },
-    { label: 'hersteltest van back-ups (pbs)', run: () => (modal = { kind: 'restoretest' }) },
-    { label: 'api-beheer: api\'s, sleutels, eigen calls en endpoints', run: () => (modal = { kind: 'apis' }) },
-    { label: 'configuratiewijzigingen: opnsense, npm, proxmox, bestanden (diff)', run: () => (modal = { kind: 'configs' }) },
-    { label: 'gepland onderhoud: vensters plannen', run: () => (modal = { kind: 'planned' }) },
-    { label: 'webhooks: meldingen van proxmox, pbs, uptime kuma, home assistant', run: () => (modal = { kind: 'webhooks' }) },
-    { label: 'meldingen op je gsm (web push)', run: () => (modal = { kind: 'webpush' }) },
-    { label: 'cluster: quorum, versies, qdevice, ha, replicatie', run: () => openHealth({ tab: 'cluster' }) },
-    { label: 'back-updekking: welke vm/ct op hoeveel pbs\'en, pbs-sync', run: () => openHealth({ tab: 'backups' }) },
-    { label: 'bewerken aan/uit', run: () => (editing = !editing) },
-    { label: 'effecten aan/uit (vuur, bliksem, ...)', run: () => { setFx(!fxEnabled()); if (fxEnabled()) storm() } },
-    { label: 'wat is er nieuw (wijzigingslog, versie)', run: () => (modal = { kind: 'news', version }) },
-  ]
-  let quick = $state([])
-  let quickAt = 0
-  let quickMsg = $state('')
-  let quickBusy = $state(false)
-  async function loadQuick() {
-    if (Date.now() - quickAt < 60000) return
-    quickAt = Date.now()
-    try { quick = await api('/actions') } catch { quickAt = 0 }
-  }
-  $effect(() => { if (query.trim()) loadQuick(); else quickMsg = '' })
-  let actionResults = $derived.by(() => {
-    const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
-    if (!words.length) return []
-    const hit = (text) => words.every((w) => text.toLowerCase().includes(w))
-    return [
-      ...COMMANDS.filter((c) => hit(c.label)).map((c) => ({ ...c, kind: 'cmd' })),
-      ...quick.filter((a) => hit(`${a.service} ${a.label} ${a.target || ''} ${a.id}`)).map((a) => ({ ...a, kind: 'act' })),
-    ].slice(0, 8)
-  })
-  async function runQuick(a) {
-    if (a.kind === 'cmd') {
-      query = ''
-      a.run()
-      return
-    }
-    const what = `${a.label} ${a.target || ''}`.trim()
-    if (a.confirm && !confirm(`${a.service}: ${what}?`)) return
-    quickBusy = true
-    try {
-      const r = await withReauth(() => (a.endpoint
-        ? api(a.endpoint, { method: 'POST' })
-        : api(`/services/${a.service_id}/integration/action`, { method: 'POST', body: { action: a.id, params: a.params } })))
-      quickMsg = `✓ ${a.service}: ${r.message}`
-      storm()
-      quickAt = 0
-      setTimeout(() => { loadWidgets(); if (query.trim()) loadQuick() }, 1500)
-    } catch (e) {
-      quickMsg = `✕ ${a.service}: ${e.message}`
-      flash(RED)
-    } finally {
-      quickBusy = false
-    }
-  }
   let summary = $derived.by(() => {
-    const all = Object.values(status)
+    const all = Object.values(dash.status)
     const active = all.filter((s) => !s.maintenance_until)
     return {
       // Een check die niets meer meldt (stale), staat grijs op de tegel: niet meetellen als up.
@@ -257,209 +38,24 @@
     const h = now.getHours()
     return h < 6 ? 'Goedenacht' : h < 12 ? 'Goedemorgen' : h < 18 ? 'Goedemiddag' : 'Goedenavond'
   })
-  let clock = $derived(now.toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' }))
+  const hm = (d) => d.toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' })
+  let clock = $derived(hm(now))
   let date = $derived.by(() => {
     const d = now.toLocaleDateString('nl-BE', { weekday: 'long', day: 'numeric', month: 'long' })
     return d.charAt(0).toUpperCase() + d.slice(1)
   })
+  // Hoe oud wat je ziet is: na twee gemiste verversingen oranje.
+  let stale = $derived(!!dash.lastOk && now - dash.lastOk > 75000)
 
-  function readPref(k) {
-    try { return Number(localStorage.getItem('hp:' + k)) || null } catch { return null }
-  }
-  function readStr(k) {
-    try { return localStorage.getItem('hp:' + k) || '' } catch { return '' }
-  }
-  function writePref(k, v) {
-    try { localStorage.setItem('hp:' + k, String(v)) } catch { /* privé-venster */ }
-  }
-
-  async function load() {
-    try {
-      layout = await api('/layout')
-      error = ''
-    } catch (e) {
-      error = e.message
-    } finally {
-      loaded = true
-    }
-  }
-
-  async function loadStatus() {
-    try { status = await api('/status') } catch { /* volgende poging over 30 s */ }
-  }
-  async function groupMaintenance(g) {
-    const v = prompt(`Hoeveel minuten onderhoud voor alle services in '${g.name}'? (0 = stoppen)`, '60')
-    if (v === null) return
-    // Beginnen of verlengen vraagt je 2FA (onderhoud zet de meldingen uit), stoppen niet.
-    await act(() => withReauth(() => api(`/groups/${g.id}/maintenance`, { method: 'POST', body: { minutes: Math.max(0, parseInt(v, 10) || 0) } })))
-    await loadStatus()
-  }
-  async function loadNet() {
-    try { net = await api('/network') } catch { /* volgende poging */ }
-  }
-  // Rood als een WAN-gateway of tunnel niet in orde is, oranje bij problemen.
-  let netLevel = $derived.by(() => {
-    if (!net) return ''
-    const gws = net.gateways.flatMap((g) => g.items.map((i) => i.level))
-    const tus = net.tunnels.flatMap((t) => t.items.map((i) => i.status))
-    if (gws.includes('err') || tus.some((x) => x === 'down' || x === 'inactive') || net.public_ip.error) return 'e'
-    if (gws.includes('warn') || tus.includes('degraded')) return 'w'
-    return gws.length || tus.length || net.public_ip.ip ? 'g' : ''
-  })
-  async function loadUpdates() {
-    try { updates = await api('/updates') } catch { /* volgende poging */ }
-  }
-  const HEALTH_TAB = { hardware: 'schijven', snapshots: 'snapshots', domein: 'domeinen', homepage: 'homepage', cluster: 'cluster' }
-  function openNotification(n) {
-    if (n.source === 'rapport') modal = { kind: 'history', tab: 'report' }
-    else if (n.source === 'updates') modal = { kind: 'updates' }
-    else if (n.source === 'cron') openCron({ filter: 'probleem' })
-    else if (n.source === 'config') modal = { kind: 'configs' }
-    else if (n.source === 'apparaat') modal = { kind: 'network', tab: 'apparaten' }
-    else if (HEALTH_TAB[n.source]) openHealth({ tab: HEALTH_TAB[n.source] })
-    else if (n.service_id) {
-      const s = allServices.find((x) => x.id === n.service_id)
-      if (s) modal = { kind: 'detail', service: s }
-    }
-  }
-  async function loadWidgets() {
-    try { widgets = await api('/widgets') } catch { /* volgende poging over 60 s */ }
-    // Zabbix rood/groen per tegel (de worker houdt dit elke minuut bij).
-    try { zbx = (await api('/zabbix')).services } catch { /* idem */ }
-  }
-
-  async function act(fn) {
-    try {
-      await fn()
-    } catch (e) {
-      error = e.message
-    }
-    await load()
-  }
-
-  function selectPage(p) {
-    pageId = p.id
-    writePref('page', p.id)
-  }
+  // keep: met Logs uit het menu blijven periode en filters zoals je ze achterliet; van elders (zoekbalk, aandacht,
+  // checklist, een melding) begint de logviewer opnieuw bij 24 uur.
+  const openLogs = (host = null, q = '') => dash.open('logs', { host, q })
 
   async function logout() {
     boom()
     // Ook als de server niet antwoordt: lokaal uitloggen.
     try { await api('/auth/logout', { method: 'POST' }) } catch { /* sessie is dan toch weg of onbereikbaar */ }
-    setTimeout(onlogout, fxEnabled() ? 600 : 0)
-  }
-
-  // --- Pagina's en groepen -------------------------------------------------
-
-  const savePage = (p) => async (data) => {
-    if (p) await api(`/pages/${p.id}`, { method: 'PATCH', body: data })
-    else selectPage({ id: (await api('/pages', { method: 'POST', body: data })).id })
-    await load()
-  }
-  // Met lopende checks erin vraagt verwijderen een recente 2FA (zoals pauzeren).
-  const deletePage = (p) => async () => {
-    await withReauth(() => api(`/pages/${p.id}`, { method: 'DELETE' }))
-    boom(undefined, 1.6)
-    await load()
-  }
-  const saveGroup = (g) => async (data) => {
-    const body = { ...data, page_id: g?.page_id ?? page.id, collapsed: g?.collapsed ?? false }
-    if (g) await api(`/groups/${g.id}`, { method: 'PATCH', body })
-    else await api('/groups', { method: 'POST', body })
-    await load()
-  }
-  const deleteGroup = (g) => async () => {
-    await withReauth(() => api(`/groups/${g.id}`, { method: 'DELETE' }))
-    boom(undefined, 1.4)
-    await load()
-  }
-  function toggleGroup(g) {
-    g.collapsed = !g.collapsed
-    act(() => api(`/groups/${g.id}`, {
-      method: 'PATCH',
-      body: { page_id: g.page_id, name: g.name, icon: g.icon, collapsed: g.collapsed },
-    }))
-  }
-
-  // --- Slepen ---------------------------------------------------------------
-
-  function startDrag(e, kind, id) {
-    drag = { kind, id }
-    e.dataTransfer.effectAllowed = 'move'
-    e.dataTransfer.setData('text/plain', `${kind}:${id}`)
-  }
-  function endDrag() {
-    drag = null
-    over = null
-  }
-  function overService(e, groupId, index) {
-    if (drag?.kind !== 'service') return
-    e.preventDefault()
-    e.stopPropagation()
-    over = { groupId, index }
-  }
-  function overGroup(e, g) {
-    if (drag?.kind === 'group') {
-      e.preventDefault()
-      over = { groupId: g.id }
-    } else if (drag?.kind === 'service') {
-      e.preventDefault()
-      over = { groupId: g.id, index: g.services.length }
-    }
-  }
-  function overTab(e, p) {
-    if (drag?.kind === 'group' || drag?.kind === 'page') {
-      e.preventDefault()
-      over = { pageId: p.id }
-    }
-  }
-
-  function findGroup(serviceId) {
-    for (const p of layout.pages) for (const g of p.groups) if (g.services.some((s) => s.id === serviceId)) return g
-  }
-
-  async function drop(e) {
-    e.preventDefault()
-    const d = drag
-    const o = over
-    endDrag()
-    if (!d || !o) return
-    const body = {}
-    if (d.kind === 'service' && o.groupId) {
-      const src = findGroup(d.id)
-      const dst = page.groups.find((g) => g.id === o.groupId)
-      if (!src || !dst) return
-      const from = src.services.findIndex((s) => s.id === d.id)
-      let to = o.index
-      if (src === dst && from < to) to--
-      if (src === dst && from === to) return
-      const [svc] = src.services.splice(from, 1)
-      dst.services.splice(to, 0, svc)
-      body.services = { [src.id]: src.services.map((s) => s.id), [dst.id]: dst.services.map((s) => s.id) }
-    } else if (d.kind === 'group') {
-      const srcPage = layout.pages.find((p) => p.groups.some((g) => g.id === d.id))
-      const from = srcPage.groups.findIndex((g) => g.id === d.id)
-      const [grp] = srcPage.groups.splice(from, 1)
-      if (o.pageId) {
-        const dstPage = layout.pages.find((p) => p.id === o.pageId)
-        dstPage.groups.push(grp)
-        body.groups = { [srcPage.id]: srcPage.groups.map((g) => g.id), [dstPage.id]: dstPage.groups.map((g) => g.id) }
-      } else {
-        const to = srcPage.groups.findIndex((g) => g.id === o.groupId)
-        srcPage.groups.splice(to < 0 ? srcPage.groups.length : to, 0, grp)
-        body.groups = { [srcPage.id]: srcPage.groups.map((g) => g.id) }
-      }
-    } else if (d.kind === 'page' && o.pageId && o.pageId !== d.id) {
-      const from = layout.pages.findIndex((p) => p.id === d.id)
-      const [pg] = layout.pages.splice(from, 1)
-      layout.pages.splice(layout.pages.findIndex((p) => p.id === o.pageId), 0, pg)
-      body.pages = layout.pages.map((p) => p.id)
-    } else {
-      return
-    }
-    // Een tegel naar een groep slepen met gepland onderhoud (nu of later), legt zijn check (of wat eronder hangt)
-    // stil: dat vraagt je 2FA.
-    await act(() => withReauth(() => api('/layout/order', { method: 'PUT', body })))
+    setTimeout(onlogout, dash.fx ? 600 : 0)
   }
 
   // --- Toetsenbord ----------------------------------------------------------
@@ -475,13 +71,11 @@
     }
   }
   function searchKey(e) {
-    if (e.key !== 'Enter') return
-    if (results[0]?.url) window.open(results[0].url, '_blank', 'noopener')
-    else if (actionResults[0]) runQuick(actionResults[0])
-    else if (foundGroups[0]) openFound(foundGroups[0].kind, foundGroups[0].items[0])
+    if (e.key === 'Enter') search?.first()
   }
 
-  // Snelkoppelingen van de app (manifest) en de Android-app: /?open=history, updates, network, ...
+  // Snelkoppelingen van de app (manifest), pushberichten en de Android-app: /?open=history, updates, network, ...
+  // Alleen vensters uit een menu (en Aandacht); een tegel of formulier opent zo niet.
   function openFromUrl() {
     const q = new URLSearchParams(location.search)
     // Terug van Authentik na het koppelen (⚿ → authentik), met de fout als het niet lukte. Komt een loginfout terug
@@ -490,19 +84,12 @@
     const what = q.get('open') || (ssoErr ? 'security' : null)
     if (!what) return
     history.replaceState(null, '', location.pathname)
-    const kinds = { history: 'history', report: 'history', updates: 'updates', network: 'network', capacity: 'capacity',
-                    security: 'security', configs: 'configs', webhooks: 'webhooks', planned: 'planned',
-                    hersteltest: 'restoretest', api: 'apis', webpush: 'webpush' }
-    if (what === 'logs') openLogs()
-    else if (what === 'cron') openCron()
-    else if (what === 'health') openHealth()
-    else if (what === 'terminal') openTerminal()
-    else if (what === 'devices') modal = { kind: 'network', tab: 'apparaten' }
-    else if (what === 'kaart') modal = { kind: 'network', tab: 'kaart' }
-    else if (what === 'aandacht' || what === 'instellingen') modal = { kind: 'attention', tab: what === 'aandacht' ? 'nu' : what }
-    else if (what === 'melding') openPushed(q.get('n'))
-    else if (what === 'security') modal = { kind: 'security', tab: ssoErr || q.get('tab') === 'sso' ? 'sso' : undefined, error: ssoErr }
-    else if (kinds[what]) modal = { kind: kinds[what], tab: what === 'report' ? 'report' : undefined }
+    if (what === 'melding') return openPushed(q.get('n'))
+    if (what === 'security') {
+      return dash.open('security', { tab: ssoErr || q.get('tab') === 'sso' ? 'sso' : undefined, error: ssoErr })
+    }
+    const r = resolve(what)
+    if (r && (byId[r.id]?.menu || r.id === 'attention')) dash.open(r)
   }
   // Tik op een pushbericht (/?open=melding&n=<id>): hetzelfde openen als een klik in het meldingencentrum.
   async function openPushed(id) {
@@ -511,98 +98,60 @@
       const n = await api(`/notifications/${id}`)
       if (!n.read) api(`/notifications/${id}/read`, { method: 'POST' }).catch(() => {})
       // Een service openen kan pas als de indeling er is.
-      for (let i = 0; i < 50 && !loaded; i++) await new Promise((r) => setTimeout(r, 100))
-      openNotification(n)
+      for (let i = 0; i < 50 && !dash.loaded; i++) await new Promise((r) => setTimeout(r, 100))
+      dash.openNotification(n)
     } catch { /* al gewist */ }
   }
 
   // Na een update één keer tonen wat er nieuw is (per gebruiker onthouden op de server).
-  let version = $state.raw(null)
   const latestNews = Math.max(0, ...CHANGELOG.map((c) => c.nr))
   async function checkNews() {
     try {
-      version = await api('/version')
+      const version = (dash.version = await api('/version'))
       const seen = Number(version.gezien) || 0
       if (seen >= latestNews) return
       if (!seen && version.nieuw_account) return markNews()
       const fresh = CHANGELOG.filter((c) => c.nr > seen)
-      if (fresh.length && !modal) modal = { kind: 'news', entries: fresh, version }
+      if (fresh.length && !dash.modal) dash.open('news', { entries: fresh, version })
     } catch { /* oudere backend zonder /version: niets tonen */ }
   }
   function markNews() {
+    const version = dash.version
     if (version && Number(version.gezien) < latestNews) {
-      version = { ...version, gezien: String(latestNews) }
+      dash.version = { ...version, gezien: String(latestNews) }
       api('/version/seen', { method: 'POST', body: { id: String(latestNews) } }).catch(() => {})
     }
   }
 
   onMount(() => {
+    dash.modal = null
+    dash.big = {}
+    dash.order = []
+    dash.editing = false
+    dash.problemsOnly = false
     openFromUrl()
     checkNews()
-    load()
-    loadStatus()
-    loadWidgets()
-    loadUpdates()
-    loadNet()
-    loadCron()
-    loadHealth()
-    loadWhere()
-    loadAtt()
-    const stopAtt = poll(loadAtt, 120000)
-    const stopCron = poll(loadCron, 120000)
-    const stopHealth = poll(loadHealth, 120000)
-    const stopNet = poll(loadNet, 120000)
-    const stopWidgets = poll(loadWidgets, 60000)
-    const stopUpdates = poll(loadUpdates, 300000)
-    const stopClock = poll(() => (now = new Date()), 15000)
-    const stopStatus = poll(loadStatus, 30000)
-    return () => { stopClock(); stopStatus(); stopWidgets(); stopUpdates(); stopNet(); stopCron(); stopHealth(); stopAtt() }
+    const stop = dash.start()
+    const t = setInterval(() => (now = new Date()), 15000)
+    return () => { stop(); clearInterval(t) }
   })
 </script>
 
 <svelte:window onkeydown={keydown} />
 
 <main class="wrap" ondragend={endDrag}>
-  <Card title="homepage" glow>
-    {#snippet right()}
-      <span class="clock">{clock}</span>
-      {#if where?.outside}
-        <button class="mini buiten" onclick={() => (modal = { kind: 'security', tab: 'outside' })}
-                title="Je bent van buitenaf verbonden ({where.why}): terminal, updates, acties en downloads staan uit, tenzij je ze aanzet">buiten</button>
-      {/if}
-      <Notifications onopen={openNotification} onwebhooks={() => (modal = { kind: 'webhooks' })} onwebpush={() => (modal = { kind: 'webpush' })} />
-      <button class="mini burger" class:on={menuOpen} onclick={() => (menuOpen = !menuOpen)} aria-label="Menu" aria-expanded={menuOpen}>☰{#if att.counts.err}<i class="nd e"></i>{/if}</button>
-      <!-- Op de gsm klapt dit open onder ☰; op een groot scherm staan de knoppen gewoon in de titelbalk. -->
-      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-      <span class="menu" class:open={menuOpen} onclick={() => (menuOpen = false)}>
-        <button class="mini" class:cronbad={att.counts.err} onclick={() => (modal = { kind: 'attention' })}
-                title="Aandacht: alles wat nu mis is, en welke functies nog ingesteld moeten worden">!<span class="ml">aandacht</span>{#if att.counts.err + att.counts.warn}<b class="n" class:wn={!att.counts.err}>{att.counts.err + att.counts.warn}</b>{/if}</button>
-        <button class="mini" onclick={() => openLogs(null, '', false, true)} title="Logs van je machines">logs</button>
-        <button class="mini" onclick={() => openTerminal()} title="SSH-terminal">&gt;_<span class="ml">terminal</span></button>
-        <button class="mini" onclick={() => (modal = { kind: 'capacity' })} title="Capaciteit: opslag, cpu en ram">df<span class="ml">capaciteit, stroom</span></button>
-        <button class="mini" onclick={() => (modal = { kind: 'network' })} title="Internet: publiek IP, WAN, tunnels, Wake-on-LAN">net{#if netLevel}<i class="nd {netLevel}"></i>{/if}</button>
-        <button class="mini" onclick={() => (modal = { kind: 'history' })} title="Tijdlijn en weekrapport">history</button>
-        <button class="mini" onclick={() => (modal = { kind: 'configs' })} title="Configuratiewijzigingen: OPNsense, NPM, Proxmox en je eigen bestanden">diff</button>
-        <button class="mini" onclick={() => (modal = { kind: 'apis' })} title="API-beheer: API's per categorie, eigen calls en welke tegel welke API gebruikt">api<span class="ml">API-beheer</span></button>
-        <button class="mini" class:cronbad={cron.fout} onclick={() => openCron(cron.fout || cron.gemist ? { filter: 'probleem' } : null)}
-                title="Cronjobs, timers en Proxmox/PBS-jobs van alle machines">cron{#if cron.fout + cron.gemist}<b class="n">{cron.fout + cron.gemist}</b>{/if}</button>
-        <button class="mini" class:cronbad={health.err} onclick={() => openHealth(health.problems?.length ? { tab: 'homepage' } : null)}
-                title="Gezondheid: schijven, temperatuur, snapshots, domeinen en de homepage zelf">hw{#if health.err + health.warn}<b class="n" class:wn={!health.err}>{health.err + health.warn}</b>{/if}</button>
-        <button class="mini" class:upd={updates.security} onclick={() => (modal = { kind: 'updates' })}
-                title="Openstaande updates">apt{#if updates.total}<b class="n">{updates.total}</b>{/if}</button>
-        <button class="mini" onclick={() => (modal = { kind: 'security' })} title="Beveiliging: sessies, auditlog en wachtwoord">⚿<span class="ml">beveiliging</span></button>
-        <button class="mini" class:on={editing} onclick={() => (editing = !editing)}>{editing ? '✓ klaar' : '✎ bewerken'}</button>
-        <button class="mini x" onclick={logout} title="Uitloggen">⏻<span class="ml">uitloggen</span></button>
-      </span>
-    {/snippet}
+  <Card title="homepage" glow class="top">
+    {#snippet right()}<Topbar {clock} onlogout={logout} />{/snippet}
     <div class="body head">
       <div class="hello">
         <h1>{greeting}, {user.username}</h1>
         <p class="hint">
           {date}
           {#if summary.up + summary.down > 0}
-            {' · '}<span class="ok">{summary.up} up</span>{#if summary.down}{' · '}<span class="down">{summary.down} down</span>{/if}{#if summary.maint}{' · '}<span class="maint">{summary.maint} in onderhoud</span>{/if}{#if summary.paused}{' · '}<span class="maint">{summary.paused} gepauzeerd</span>{/if}
-          {/if}<span class="cur"></span>
+            {' · '}<span class="ok">{summary.up} up</span>{#if summary.down}{' · '}<button class="down" onclick={() => (dash.problemsOnly = true)}
+              title="Alleen de tegels met een probleem tonen, van alle pagina's">{summary.down} down</button>{/if}{#if summary.maint}{' · '}<span class="maint">{summary.maint} in onderhoud</span>{/if}{#if summary.paused}{' · '}<span class="maint">{summary.paused} gepauzeerd</span>{/if}
+          {/if}
+          {#if dash.lastOk}{' · '}<span class="upd" class:old={stale} title="Wanneer het dashboard de toestand laatst ophaalde">bijgewerkt {hm(dash.lastOk)}</span>{/if}<span class="cur"></span>
         </p>
       </div>
       <input
@@ -616,370 +165,63 @@
         autocomplete="off"
       />
     </div>
-    {#if urgent.length && stripHidden !== stripId}
-      <div class="attn" role="region" aria-label="Aandacht">
-        {#each urgent.slice(0, 4) as i (i.key)}
-          <button class="ai lv-{i.level}" onclick={() => openFix(i.fix)}>
-            <i></i><b>{i.title}</b><span class="area">{AREA[i.area] || i.area}</span>{#if i.text}<small>{i.text}</small>{/if}
-          </button>
-        {/each}
-        <div class="aend">
-          <button class="mini" onclick={() => (modal = { kind: 'attention' })}>{urgent.length > 3 ? `alle ${urgent.length} bekijken` : 'aandacht'}</button>
-          <button class="mini x" onclick={hideStrip} title="Verbergen tot er iets verandert" aria-label="Verbergen">✕</button>
-        </div>
+    {#if dash.offline}
+      <div class="offline" role="alert">
+        <i></i>
+        <span>Geen verbinding met de homepage sinds {hm(dash.offline)}{dash.offlineWhy ? ` (${dash.offlineWhy})` : ''}.
+          {dash.lastOk ? `Wat je ziet is van ${hm(dash.lastOk)}.` : 'Er is nog niets geladen.'}</span>
+        <button class="mini" onclick={() => dash.refresh(Object.keys(PARTS))}>opnieuw proberen</button>
       </div>
     {/if}
-    {#if layout.pages.length > 0}
-      <nav class="tabs">
-        {#each layout.pages as p (p.id)}
-          <button
-            class="mini"
-            class:on={page?.id === p.id}
-            class:drop={over?.pageId === p.id}
-            draggable={editing}
-            ondragstart={(e) => startDrag(e, 'page', p.id)}
-            ondragover={(e) => overTab(e, p)}
-            ondrop={drop}
-            onclick={() => selectPage(p)}
-          >{p.name}</button>
-        {/each}
-        {#if editing}
-          <button class="mini ok" onclick={() => (modal = { kind: 'page' })}>+ pagina</button>
-        {/if}
-      </nav>
-    {/if}
-    {#if editing}
-      <div class="tools">
-        {#if page}
-          <button class="mini" onclick={() => (modal = { kind: 'group' })}>+ groep</button>
-          <button class="mini" onclick={() => (modal = { kind: 'page', page })}>✎ pagina</button>
-        {/if}
-        <button class="mini" onclick={() => (modal = { kind: 'import' })}>import</button>
-        <a class="mini" href="/api/export" download>export</a>
-        <button class="mini" onclick={() => (modal = { kind: 'revisions' })}>versies</button>
-        <span class="tip">Sleep tegels, groepen (aan ⠿) en tabbladen om ze te verplaatsen.</span>
-      </div>
-    {/if}
+    <AttentionStrip />
+    {#if !query.trim()}<PageView part="tabs" />{/if}
   </Card>
 
-  {#if error}<p class="err banner">{error}</p>{/if}
-
-  {#snippet foundGroup(g)}
-    <div class="fgrp">
-      <span class="lbl">{g.label}{g.more ? ` · nog ${g.more}` : ''}</span>
-      {#each g.items as it, i (i)}
-        <button class="frow" onclick={() => openFound(g.kind, it)}>
-          <span class="ft" class:e={it.severity <= 3 || it.status === 'fout'} class:w={it.severity === 4 || it.status === 'gemist'}>{it.title}</span>
-          {#if it.sub}<small>{it.sub}</small>{/if}
-        </button>
-      {/each}
-    </div>
-  {/snippet}
-
   {#if query.trim()}
-    <Card title={`grep -i "${query.trim()}"`} class="results">
-      {#if actionResults.length || quickMsg}
-        <div class="acts">
-          {#each actionResults as a}
-            <button class="act" class:danger={a.danger} disabled={quickBusy} onclick={() => runQuick(a)}>
-              {#if a.kind === 'cmd'}<span class="src">dashboard</span>{a.label}
-              {:else}<span class="src">{a.service}</span>{a.label} <b>{a.target || ''}</b>{/if}
-            </button>
-          {/each}
-          {#if quickMsg}<span class="qmsg" class:bad={quickMsg.startsWith('✕')}>{quickMsg}</span>{/if}
-        </div>
-      {/if}
-      {#each foundGroups.filter((g) => g.kind === 'lookup') as g (g.kind)}{@render foundGroup(g)}{/each}
-      <div class="tiles pad">
-        {#each results as s (s.id)}
-          <ServiceTile service={s} status={status[s.id]} widget={widgets[s.id]} updates={updates.by_service[s.id]} zbx={zbx[s.id]} {editing} onedit={(svc) => (modal = { kind: 'service', service: svc })}
-                       ondetail={(svc) => (modal = { kind: 'detail', service: svc })} />
-        {:else}
-          {#if !actionResults.length && !foundGroups.length}<p class="hint">Niets gevonden.</p>{/if}
-        {/each}
-      </div>
-      {#each foundGroups.filter((g) => g.kind !== 'lookup') as g (g.kind)}{@render foundGroup(g)}{/each}
-    </Card>
-  {:else if loaded && layout.pages.length === 0}
+    <SearchPanel bind:this={search} bind:query onlogs={openLogs} />
+  {:else if dash.loaded && dash.pages.length === 0 && !dash.layoutError}
     <Card title="welkom" class="empty">
       <div class="body">
         <h3>Nog leeg</h3>
         <p class="hint">Begin met een pagina, of importeer meteen je <code>services.yaml</code> van homepage.dev.</p>
         <div class="row">
-          <button class="btn" onclick={() => (modal = { kind: 'import' })}>Importeer services.yaml</button>
-          <button class="btn alt" onclick={() => (modal = { kind: 'page' })}>Lege pagina</button>
+          <button class="btn" onclick={() => dash.open('import')}>Importeer services.yaml</button>
+          <button class="btn alt" onclick={newPage}>Lege pagina</button>
         </div>
       </div>
     </Card>
-  {:else if page}
-    <div class="groups">
-      {#each page.groups as g (g.id)}
-        <div
-          class="gwrap"
-          class:dragging={drag?.kind === 'group' && drag.id === g.id}
-          class:drop={drag?.kind === 'group' && over?.groupId === g.id}
-          ondragover={(e) => overGroup(e, g)}
-          ondrop={drop}
-          role="list"
-        >
-          <Card prompt="~#" title={`ls ${g.name.toLowerCase()}/`}>
-            {#snippet right()}
-              {#if editing}
-                <span class="handle" draggable="true" ondragstart={(e) => startDrag(e, 'group', g.id)} title="Sleep groep" role="button" tabindex="-1">⠿</span>
-                <button class="mini" onclick={() => (modal = { kind: 'service', service: null, groupId: g.id })} aria-label="Service toevoegen aan {g.name}">+</button>
-                <button class="mini" onclick={() => (modal = { kind: 'group', group: g })} aria-label="Groep {g.name} bewerken">✎</button>
-              {/if}
-              {#if editing}
-                <button class="mini" onclick={() => groupMaintenance(g)} title="Onderhoud voor de hele groep" aria-label="Onderhoud voor groep {g.name}">⏸</button>
-              {/if}
-              <button class="mini fold" onclick={() => toggleGroup(g)} aria-label={g.collapsed ? 'Openklappen' : 'Dichtklappen'}>
-                {g.collapsed ? '▸' : '▾'} {g.services.length}
-              </button>
-            {/snippet}
-            {#if !g.collapsed || (drag?.kind === 'service')}
-              <div class="tiles pad">
-                {#each g.services as s, i (s.id)}
-                  <ServiceTile
-                    service={s}
-                    status={status[s.id]}
-                    widget={widgets[s.id]}
-                    updates={updates.by_service[s.id]}
-                    zbx={zbx[s.id]}
-                    {editing}
-                    onedit={(svc) => (modal = { kind: 'service', service: svc })}
-                    ondetail={(svc) => (modal = { kind: 'detail', service: svc })}
-                    dragging={drag?.kind === 'service' && drag.id === s.id}
-                    dropBefore={over?.groupId === g.id && over.index === i && drag?.kind === 'service'}
-                    ondragstart={(e) => startDrag(e, 'service', s.id)}
-                    ondragover={(e) => overService(e, g.id, i)}
-                    ondrop={drop}
-                  />
-                {/each}
-                {#if editing}
-                  <button
-                    class="add"
-                    class:drop={over?.groupId === g.id && over.index === g.services.length && drag?.kind === 'service'}
-                    onclick={() => (modal = { kind: 'service', service: null, groupId: g.id })}
-                  >+ service</button>
-                {:else if g.services.length === 0}
-                  <p class="hint none">Leeg</p>
-                {/if}
-              </div>
-            {/if}
-          </Card>
-        </div>
-      {:else}
-        <p class="hint">Deze pagina heeft nog geen groepen. Zet <b>bewerken</b> aan om er een toe te voegen.</p>
-      {/each}
-    </div>
+  {:else}
+    <PageView part="groups" />
   {/if}
 </main>
 
-{#if modal?.kind === 'service'}
-  <Lazy load={() => import('./ServiceForm.svelte')}
-    service={modal.service}
-    groupId={modal.groupId}
-    groups={groupOptions}
-    services={allServices}
-    onclose={() => (modal = null)}
-    onsaved={() => { load(); setTimeout(loadWidgets, 300) }}
-  />
-{:else if modal?.kind === 'page'}
-  <NameForm
-    title={modal.page ? `edit ${modal.page.name}` : 'page --new'}
-    initial={modal.page}
-    onsave={savePage(modal.page)}
-    ondelete={modal.page ? deletePage(modal.page) : null}
-    onclose={() => (modal = null)}
-  />
-{:else if modal?.kind === 'group'}
-  <NameForm
-    title={modal.group ? `edit ${modal.group.name}` : 'group --new'}
-    initial={modal.group}
-    onsave={saveGroup(modal.group)}
-    ondelete={modal.group ? deleteGroup(modal.group) : null}
-    onclose={() => (modal = null)}
-  />
-{:else if modal?.kind === 'detail'}
-  <Lazy load={() => import('./ServiceDetail.svelte')}
-    service={modal.service}
-    groups={groupOptions}
-    onchanged={load}
-    onterminal={(hostId) => { modal = null; openTerminal(hostId) }}
-    onclose={() => (modal = null)}
-    onedit={(svc) => (modal = { kind: 'service', service: svc })}
-  />
-{:else if modal?.kind === 'import'}
-  <Lazy load={() => import('./ImportDialog.svelte')} pages={layout.pages} onclose={() => (modal = null)} ondone={load} />
-{:else if modal?.kind === 'capacity'}
-  <Lazy load={() => import('./Capacity.svelte')} onclose={() => (modal = null)} />
-{:else if modal?.kind === 'history'}
-  <Lazy load={() => import('./History.svelte')} tab={modal.tab} onclose={() => (modal = null)} />
-{:else if modal?.kind === 'network'}
-  <Lazy load={() => import('./Network.svelte')} initialTab={modal.tab} initialQuery={modal.q} onclose={() => (modal = null)} onchanged={(d) => (net = d)} />
-{:else if modal?.kind === 'apis'}
-  <Lazy load={() => import('./ApiManager.svelte')} onclose={() => { modal = null; load(); loadWidgets() }} />
-{:else if modal?.kind === 'webhooks'}
-  <Lazy load={() => import('./Webhooks.svelte')} services={allServices} onclose={() => (modal = null)} />
-{:else if modal?.kind === 'webpush'}
-  <Lazy load={() => import('./PushDevices.svelte')} onclose={() => (modal = null)} />
-{:else if modal?.kind === 'planned'}
-  <Lazy load={() => import('./Planned.svelte')} services={allServices} groups={groupOptions} onclose={() => (modal = null)} />
-{:else if modal?.kind === 'restoretest'}
-  <Lazy load={() => import('./RestoreTestWindow.svelte')} onclose={() => (modal = null)} />
-{:else if modal?.kind === 'configs'}
-  <Lazy load={() => import('./Configs.svelte')} initialItem={modal.item} onclose={() => (modal = null)} />
-{:else if modal?.kind === 'updates'}
-  <Lazy load={() => import('./Updates.svelte')} onclose={() => (modal = null)} onchanged={loadUpdates} />
-{:else if modal?.kind === 'security'}
-  <Lazy load={() => import('./Security.svelte')} tab={modal.tab} error={modal.error} onclose={() => { modal = null; loadWhere() }} />
-{:else if modal?.kind === 'news'}
-  <Lazy load={() => import('./Changelog.svelte')} entries={modal.entries} version={modal.version}
-        onclose={() => { modal = null; markNews() }} />
-{:else if modal?.kind === 'attention'}
-  <Lazy load={() => import('./Attention.svelte')} tab={modal.tab} data={att} onfix={openFix}
-        onchanged={(d) => (att = d)} onclose={() => (modal = null)} />
-{:else if modal?.kind === 'revisions'}
-  <Lazy load={() => import('./Revisions.svelte')} onclose={() => (modal = null)} ondone={load} />
-{/if}
-
-{#if termUsed}
-  <!-- xterm.js is groot: pas laden als je de terminal voor het eerst opent. -->
-  {#await import('./Terminal.svelte') then { default: Terminal }}
-    <Terminal open={termOpen} request={termRequest} services={allServices} onclose={() => (termOpen = false)} />
-  {:catch}
-    <Lazy load={() => Promise.reject()} />
-  {/await}
-{/if}
-{#if cronUsed}
-  {#await import('./Cron.svelte') then { default: Cron }}
-    <Cron open={cronOpen} initial={cronInitial} onclose={() => (cronOpen = false)}
-          onterminal={(hostId) => { cronOpen = false; openTerminal(hostId) }} />
-  {:catch}
-    <Lazy load={() => Promise.reject()} />
-  {/await}
-{/if}
-{#if healthUsed}
-  {#await import('./Health.svelte') then { default: Health }}
-    <Health open={healthOpen} initial={healthInitial} onclose={() => (healthOpen = false)} onfix={openFix} />
-  {:catch}
-    <Lazy load={() => Promise.reject()} />
-  {/await}
-{/if}
-{#if logsUsed}
-  {#await import('./Logs.svelte') then { default: Logs }}
-    <Logs open={logsOpen} initial={logsInitial} onclose={() => (logsOpen = false)} />
-  {:catch}
-    <Lazy load={() => Promise.reject()} />
-  {/await}
-{/if}
-<OutsideDialog onsettings={() => (modal = { kind: 'security', tab: 'outside' })} />
+<PageView part="forms" />
+<WindowHost onnews={markNews} />
+<OutsideDialog onsettings={() => dash.open('security', { tab: 'outside' })} />
 <ReauthDialog />
 
 <style>
   /* Volle schermbreedte; op brede schermen komen er gewoon meer groepen naast elkaar. */
   .wrap { padding: min(4vh, 32px) clamp(14px, 2vw, 36px) 50px }
-  .clock { color: var(--text); margin-right: 4px }
-  .buiten { color: var(--mid); border-color: rgba(255, 190, 90, .45) }
-  .n { margin-left: 5px; color: var(--text-h); font-size: 11px; font-weight: 500 }
-  .upd .n { color: var(--mid) }
-  .cronbad .n { color: var(--err) }
-  .n.wn { color: var(--mid) }
-  .menu { display: contents }
-  /* De kopkaart boven de groepen houden: het menu en de meldingen klappen eroverheen open
+  /* De kopkaart boven de groepen houden: de menu's en de meldingen klappen eroverheen open
      (backdrop-filter maakt van elke kaart een eigen stapel). */
   .wrap > :global(.card:first-child) { z-index: 5 }
-  .burger { display: none }
-  .ml { display: none }
-  .nd { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin: 0 0 1px 6px; vertical-align: middle }
-  .nd.g { background: var(--ok) }
-  .nd.w { background: var(--mid) }
-  .nd.e { background: var(--err); box-shadow: 0 0 6px var(--err) }
-  .down { color: var(--err) }
+  .down { all: unset; cursor: pointer; color: var(--err); text-decoration: underline dotted; text-underline-offset: 3px }
+  .down:hover, .down:focus-visible { color: #ffb0b0 }
   .maint { color: var(--mid) }
-  .attn { display: flex; flex-direction: column; gap: 4px; padding: 0 24px 14px }
-  .ai { all: unset; cursor: pointer; display: flex; gap: 8px; align-items: baseline; padding: 6px 10px; border-radius: 9px;
-        border: 1px solid var(--line); border-left: 3px solid var(--mid); background: var(--fill); min-width: 0; font-size: 12.5px }
-  .ai:hover, .ai:focus-visible { background: var(--fill-h) }
-  .ai.lv-err { border-left-color: var(--err) }
-  .ai i { width: 7px; height: 7px; border-radius: 50%; background: var(--mid); flex-shrink: 0; align-self: center }
-  .ai.lv-err i { background: var(--err); box-shadow: 0 0 6px var(--err) }
-  .ai b { color: var(--text-h); font-weight: 500; white-space: nowrap }
-  .ai .area { font-size: 10.5px; padding: 0 5px; border-radius: 5px; border: 1px solid var(--line-2); color: var(--muted) }
-  .ai small { color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0 }
-  .aend { display: flex; gap: 6px; justify-content: flex-end }
+  .upd { color: var(--muted) }
+  .upd.old { color: var(--mid) }
+  .offline { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 0 24px 14px; padding: 8px 12px; border-radius: 9px;
+             border: 1px solid rgba(229, 139, 139, .4); border-left: 3px solid var(--err); background: rgba(229, 139, 139, .08); font-size: 12.5px }
+  .offline i { width: 7px; height: 7px; border-radius: 50%; background: var(--err); flex: none }
+  .offline span { flex: 1; min-width: 200px }
   .head { display: flex; gap: 18px; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; padding-bottom: 12px }
   .hello .hint { margin: 6px 0 0 }
   .search { max-width: 340px }
-  .tabs { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 24px 16px }
-  .tabs .drop { outline: 2px dashed var(--ok) }
-  .tools { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding: 12px 24px; border-top: 1px solid var(--line) }
-  .tools a { text-decoration: none }
-  .tip { color: var(--dim); font-size: 11.5px; margin-left: 6px }
-  .banner { margin: 14px 4px 0 }
-  .groups {
-    display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr));
-    gap: 18px; align-items: start; margin-top: 18px
-  }
-  .gwrap { border-radius: var(--radius); transition: opacity .2s }
-  .gwrap.dragging { opacity: .35 }
-  .gwrap.drop { box-shadow: -4px 0 0 0 var(--ok) }
-  .handle { cursor: grab; color: var(--muted); padding: 0 4px; user-select: none }
-  .fold { color: var(--muted); padding: 3px 8px }
-  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(165px, 1fr)); gap: 8px }
-  .pad { padding: 12px }
-  .add {
-    min-height: 58px; border-radius: 10px; border: 1px dashed var(--line-2); background: none; color: var(--muted);
-    cursor: pointer; font-size: 12.5px
-  }
-  .add:hover { color: var(--text-h); border-color: var(--btn-h) }
-  .add.drop { border-color: var(--ok); color: var(--ok) }
-  .none { margin: 0; padding: 6px }
-  :global(.results), :global(.empty) { margin-top: 18px }
-  .acts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 12px 12px 0 }
-  .act { display: inline-flex; gap: 8px; align-items: baseline; padding: 6px 10px; border-radius: 9px; cursor: pointer;
-         background: var(--fill); border: 1px solid var(--line-2); color: var(--text); font-size: 12.5px }
-  .act:hover { background: var(--fill-h); color: #fff }
-  .act.danger:hover { border-color: var(--err); color: var(--err) }
-  .act:disabled { opacity: .5; cursor: progress }
-  .act .src { color: var(--muted); font-size: 11px }
-  .act b { font-weight: 500; color: var(--text-h) }
-  .qmsg { font-size: 12px; color: var(--ok); margin-left: 4px }
-  .qmsg.bad { color: var(--err) }
-  .fgrp { padding: 10px 12px 0; display: flex; flex-direction: column }
-  .frow { all: unset; cursor: pointer; display: flex; gap: 10px; align-items: baseline; padding: 5px 8px; border-radius: 8px;
-          border-top: 1px solid var(--line); min-width: 0 }
-  .frow:hover, .frow:focus-visible { background: var(--fill-h) }
-  .ft { color: var(--text-h); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 55% }
-  .ft.e { color: var(--err) }
-  .ft.w { color: var(--mid) }
-  .frow small { color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0 }
-  @media (max-width: 640px) {
-    .frow { flex-direction: column; gap: 1px }
-    .ft { max-width: 100% }
-    .frow small { max-width: 100% }
-  }
-  @media (max-width: 760px) {
-    .burger { display: inline-block; padding: 3px 9px }
-    .menu { display: none }
-    .menu.open {
-      display: grid; grid-template-columns: 1fr 1fr; gap: 6px; position: fixed; z-index: 70;
-      top: calc(62px + env(safe-area-inset-top)); right: 12px; width: min(300px, calc(100vw - 24px)); padding: 10px;
-      background: rgba(18, 18, 18, .97); border: 1px solid var(--line-2); border-radius: 12px;
-      box-shadow: 0 12px 40px rgba(0, 0, 0, .6)
-    }
-    .menu.open :global(.mini) { padding: 9px 10px; text-align: left; font-size: 13px }
-    .menu.open .ml { display: inline; margin-left: 7px; color: var(--muted); font-size: 12px }
-  }
+  :global(.empty) { margin-top: 18px }
   @media (max-width: 560px) {
-    .tiles { grid-template-columns: repeat(auto-fill, minmax(138px, 1fr)) }
-    .groups { gap: 12px; margin-top: 12px }
     .head { padding: 18px 16px 12px }
-    .tabs, .tools, .attn { padding-left: 16px; padding-right: 16px }
-    .ai { flex-wrap: wrap }
-    .ai:nth-child(n+4) { display: none }
-    .ai b { white-space: normal }
+    .offline { margin: 0 16px 12px }
     .search { max-width: none }
-    .clock { display: none }
   }
 </style>

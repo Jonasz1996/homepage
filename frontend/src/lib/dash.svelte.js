@@ -1,0 +1,222 @@
+// Gedeelde toestand van het hoofdscherm: de indeling, wat de server over je services en machines weet, de verbinding
+// en welke vensters open staan. De onderdelen van het dashboard (titelbalk, tegels, zoekbalk, vensters) lezen hier.
+import { api, ApiError } from './api.js'
+import { fxEnabled, setFx } from './fx.js'
+import { byId, resolve, sourceWindow } from './windows.js'
+
+// Hoe vaak elk deel van /api/overzicht ververst. Eén klok, één verzoek: bij elke tik gaan de delen mee die aan de
+// beurt zijn. Komt het tabblad terug in beeld, dan één verzoek met wat intussen verlopen is.
+export const PARTS = {
+  status: 30000, meldingen: 30000, widgets: 60000, zabbix: 60000,
+  aandacht: 120000, cron: 120000, health: 120000, net: 120000, updates: 300000, buiten: 600000,
+}
+const TICK = 30000
+const RETRY = 15000
+
+class Dash {
+  layout = $state({ pages: [] })
+  loaded = $state(false)
+  layoutError = $state('')
+  // Wordt bij elke verversing volledig vervangen, nooit aangepast: geen diepe proxy nodig.
+  status = $state.raw({})
+  widgets = $state.raw({})
+  zbx = $state.raw({})
+  updates = $state.raw({ total: 0, security: 0, by_service: {} })
+  net = $state.raw(null)
+  cron = $state.raw({ fout: 0, gemist: 0 })
+  health = $state.raw({ err: 0, warn: 0 })
+  att = $state.raw({ items: [], ignored: [], counts: { err: 0, warn: 0, info: 0 } })
+  notif = $state.raw({ unread: 0, newest: null })
+  where = $state.raw(null)
+  version = $state.raw(null)
+
+  // Verbinding met de homepage zelf: wanneer het laatst lukte, en sinds wanneer niet meer (null = in orde).
+  lastOk = $state(null)
+  offline = $state(null)
+  offlineWhy = $state('')
+
+  // Vensters: één gewoon venster tegelijk (modal), en de grote vensters die geladen blijven (big, in volgorde van
+  // openen: het laatste ligt bovenaan).
+  modal = $state(null)
+  big = $state({})
+  order = $state([])
+  editing = $state(false)
+  notifOpen = $state(false)
+  // Alleen de tegels met een probleem tonen, over alle pagina's heen.
+  problemsOnly = $state(false)
+  // Effecten aan of uit (ook in fx.js en op <html> als class "calm", zie setFx).
+  fx = $state(fxEnabled())
+
+  setFx(on) {
+    setFx(on)
+    this.fx = fxEnabled()
+  }
+
+  services = $derived(this.layout.pages.flatMap((p) => p.groups.flatMap((g) => g.services)))
+  groupOptions = $derived(this.layout.pages.flatMap((p) => p.groups.map((g) => ({ id: g.id, label: `${p.name} / ${g.name}` }))))
+
+  // --- Verversen ------------------------------------------------------------
+
+  #last = {}
+  #timer = null
+  #busy = false
+  #again = null
+
+  async loadLayout() {
+    try {
+      this.layout = await api('/layout')
+      this.layoutError = ''
+    } catch (e) {
+      this.layoutError = e.message
+    } finally {
+      this.loaded = true
+    }
+  }
+
+  /** Haalt de delen op die aan de beurt zijn (of precies deze, met force). */
+  async refresh(force = null) {
+    if (this.#busy) {
+      // Er loopt al een verzoek: daarna meteen de gevraagde delen.
+      if (force) this.#again = [...new Set([...(this.#again || []), ...force])]
+      return
+    }
+    const now = Date.now()
+    const due = force || Object.keys(PARTS).filter((p) => !this.#last[p] || now - this.#last[p] >= PARTS[p] - 2000)
+    if (!due.length) return
+    this.#busy = true
+    try {
+      const r = await api(`/overzicht?delen=${due.join(',')}`)
+      this.#apply(r.delen || {})
+      const failed = r.fouten || {}
+      for (const p of due) {
+        // Een deel dat mislukte: bij de volgende tik opnieuw, niet pas na zijn eigen termijn.
+        this.#last[p] = failed[p] ? now - PARTS[p] + TICK : now
+      }
+      this.lastOk = new Date()
+      this.offline = null
+      this.offlineWhy = ''
+    } catch (e) {
+      // Uitgelogd: App.svelte toont het loginscherm. Anders is de homepage zelf (of de weg ernaartoe) weg.
+      if (!(e instanceof ApiError && (e.status === 401 || e.status === 403))) {
+        this.offline ??= new Date()
+        this.offlineWhy = e instanceof ApiError ? e.message : 'geen antwoord'
+        this.#schedule(RETRY)
+      }
+    } finally {
+      this.#busy = false
+      const again = this.#again
+      this.#again = null
+      if (again) this.refresh(again)
+    }
+  }
+
+  #apply(d) {
+    if ('status' in d) this.status = d.status
+    if ('widgets' in d) this.widgets = d.widgets
+    if ('zabbix' in d) this.zbx = d.zabbix?.services || {}
+    if ('updates' in d) this.updates = d.updates
+    if ('net' in d) this.net = d.net
+    if ('cron' in d) this.cron = d.cron
+    if ('health' in d) this.health = d.health
+    if ('aandacht' in d) this.att = d.aandacht
+    if ('meldingen' in d) this.notif = d.meldingen
+    if ('buiten' in d) this.where = d.buiten
+  }
+
+  #schedule(ms) {
+    clearTimeout(this.#timer)
+    this.#timer = setTimeout(() => this.#tick(), ms)
+  }
+
+  #tick() {
+    if (!document.hidden) this.refresh()
+    this.#schedule(TICK)
+  }
+
+  /** Start het verversen; geeft een stopfunctie. */
+  start() {
+    this.#last = {}
+    this.loadLayout()
+    this.#tick()
+    const vis = () => { if (!document.hidden) this.refresh() }
+    document.addEventListener('visibilitychange', vis)
+    return () => {
+      clearTimeout(this.#timer)
+      document.removeEventListener('visibilitychange', vis)
+    }
+  }
+
+  // --- Vensters ---------------------------------------------------------------
+
+  /**
+   * Opent een venster op naam (id uit windows.js, een andere naam, of fix.window van de server) met een startpunt:
+   * tab, q, item, service, hostId, sub, job, filter, host, setup, keep, ...
+   */
+  open(name, opts = {}) {
+    const r = typeof name === 'string' ? resolve(name) : name
+    if (!r) return false
+    const o = { ...r, ...opts }
+    if (o.id === 'notifications') {
+      this.notifOpen = true
+      return true
+    }
+    const w = byId[o.id]
+    if (!w) return false
+    if (w.big) {
+      // Een groot venster komt bovenop; een gewoon venster dat openstond, zou het bedekken: dat sluit.
+      this.modal = null
+      this.big = { ...this.big, [o.id]: { used: true, open: true, initial: bigStart(o, this.big[o.id]) } }
+      this.order = [...this.order.filter((x) => x !== o.id), o.id]
+    } else {
+      this.modal = o
+    }
+    return true
+  }
+
+  close(id) {
+    if (byId[id]?.big) {
+      if (this.big[id]) this.big = { ...this.big, [id]: { ...this.big[id], open: false } }
+      this.order = this.order.filter((x) => x !== id)
+    } else if (!id || this.modal?.id === id) {
+      this.modal = null
+    }
+  }
+
+  /** Een knop uit Aandacht, de instellingen-checklist of de veiligheidscheck: het venster dat het oplost. */
+  openFix(fix) {
+    if (!fix?.window) return this.open('attention')
+    const svc = fix.service_id && this.services.find((s) => s.id === fix.service_id)
+    if (fix.window === 'detail' || fix.window === 'edit') {
+      if (svc) this.open(fix.window === 'detail' ? 'detail' : 'service', { service: svc })
+      return
+    }
+    const opts = {}
+    if (fix.tab) opts.tab = fix.tab
+    if (fix.host_id) opts.hostId = fix.host_id
+    if (fix.job) opts.job = fix.job
+    else if (fix.filter) opts.filter = fix.filter
+    if (!this.open(fix.window, opts)) this.open('attention')
+  }
+
+  /** Klik op een melding (in de bel of een pushbericht). */
+  openNotification(n) {
+    const w = sourceWindow(n.source)
+    if (w) return this.open(w)
+    if (n.service_id) {
+      const s = this.services.find((x) => x.id === n.service_id)
+      if (s) this.open('detail', { service: s })
+    }
+  }
+}
+
+// Het startpunt van een groot venster, zoals de vensters het al verwachten (initial of request).
+function bigStart(o, prev) {
+  if (o.id === 'logs') return { host: o.host ?? null, q: o.q ?? '', setup: !!o.setup, keep: !!o.keep }
+  if (o.id === 'cron') return o.job ? { job: o.job } : o.filter ? { filter: o.filter } : null
+  if (o.id === 'health') return o.tab ? { tab: o.tab } : null
+  // Terminal: zonder host of venster blijft het vorige verzoek staan (de terminal deed dat al).
+  if (o.id === 'terminal') return o.hostId || o.sub ? { hostId: o.hostId ?? null, modal: o.sub ?? null } : prev?.initial ?? null
+  return null
+}
+
+export const dash = new Dash()

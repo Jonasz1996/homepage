@@ -1,16 +1,29 @@
 // Speciale effecten zoals in aiverslag: vuur, vonken, bliksem, flits, schudden en een ripple op knoppen.
 // Alles tekent op één doorzichtig canvas boven de pagina en stopt zodra er niets meer beweegt.
-// Uit bij "minder beweging" in het systeem, of met Ctrl+K → "effecten".
+// "Effecten" (Instellingen of Ctrl+K) zet alles uit: ook de bewegende achtergrond, de draaiende randen, de blur, de
+// glans op de titel en de scanlijnen (class "calm" op <html>, zie app.css). Standaard uit op een touchscreen en bij
+// "minder beweging" in het systeem.
 
 const KEY = 'hp-fx'
-const RM = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
-let on = true
-try { on = localStorage.getItem(KEY) !== 'off' } catch { /* geen opslag: standaard aan */ }
+const mq = (q) => typeof matchMedia === 'function' && matchMedia(q).matches
+const RM = mq('(prefers-reduced-motion: reduce)')
+let on = !mq('(pointer: coarse)')
+try {
+  const saved = localStorage.getItem(KEY)
+  if (saved) on = saved !== 'off'
+} catch { /* geen opslag: de standaard van dit toestel */ }
 
 export const fxEnabled = () => on && !RM
+function apply() {
+  if (typeof document !== 'undefined') document.documentElement.classList.toggle('calm', !fxEnabled())
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event('hp:fx'))
+}
+apply()
+
 export function setFx(value) {
   on = value
   try { localStorage.setItem(KEY, value ? 'on' : 'off') } catch { /* niet bewaard */ }
+  apply()
 }
 
 // Laatste klik- of tikpositie: effecten zonder eigen plek ontstaan daar.

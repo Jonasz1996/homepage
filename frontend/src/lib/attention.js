@@ -1,10 +1,12 @@
 // Aandacht: welke knop een punt krijgt (fix.window → tekst) en hoe een gebied heet.
-export const FIX_LABEL = {
-  detail: 'tegel', edit: 'bewerken', health: 'hw', cron: 'cron', updates: 'apt', net: 'net', capacity: 'df',
-  restoretest: 'hersteltest', planned: 'onderhoud', security: 'beveiliging', api: 'API-beheer', webhooks: 'webhooks',
-  terminal: 'terminal', 'ssh-keys': 'sleutels', 'ssh-defaults': '⚙ standaard', 'ssh-discover': '⟳ pve',
-  logs: 'logs', 'logs-setup': 'logs', configs: 'diff', webpush: '🔔 gsm',
+import { byId, NAMES, resolve } from './windows.js'
+
+// Waar de naam van het venster niet volstaat: een tegel, of een venster binnen de terminal of de logs.
+const SPECIAL = {
+  detail: 'tegel', edit: 'bewerken', 'ssh-keys': 'sleutels', 'ssh-defaults': 'standaardlogin', 'ssh-discover': 'uit Proxmox',
+  'logs-setup': 'machines toevoegen',
 }
+export const FIX_LABEL = Object.fromEntries(NAMES.map((w) => [w, SPECIAL[w] || byId[resolve(w)?.id]?.label]))
 
 export const AREA = {
   services: 'down', checks: 'check', 'back-ups': 'back-up', cluster: 'cluster', hardware: 'hardware', opslag: 'opslag', netwerk: 'netwerk',
