@@ -470,6 +470,8 @@ async def test_nooit_gelukt_en_dubbele_tegel(authed, monkeypatch, tmp_path):
     assert not src["ok"] and src["from"] is None and src["failing_since"] == T0.isoformat()
     assert "Oud" in src["name"] and "nog nooit gelukt, dit deel ontbreekt" in (await nood.render(db, v, "md"))[0]
     assert nood.problems(v, T0 + timedelta(days=15))[0][0] == f"bron:pve:{bad}"
+    st = nood.status(v, False, T0 + timedelta(days=15), False, "/x")
+    assert st["problems"][0]["key"] == f"bron:pve:{bad}" and "Oud" in st["problems"][0]["text"]
     await agen.aclose()
 
 

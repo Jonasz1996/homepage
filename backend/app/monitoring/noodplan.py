@@ -1136,7 +1136,7 @@ def status(value: dict | None, running: bool, now: datetime, offsite_on: bool, o
             "offsite": v.get("offsite") or {"enabled": offsite_on, "dir": offsite_dir},
             "counts": counts(v.get("data")) if at else None,
             "masked": v.get("masked") or 0, "masked_kinds": v.get("masked_kinds") or [],
-            "problems": [t for _, t in problems(v, now)]}
+            "problems": [{"key": k, "text": t} for k, t in problems(v, now)]}
 
 
 def _call(table: dict, key: str, calls: list[str], prefix: str, **kw) -> str:

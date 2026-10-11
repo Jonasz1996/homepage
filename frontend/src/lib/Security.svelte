@@ -183,6 +183,7 @@
     api_created: 'API toegevoegd', api_target_changed: 'adres van API gewijzigd', api_secrets_changed: 'sleutels van API gewijzigd', api_deleted: 'API verwijderd', api_bulk: "API's voor tegels ingesteld", api_adopt: 'tegels naar API-beheer verhuisd',
     service_target_changed: 'adres van service met geheimen gewijzigd',
     config_download: 'oude configuratie gedownload', diagnose_download: 'diagnose gedownload',
+    noodplan_view: 'noodplan bekeken of gedownload', noodplan_run: 'noodplan bijgewerkt',
     pbs_sync_create: 'PBS-sync ingesteld via SSH', pbs_sync_proef: 'PBS-sync: proef via SSH (alleen lezen)', config_settings: 'configuratie-opvolging ingesteld', device_changed: 'apparaat aangepast', device_scan: 'poortscan gestart',
     ssh_open: 'terminal geopend', ssh_close: 'terminal gesloten', ssh_key_added: 'SSH-sleutel toegevoegd',
     ssh_key_deleted: 'SSH-sleutel verwijderd', ssh_host_added: 'SSH-host toegevoegd', ssh_host_changed: 'SSH-host gewijzigd',

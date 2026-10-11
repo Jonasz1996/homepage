@@ -20,6 +20,8 @@ export const WINDOWS = [
     load: () => import('./Logs.svelte') },
   { id: 'history', menu: 'infra', label: 'Tijdlijn', code: 'history', hint: 'archief: storingen, herstarts, weekrapport',
     load: () => import('./History.svelte') },
+  { id: 'noodplan', menu: 'infra', label: 'Noodplan', hint: 'afdrukbaar: wat draait waar, back-ups, terugzetten',
+    load: () => import('./Noodplan.svelte') },
 
   { id: 'terminal', menu: 'beheer', label: 'Terminal', code: '>_', big: true, hint: 'SSH naar je machines',
     load: () => import('./Terminal.svelte') },
