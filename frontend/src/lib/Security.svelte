@@ -184,6 +184,8 @@
     log_rule_changed: 'logregel gewijzigd', log_rule_deleted: 'logregel verwijderd', wol: 'Wake-on-LAN',
     outside_mode: 'van buitenaf aan/uit', outside_settings: 'thuisnetwerken gewijzigd', ssh_pin: 'SSH-sleutel vastgezet',
     ssh_unpin: 'SSH-sleutel losgemaakt', secret_key_saved: 'kopie van secret.key bevestigd',
+    oidc_linked: 'Authentik-account gekoppeld', oidc_unlinked: 'Authentik-account ontkoppeld', oidc_link_failed: 'Authentik koppelen mislukt',
+    password_change_failed: 'wachtwoord wijzigen mislukt', attention_ignored: 'beveiligingspunt genegeerd', check_silenced: 'check stilgelegd',
   }
   const BAD = /failed|mismatch|revoked|deleted/
   const detail = (d) => Object.entries(d || {}).map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join('  ')

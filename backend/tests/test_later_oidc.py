@@ -102,7 +102,7 @@ async def _login(c, prov, **cb):
     loc = urlsplit(r.headers["location"])
     q = parse_qs(loc.query)
     assert loc.path == "/application/o/authorize/" and q["code_challenge_method"] == ["S256"]
-    assert q["redirect_uri"] == ["http://test/api/auth/oidc/callback"]
+    assert q["redirect_uri"] == ["http://test/api/auth/oidc/callback"] and "prompt" not in q
     prov.nonce = q["nonce"][0]
     return await c.get("/api/auth/oidc/callback", params={"code": "abc", "state": q["state"][0], **cb})
 
@@ -113,6 +113,8 @@ async def _link(c, prov, **cb):
     assert r.status_code == 200, r.text
     q = parse_qs(urlsplit(r.json()["url"]).query)
     assert q["redirect_uri"] == ["http://test/api/auth/oidc/callback"] and q["code_challenge_method"] == ["S256"]
+    # Koppelen laat Authentik opnieuw vragen wie je bent: niet stil het account dat toevallig ingelogd is.
+    assert q["prompt"] == ["login"]
     prov.nonce = q["nonce"][0]
     return await c.get("/api/auth/oidc/callback", params={"code": "abc", "state": q["state"][0], **cb})
 

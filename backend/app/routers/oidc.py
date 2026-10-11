@@ -145,6 +145,10 @@ async def _authorize(request: Request, db: AsyncSession, cfg: dict, **extra) -> 
     params = {"response_type": "code", "client_id": cfg["client_id"], "redirect_uri": _redirect_uri(request, cfg),
               "scope": "openid profile email", "state": state, "nonce": nonce,
               "code_challenge": challenge, "code_challenge_method": "S256"}
+    if extra.get("m") == "link":
+        # Koppelen: Authentik vraagt opnieuw wie je bent, zodat niet stil het account gekoppeld wordt waarmee deze browser
+        # toevallig bij Authentik ingelogd is (bv. akadmin).
+        params["prompt"] = "login"
     cookie = encrypt(json.dumps({"s": state, "n": nonce, "v": verifier, "t": time.time(), **extra}))
     return disc["authorization_endpoint"] + "?" + urlencode(params), cookie
 
