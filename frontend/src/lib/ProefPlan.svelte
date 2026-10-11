@@ -34,7 +34,7 @@
     <ol class="steps">
       {#each plan.steps as s (s.nr)}
         <li>
-          <div class="m"><b>{s.machine}</b> · {VIA[s.via] || s.via}{#if s.who} · als {s.who}{/if}</div>
+          <div class="m"><b>{s.machine}</b> · {VIA[s.via] || s.via}{#if s.who}{` · als ${s.who}`}{/if}</div>
           {#if s.when}<div class="note">alleen {s.when}</div>{/if}
           <code>{s.call}</code>
           {#if s.data}<code class="data">{JSON.stringify(s.data)}</code>{/if}
