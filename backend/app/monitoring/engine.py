@@ -7,8 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import delete_before, ensure_state
 from ..deps import event, notify
-from ..models import (AppState, AuditLog, CheckResult, Event, Metric, Notification, Service, ServiceState, Session,
-                      UpdateRun)
+from ..models import (AppState, AuditLog, CheckResult, Event, Group, MaintenanceWindow, Metric, Notification, Service,
+                      ServiceState, Session, UpdateRun)
 from .checks import Outcome, target_for
 from .upgrade import DONE
 
@@ -112,6 +112,24 @@ async def parent_silencing(db: AsyncSession, service: Service, check: dict | Non
     if await _failing(db, [parent, *await ancestors(db, parent)]):
         return f"afhankelijk van {parent.name} (down)"
     return None
+
+
+async def group_silencing(db: AsyncSession, service: Service, check: dict | None, group_id: int | None,
+                          now: datetime | None = None) -> str | None:
+    """Wordt een lopende check stil doordat hij naar een groep gaat waar nu gepland onderhoud loopt? Een venster voor
+    een groep geldt voor alles wat er op dat moment in zit (planned.targets). Dan wat er gebeurt, anders None. Met de
+    stand van nu, zoals parent_silencing: een venster dat pas later loopt, telt niet. Vóór de wijziging aanroepen."""
+    from . import planned  # planned importeert deze module zelf
+    if not group_id or group_id == service.group_id or not active(check):
+        return None
+    now = now or datetime.now(timezone.utc)
+    windows = (await db.execute(select(MaintenanceWindow).where(MaintenanceWindow.group_id == group_id,
+                                                                MaintenanceWindow.enabled.is_(True)))).scalars().all()
+    w = next((w for w in windows if planned.active(w, now)), None)
+    if w is None:
+        return None
+    group = await db.get(Group, group_id)
+    return f"naar groep {group.name if group else group_id} (gepland onderhoud '{w.name}' loopt)"
 
 
 def restarts(old: dict | None, new: dict | None) -> bool:

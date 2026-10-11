@@ -8,7 +8,7 @@ from sqlalchemy import Integer, and_, case, cast, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..deps import audit, confirm_silence, current_session, current_user, notify, recent_auth
+from ..deps import audit, confirm_silence, current_session, current_user, event, notify, recent_auth
 from ..layout import record_revision
 from ..models import CheckResult, Group, Service, ServiceState, Session, User
 from ..monitoring import routes
@@ -258,6 +258,11 @@ def _when(until: datetime) -> str:
     return until.astimezone().strftime("%d/%m %H:%M")
 
 
+def _shorter(name: str, minutes: int) -> str:
+    """Stoppen of inkorten op de tijdlijn (beginnen of verlengen staat er al via de melding van confirm_silence)."""
+    return f"Onderhoud {name}: " + (f"{minutes} min" if minutes else "gestopt")
+
+
 # Onderhoud zet de meldingen van de service en alles wat ervan afhangt uit, en ook zelfherstel: beginnen of verlengen
 # vraagt daarom een recente 2FA en geeft een melding (zoals een check pauzeren). Stoppen en inkorten blijven vrij.
 @router.post("/services/{service_id}/maintenance")
@@ -273,6 +278,7 @@ async def service_maintenance(service_id: int, data: MaintenanceIn, request: Req
                               service_id=s.id, service=s.name, minutes=data.minutes)
     else:
         await audit(db, request, user, "maintenance", service=s.name, minutes=data.minutes)
+        event(db, "wijziging", _shorter(s.name, data.minutes), service_id=s.id)
     s.maintenance_until = until
     await db.commit()
     return {"maintenance_until": s.maintenance_until}
@@ -294,6 +300,7 @@ async def group_maintenance(group_id: int, data: MaintenanceIn, request: Request
                               f"tot {_when(until)}", "maintenance", group=g.name, minutes=data.minutes)
     else:
         await audit(db, request, user, "maintenance", group=g.name, minutes=data.minutes)
+        event(db, "wijziging", _shorter(g.name, data.minutes))
     await db.execute(update(Service).where(Service.group_id == group_id).values(maintenance_until=until))
     await db.commit()
     return {"maintenance_until": until}
