@@ -3,6 +3,8 @@
   import { api, withReauth } from './api.js'
   import { SHOW } from './apicalls.js'
   import ApiCallEditor from './ApiCallEditor.svelte'
+  import { ask } from './dialog.svelte.js'
+  import Window from './Window.svelte'
 
   // API-beheer: alle API's per categorie, met hun adres, aanmelding, sleutels en eigen calls, en welke tegels ze
   // gebruiken. Sjablonen voor bekende apps, en het in één keer instellen van veel tegels.
@@ -99,10 +101,11 @@
     } catch (e) { error = e.message } finally { busy = false }
   }
   async function delApi() {
-    const n = sel.tiles.length
-    if (!confirm(`API '${sel.name}' verwijderen?${n ? ` ${n} tegel(s) worden weer gewone snelkoppelingen.` : ''}`)) return
+    const { id, name, tiles } = sel
+    const n = tiles.length
+    if (!(await ask(`API '${name}' verwijderen?${n ? ` ${n} tegel(s) worden weer gewone snelkoppelingen.` : ''}`, { ok: 'Verwijderen', danger: true }))) return
     try {
-      await api(`/apis/${sel.id}`, { method: 'DELETE' })
+      await api(`/apis/${id}`, { method: 'DELETE' })
       selId = null
       view = 'list'
       await load()
@@ -225,276 +228,264 @@
   const host = (u) => { try { return new URL(u).host } catch { return u } }
 </script>
 
-<div class="ov">
-  <div class="win card glow">
-    <div class="bar">
-      <div class="dots"><i></i><i></i><i></i></div>
-      <span class="title">root@jbogaert:~# api --beheer</span>
-      <div class="right">
-        <button class="mini x" onclick={onclose} aria-label="API-beheer sluiten">✕</button>
+<Window title="api --beheer" label="API-beheer" {onclose}>
+  <div class="cols">
+    <aside class="side">
+      <div class="sact">
+        <button class="mini ok" onclick={startNew}>+ API</button>
+        <button class="mini" class:hot={sugCount} onclick={openSuggest} title="Tegels herkennen en in één keer een API geven">⚡ tegels herkennen{#if sugCount}<b class="n">{sugCount}</b>{/if}</button>
       </div>
-    </div>
+      <input class="srch" bind:value={q} placeholder="zoek API of tegel" aria-label="Zoek API" />
+      {#if data}
+        <p class="stat">{data.apis.length} API's · {withApi} van {data.tiles.length} tegels gekoppeld</p>
+        {#each byCat as [cat, list] (cat)}
+          <button class="cat" onclick={() => { const s = new Set(closedCats); s.has(cat) ? s.delete(cat) : s.add(cat); closedCats = s }}>
+            {closedCats.has(cat) ? '▸' : '▾'} {cat} <small>{list.length}</small></button>
+          {#if !closedCats.has(cat)}
+            {#each list as a (a.id)}
+              <button class="item" class:on={a.id === selId} onclick={() => open(a)}>
+                <span class="in">{a.name}</span>
+                <small>{a.kind_label} · {a.tiles.length} tegel{a.tiles.length === 1 ? '' : 's'}{a.calls.length ? ` · ${a.calls.length} calls` : ''}</small>
+              </button>
+            {/each}
+          {/if}
+        {:else}
+          <p class="hint">{q ? 'Niets gevonden.' : 'Nog geen API\'s. Begin met ⚡ tegels herkennen of + API.'}</p>
+        {/each}
+      {/if}
+    </aside>
 
-    <div class="cols">
-      <aside class="side">
-        <div class="sact">
-          <button class="mini ok" onclick={startNew}>+ API</button>
-          <button class="mini" class:hot={sugCount} onclick={openSuggest} title="Tegels herkennen en in één keer een API geven">⚡ tegels herkennen{#if sugCount}<b class="n">{sugCount}</b>{/if}</button>
+    <section class="main">
+      {#if error}<p class="e">{error}</p>{/if}
+
+      {#if view === 'list' || !data}
+        <div class="intro">
+          <h3>API's beheren</h3>
+          <p>Een API stel je hier één keer in: adres, aanmelding en sleutel (versleuteld bewaard). Daarna kies je bij een tegel
+            welke API ze gebruikt (✎ bewerken → API), of koppel je hier veel tegels tegelijk.</p>
+          <ul>
+            <li><b>⚡ tegels herkennen</b>: tegels zoals Radarr, Jellyfin of Immich krijgen in één keer een API uit een sjabloon; je vult alleen de sleutel in.
+              Tegels die hun sleutels nog zelf hebben (Proxmox, AdGuard, ...) verhuis je hier in één klik.</li>
+            <li><b>+ API</b>: kies een sjabloon of begin leeg met een eigen API.</li>
+            <li><b>calls</b>: per API eigen endpoints toevoegen. Druk op ▶ probeer en klik in het antwoord op wat je op de tegel wil zien.</li>
+          </ul>
         </div>
-        <input class="srch" bind:value={q} placeholder="zoek API of tegel" aria-label="Zoek API" />
-        {#if data}
-          <p class="stat">{data.apis.length} API's · {withApi} van {data.tiles.length} tegels gekoppeld</p>
-          {#each byCat as [cat, list] (cat)}
-            <button class="cat" onclick={() => { const s = new Set(closedCats); s.has(cat) ? s.delete(cat) : s.add(cat); closedCats = s }}>
-              {closedCats.has(cat) ? '▸' : '▾'} {cat} <small>{list.length}</small></button>
-            {#if !closedCats.has(cat)}
-              {#each list as a (a.id)}
-                <button class="item" class:on={a.id === selId} onclick={() => open(a)}>
-                  <span class="in">{a.name}</span>
-                  <small>{a.kind_label} · {a.tiles.length} tegel{a.tiles.length === 1 ? '' : 's'}{a.calls.length ? ` · ${a.calls.length} calls` : ''}</small>
-                </button>
+
+      {:else if view === 'new'}
+        <h3>Nieuwe API</h3>
+        {#if !nw}
+          <input class="srch" bind:value={tq} placeholder="zoek een app, bv. sonarr" aria-label="Zoek sjabloon" />
+          {#each tplByCat as [cat, list] (cat)}
+            <p class="lbl">{cat}</p>
+            <div class="tpls">
+              {#each list as t (t.key)}
+                <button class="tpl" onclick={() => pickTemplate(t)}><b>{t.label}</b>
+                  <small>{t.kind !== 'rest' ? 'ingebouwd' : t.calls ? `${t.calls} calls klaar` : 'zelf calls toevoegen'}</small></button>
               {/each}
-            {/if}
-          {:else}
-            <p class="hint">{q ? 'Niets gevonden.' : 'Nog geen API\'s. Begin met ⚡ tegels herkennen of + API.'}</p>
+            </div>
           {/each}
-        {/if}
-      </aside>
-
-      <section class="main">
-        {#if error}<p class="e">{error}</p>{/if}
-
-        {#if view === 'list' || !data}
-          <div class="intro">
-            <h3>API's beheren</h3>
-            <p>Een API stel je hier één keer in: adres, aanmelding en sleutel (versleuteld bewaard). Daarna kies je bij een tegel
-              welke API ze gebruikt (✎ bewerken → API), of koppel je hier veel tegels tegelijk.</p>
-            <ul>
-              <li><b>⚡ tegels herkennen</b>: tegels zoals Radarr, Jellyfin of Immich krijgen in één keer een API uit een sjabloon; je vult alleen de sleutel in.
-                Tegels die hun sleutels nog zelf hebben (Proxmox, AdGuard, ...) verhuis je hier in één klik.</li>
-              <li><b>+ API</b>: kies een sjabloon of begin leeg met een eigen API.</li>
-              <li><b>calls</b>: per API eigen endpoints toevoegen. Druk op ▶ probeer en klik in het antwoord op wat je op de tegel wil zien.</li>
-            </ul>
+        {:else}
+          <div class="frm">
+            <p class="hint"><b>{nw.t.label}</b>{nw.t.hint ? ` · ${nw.t.hint}` : ''} <button class="mini" onclick={() => (nw = null)}>ander sjabloon</button></p>
+            <label class="lbl" for="an-name">Naam</label>
+            <input id="an-name" bind:value={nw.name} placeholder="bv. Radarr" maxlength="80" />
+            <label class="lbl" for="an-url">Adres van de API</label>
+            <input id="an-url" bind:value={nw.url} placeholder="https://radarr.jbogaert.be" />
+            <label class="lbl" for="an-cat">Categorie</label>
+            <input id="an-cat" bind:value={nw.category} list="api-cats" maxlength="40" />
+            {#each nw.t.secrets as k}
+              <label class="lbl" for="an-s-{k}">{k}{nw.t.secret && nw.t.secrets.length === 1 ? ` · ${nw.t.secret}` : nw.t.secret_help[k] ? ` · ${nw.t.secret_help[k]}` : ''}</label>
+              <input id="an-s-{k}" type={k.endsWith('username') ? 'text' : 'password'} bind:value={nw.secrets[k]} autocomplete="new-password" />
+            {/each}
+            <label class="lbl" for="an-tile">Meteen koppelen aan tegel (optioneel)</label>
+            <select id="an-tile" bind:value={nw.tile}>
+              <option value="">geen</option>
+              {#each data.tiles.filter((t) => !t.api_id) as t (t.id)}<option value={String(t.id)}>{t.name}</option>{/each}
+            </select>
+            <div class="row act">
+              <button class="btn" onclick={create} disabled={busy || !nw.url.trim()}>Aanmaken</button>
+              <button class="btn alt" onclick={() => (view = 'list')}>Annuleren</button>
+            </div>
           </div>
+        {/if}
 
-        {:else if view === 'new'}
-          <h3>Nieuwe API</h3>
-          {#if !nw}
-            <input class="srch" bind:value={tq} placeholder="zoek een app, bv. sonarr" aria-label="Zoek sjabloon" />
-            {#each tplByCat as [cat, list] (cat)}
-              <p class="lbl">{cat}</p>
-              <div class="tpls">
-                {#each list as t (t.key)}
-                  <button class="tpl" onclick={() => pickTemplate(t)}><b>{t.label}</b>
-                    <small>{t.kind !== 'rest' ? 'ingebouwd' : t.calls ? `${t.calls} calls klaar` : 'zelf calls toevoegen'}</small></button>
+      {:else if view === 'suggest'}
+        <h3>Tegels herkennen</h3>
+        {#if msg}<p class="okm">{msg}</p>{/if}
+        {#if !sug?.matches.length && !sug?.adopt.length}
+          <p class="hint">Geen tegels meer om te herkennen: alles met een bekende app heeft een API, of je stelt de rest zelf in met + API.</p>
+        {/if}
+        {#if sug?.matches.length}
+          <p class="hint">Deze tegels lijken op een bekende app. Vul de sleutel in en ze krijgen elk hun eigen API, met calls die meteen werken.
+            Zonder sleutel wordt de API toch aangemaakt; die vul je later in.</p>
+          <div class="tw">
+            <table class="bulk">
+              <thead><tr><th></th><th>tegel</th><th>app</th><th>adres van de API</th><th>sleutel</th></tr></thead>
+              <tbody>
+                {#each sug.matches as m (m.service_id)}
+                  {@const b = bulk[m.service_id]}
+                  {#if b}
+                    <tr class:off={!b.on}>
+                      <td><input type="checkbox" bind:checked={b.on} aria-label="{m.name} meenemen" /></td>
+                      <td>{m.name}</td>
+                      <td><small>{m.label}</small></td>
+                      <td><input class="u" bind:value={b.url} aria-label="Adres voor {m.name}" /></td>
+                      <td class="sec">
+                        {#each tplSecrets(m.template) as k}
+                          <input type={k.endsWith('username') ? 'text' : 'password'} bind:value={b.secrets[k]} placeholder={k === 'token' ? (templates[m.template]?.secret || 'sleutel') : k}
+                                 autocomplete="new-password" aria-label="{k} voor {m.name}" />
+                        {:else}<small>geen nodig</small>{/each}
+                      </td>
+                    </tr>
+                  {/if}
+                {/each}
+              </tbody>
+            </table>
+          </div>
+          <div class="row act"><button class="btn" onclick={runBulk} disabled={busy || !ready.length}>Maak {ready.length} API's</button></div>
+        {/if}
+        {#if sug?.adopt.length}
+          <h4>Tegels met eigen sleutels</h4>
+          <p class="hint">Deze tegels hebben hun adres en sleutels nog zelf. Verhuis ze naar API-beheer: tegels met hetzelfde adres en dezelfde
+            sleutels (bv. de nodes van één Proxmox-cluster) delen daarna één API. Er verandert niets aan wat ze tonen.</p>
+          {#each sug.adopt as a (a.service_id)}
+            <label class="chk ad"><input type="checkbox" checked={adoptSel.has(a.service_id)}
+              onchange={() => { const s = new Set(adoptSel); s.has(a.service_id) ? s.delete(a.service_id) : s.add(a.service_id); adoptSel = s }} />
+              {a.name} <small>{kinds[a.type]?.label || a.type} · {host(a.url)}</small></label>
+          {/each}
+          <div class="row act"><button class="btn" onclick={runAdopt} disabled={busy || !adoptSel.size}>Verhuis {adoptSel.size} tegels</button></div>
+        {/if}
+
+      {:else if view === 'call' && sel}
+        <ApiCallEditor conn={sel} call={callSel?.id ? callSel : null} prefix={kinds[sel.kind]?.prefix || ''}
+                       onsaved={load} onclose={() => { view = 'api'; callSel = null }} />
+
+      {:else if view === 'api' && sel && form}
+        <div class="head">
+          <h3>{sel.name}</h3><small>{sel.kind_label}{sel.template ? ` · sjabloon ${templates[sel.template]?.label || sel.template}` : ''}</small>
+          <button class="mini" onclick={test} disabled={testResult?.busy}>▶ test verbinding</button>
+          {#if testResult && !testResult.busy}<span class="tr" class:bad={!testResult.ok}>{testResult.text}</span>{/if}
+        </div>
+
+        <div class="grid">
+          <div><label class="lbl" for="ap-name">Naam</label><input id="ap-name" bind:value={form.name} maxlength="80" /></div>
+          <div><label class="lbl" for="ap-cat">Categorie</label>
+            <input id="ap-cat" bind:value={form.category} list="api-cats" maxlength="40" /></div>
+          <div class="full"><label class="lbl" for="ap-url">Adres van de API</label><input id="ap-url" bind:value={form.url} /></div>
+          <div><label class="lbl" for="ap-kind">Soort</label>
+            <select id="ap-kind" bind:value={form.kind}>
+              {#each data.kinds as k}<option value={k.name}>{k.label}</option>{/each}
+            </select></div>
+          <div class="cb"><label class="chk"><input type="checkbox" bind:checked={form.insecure} /> zelfondertekend certificaat toestaan</label></div>
+          {#if form.kind === 'rest'}
+            <div><label class="lbl" for="ap-auth">Aanmelding</label>
+              <select id="ap-auth" bind:value={form.auth.type}>
+                <option value="none">geen</option><option value="header">sleutel in een header</option>
+                <option value="bearer">Bearer-token</option><option value="query">sleutel in de url (?apikey=)</option>
+                <option value="basic">gebruikersnaam en wachtwoord</option>
+              </select></div>
+            {#if form.auth.type === 'header' || form.auth.type === 'query'}
+              <div><label class="lbl" for="ap-an">{form.auth.type === 'header' ? 'Naam van de header' : 'Naam van de parameter'}</label>
+                <input id="ap-an" bind:value={form.auth.name} placeholder={form.auth.type === 'header' ? 'X-Api-Key' : 'apikey'} /></div>
+            {/if}
+            {#if form.auth.type === 'header'}
+              <div><label class="lbl" for="ap-ap">Voor de sleutel (optioneel)</label><input id="ap-ap" bind:value={form.auth.prefix} placeholder="bv. Token " /></div>
+            {/if}
+          {/if}
+        </div>
+
+        <span class="lbl">Sleutels (versleuteld bewaard, nooit zichtbaar in de browser)</span>
+        {#each [...new Set([...needed(form.kind, form.auth), ...sel.secret_keys])] as k (k)}
+          <div class="sk">
+            <code>{k}</code>
+            {#if sel.secret_keys.includes(k) && !form.removed.includes(k) && form.secrets[k] === undefined}
+              <span class="set">•••••• ingesteld</span>
+              <button class="mini" onclick={() => (form.secrets[k] = '')}>wijzig</button>
+              <button class="mini x" onclick={() => form.removed.push(k)}>wis</button>
+            {:else if form.removed.includes(k)}
+              <span class="gone">wordt gewist</span><button class="mini" onclick={() => (form.removed = form.removed.filter((x) => x !== k))}>herstel</button>
+            {:else}
+              <input type={k.endsWith('username') ? 'text' : 'password'} bind:value={form.secrets[k]} autocomplete="new-password"
+                     placeholder={kinds[form.kind]?.secrets?.[k] || (k === 'token' ? 'API-sleutel' : k)} aria-label="Sleutel {k}" />
+            {/if}
+          </div>
+        {/each}
+        {#if !needed(form.kind, form.auth).length && !sel.secret_keys.length}<p class="hint">Geen sleutel nodig.</p>{/if}
+
+        <details class="more" open={form.headers.length > 0 || !!form.extra}>
+          <summary>{form.kind === 'rest' ? 'vaste headers en extra instellingen' : 'extra instellingen'}</summary>
+          {#if form.kind === 'rest'}
+            {#each form.headers as r, i}
+              <div class="kv"><input bind:value={r.k} placeholder="Accept" /><input bind:value={r.v} placeholder="application/json" />
+                <button class="mini x" onclick={() => form.headers.splice(i, 1)}>✕</button></div>
+            {/each}
+            <button class="mini" onclick={() => form.headers.push({ k: '', v: '' })}>+ header</button>
+          {/if}
+          <label class="lbl" for="ap-extra">Instellingen (JSON) voor alle tegels met deze API{form.kind !== 'rest' ? '; per tegel (bv. node) zet je in de tegel zelf' : ''}</label>
+          <textarea id="ap-extra" bind:value={form.extra} placeholder={'{ }'}></textarea>
+          {#if kinds[form.kind]?.config}
+            <div class="hint">{#each Object.entries(kinds[form.kind].config).filter(([k]) => k !== 'url') as [k, v]}<div><code>{k}</code> {v}</div>{/each}</div>
+          {/if}
+        </details>
+
+        {#if msg}<p class="okm">{msg}</p>{/if}
+        <div class="row act">
+          <button class="btn" onclick={saveApi} disabled={busy}>Bewaren</button>
+          <button class="btn alt danger right" onclick={delApi}>Verwijderen</button>
+        </div>
+
+        <div class="sect">
+          <h4>Calls <small>{sel.kind === 'rest' ? 'wat de tegels van deze API tonen' : `extra endpoints naast wat ${sel.kind_label} al toont`}</small></h4>
+          {#each sel.calls as c, i (c.id)}
+            <div class="call">
+              <button class="cl" onclick={() => { callSel = c; view = 'call' }}>
+                <span class="m m-{c.method}">{c.method}</span><span class="cn">{c.name}</span><code>{c.path || '/'}</code>
+                <small>{SHOW[c.show]}{c.fields.length ? ` · ${c.fields.length} velden` : ''}{c.table?.columns?.length ? ' · tabel' : ''}</small>
+              </button>
+              <button class="mini" onclick={() => moveCall(i, -1)} disabled={!i} aria-label="Hoger">↑</button>
+              <button class="mini" onclick={() => moveCall(i, 1)} disabled={i === sel.calls.length - 1} aria-label="Lager">↓</button>
+            </div>
+          {:else}
+            <p class="hint">Nog geen calls.{sel.kind === 'rest' ? ' Voeg er een toe: daarmee bepaal je wat de tegel toont.' : ''}</p>
+          {/each}
+          <button class="mini ok" onclick={() => { callSel = {}; view = 'call' }}>+ call</button>
+        </div>
+
+        <div class="sect">
+          <h4>Tegels <small>{sel.tiles.length} gebruiken deze API</small></h4>
+          <div class="chips">
+            {#each sel.tiles as t (t.id)}
+              <span class="chip">{t.name}<button class="mini x" onclick={() => link([t.id], false)} aria-label="{t.name} loskoppelen">✕</button></span>
+            {/each}
+          </div>
+          {#if !linking}
+            <button class="mini" onclick={() => { linking = true; linkSel = new Set(); linkQ = '' }}>+ tegels koppelen</button>
+          {:else}
+            <div class="pick">
+              <div class="row"><input bind:value={linkQ} placeholder="zoek tegel" aria-label="Zoek tegel" />
+                <button class="mini" onclick={() => (linkSel = new Set(linkList.map((t) => t.id)))}>alles zichtbaar</button>
+                <button class="mini" onclick={() => (linkSel = new Set())}>niets</button></div>
+              <div class="plist">
+                {#each linkList as t (t.id)}
+                  <label class="chk"><input type="checkbox" checked={linkSel.has(t.id)} onchange={() => toggleLink(t.id)} />
+                    {t.name} <small>{t.url ? host(t.url) : ''}{t.api_id ? ' · heeft al een API' : t.own_keys ? ' · eigen sleutels' : ''}</small></label>
                 {/each}
               </div>
-            {/each}
-          {:else}
-            <div class="frm">
-              <p class="hint"><b>{nw.t.label}</b>{nw.t.hint ? ` · ${nw.t.hint}` : ''} <button class="mini" onclick={() => (nw = null)}>ander sjabloon</button></p>
-              <label class="lbl" for="an-name">Naam</label>
-              <input id="an-name" bind:value={nw.name} placeholder="bv. Radarr" maxlength="80" />
-              <label class="lbl" for="an-url">Adres van de API</label>
-              <input id="an-url" bind:value={nw.url} placeholder="https://radarr.jbogaert.be" />
-              <label class="lbl" for="an-cat">Categorie</label>
-              <input id="an-cat" bind:value={nw.category} list="api-cats" maxlength="40" />
-              {#each nw.t.secrets as k}
-                <label class="lbl" for="an-s-{k}">{k}{nw.t.secret && nw.t.secrets.length === 1 ? ` · ${nw.t.secret}` : nw.t.secret_help[k] ? ` · ${nw.t.secret_help[k]}` : ''}</label>
-                <input id="an-s-{k}" type={k.endsWith('username') ? 'text' : 'password'} bind:value={nw.secrets[k]} autocomplete="new-password" />
-              {/each}
-              <label class="lbl" for="an-tile">Meteen koppelen aan tegel (optioneel)</label>
-              <select id="an-tile" bind:value={nw.tile}>
-                <option value="">geen</option>
-                {#each data.tiles.filter((t) => !t.api_id) as t (t.id)}<option value={String(t.id)}>{t.name}</option>{/each}
-              </select>
-              <div class="row act">
-                <button class="btn" onclick={create} disabled={busy || !nw.url.trim()}>Aanmaken</button>
-                <button class="btn alt" onclick={() => (view = 'list')}>Annuleren</button>
+              <div class="row">
+                <button class="btn" onclick={() => link(linkSel)} disabled={!linkSel.size}>Koppel {linkSel.size} tegels</button>
+                <button class="btn alt" onclick={() => (linking = false)}>Annuleren</button>
               </div>
             </div>
           {/if}
-
-        {:else if view === 'suggest'}
-          <h3>Tegels herkennen</h3>
-          {#if msg}<p class="okm">{msg}</p>{/if}
-          {#if !sug?.matches.length && !sug?.adopt.length}
-            <p class="hint">Geen tegels meer om te herkennen: alles met een bekende app heeft een API, of je stelt de rest zelf in met + API.</p>
-          {/if}
-          {#if sug?.matches.length}
-            <p class="hint">Deze tegels lijken op een bekende app. Vul de sleutel in en ze krijgen elk hun eigen API, met calls die meteen werken.
-              Zonder sleutel wordt de API toch aangemaakt; die vul je later in.</p>
-            <div class="tw">
-              <table class="bulk">
-                <thead><tr><th></th><th>tegel</th><th>app</th><th>adres van de API</th><th>sleutel</th></tr></thead>
-                <tbody>
-                  {#each sug.matches as m (m.service_id)}
-                    {@const b = bulk[m.service_id]}
-                    {#if b}
-                      <tr class:off={!b.on}>
-                        <td><input type="checkbox" bind:checked={b.on} aria-label="{m.name} meenemen" /></td>
-                        <td>{m.name}</td>
-                        <td><small>{m.label}</small></td>
-                        <td><input class="u" bind:value={b.url} aria-label="Adres voor {m.name}" /></td>
-                        <td class="sec">
-                          {#each tplSecrets(m.template) as k}
-                            <input type={k.endsWith('username') ? 'text' : 'password'} bind:value={b.secrets[k]} placeholder={k === 'token' ? (templates[m.template]?.secret || 'sleutel') : k}
-                                   autocomplete="new-password" aria-label="{k} voor {m.name}" />
-                          {:else}<small>geen nodig</small>{/each}
-                        </td>
-                      </tr>
-                    {/if}
-                  {/each}
-                </tbody>
-              </table>
-            </div>
-            <div class="row act"><button class="btn" onclick={runBulk} disabled={busy || !ready.length}>Maak {ready.length} API's</button></div>
-          {/if}
-          {#if sug?.adopt.length}
-            <h4>Tegels met eigen sleutels</h4>
-            <p class="hint">Deze tegels hebben hun adres en sleutels nog zelf. Verhuis ze naar API-beheer: tegels met hetzelfde adres en dezelfde
-              sleutels (bv. de nodes van één Proxmox-cluster) delen daarna één API. Er verandert niets aan wat ze tonen.</p>
-            {#each sug.adopt as a (a.service_id)}
-              <label class="chk ad"><input type="checkbox" checked={adoptSel.has(a.service_id)}
-                onchange={() => { const s = new Set(adoptSel); s.has(a.service_id) ? s.delete(a.service_id) : s.add(a.service_id); adoptSel = s }} />
-                {a.name} <small>{kinds[a.type]?.label || a.type} · {host(a.url)}</small></label>
-            {/each}
-            <div class="row act"><button class="btn" onclick={runAdopt} disabled={busy || !adoptSel.size}>Verhuis {adoptSel.size} tegels</button></div>
-          {/if}
-
-        {:else if view === 'call' && sel}
-          <ApiCallEditor conn={sel} call={callSel?.id ? callSel : null} prefix={kinds[sel.kind]?.prefix || ''}
-                         onsaved={load} onclose={() => { view = 'api'; callSel = null }} />
-
-        {:else if view === 'api' && sel && form}
-          <div class="head">
-            <h3>{sel.name}</h3><small>{sel.kind_label}{sel.template ? ` · sjabloon ${templates[sel.template]?.label || sel.template}` : ''}</small>
-            <button class="mini" onclick={test} disabled={testResult?.busy}>▶ test verbinding</button>
-            {#if testResult && !testResult.busy}<span class="tr" class:bad={!testResult.ok}>{testResult.text}</span>{/if}
-          </div>
-
-          <div class="grid">
-            <div><label class="lbl" for="ap-name">Naam</label><input id="ap-name" bind:value={form.name} maxlength="80" /></div>
-            <div><label class="lbl" for="ap-cat">Categorie</label>
-              <input id="ap-cat" bind:value={form.category} list="api-cats" maxlength="40" /></div>
-            <div class="full"><label class="lbl" for="ap-url">Adres van de API</label><input id="ap-url" bind:value={form.url} /></div>
-            <div><label class="lbl" for="ap-kind">Soort</label>
-              <select id="ap-kind" bind:value={form.kind}>
-                {#each data.kinds as k}<option value={k.name}>{k.label}</option>{/each}
-              </select></div>
-            <div class="cb"><label class="chk"><input type="checkbox" bind:checked={form.insecure} /> zelfondertekend certificaat toestaan</label></div>
-            {#if form.kind === 'rest'}
-              <div><label class="lbl" for="ap-auth">Aanmelding</label>
-                <select id="ap-auth" bind:value={form.auth.type}>
-                  <option value="none">geen</option><option value="header">sleutel in een header</option>
-                  <option value="bearer">Bearer-token</option><option value="query">sleutel in de url (?apikey=)</option>
-                  <option value="basic">gebruikersnaam en wachtwoord</option>
-                </select></div>
-              {#if form.auth.type === 'header' || form.auth.type === 'query'}
-                <div><label class="lbl" for="ap-an">{form.auth.type === 'header' ? 'Naam van de header' : 'Naam van de parameter'}</label>
-                  <input id="ap-an" bind:value={form.auth.name} placeholder={form.auth.type === 'header' ? 'X-Api-Key' : 'apikey'} /></div>
-              {/if}
-              {#if form.auth.type === 'header'}
-                <div><label class="lbl" for="ap-ap">Voor de sleutel (optioneel)</label><input id="ap-ap" bind:value={form.auth.prefix} placeholder="bv. Token " /></div>
-              {/if}
-            {/if}
-          </div>
-
-          <span class="lbl">Sleutels (versleuteld bewaard, nooit zichtbaar in de browser)</span>
-          {#each [...new Set([...needed(form.kind, form.auth), ...sel.secret_keys])] as k (k)}
-            <div class="sk">
-              <code>{k}</code>
-              {#if sel.secret_keys.includes(k) && !form.removed.includes(k) && form.secrets[k] === undefined}
-                <span class="set">•••••• ingesteld</span>
-                <button class="mini" onclick={() => (form.secrets[k] = '')}>wijzig</button>
-                <button class="mini x" onclick={() => form.removed.push(k)}>wis</button>
-              {:else if form.removed.includes(k)}
-                <span class="gone">wordt gewist</span><button class="mini" onclick={() => (form.removed = form.removed.filter((x) => x !== k))}>herstel</button>
-              {:else}
-                <input type={k.endsWith('username') ? 'text' : 'password'} bind:value={form.secrets[k]} autocomplete="new-password"
-                       placeholder={kinds[form.kind]?.secrets?.[k] || (k === 'token' ? 'API-sleutel' : k)} aria-label="Sleutel {k}" />
-              {/if}
-            </div>
-          {/each}
-          {#if !needed(form.kind, form.auth).length && !sel.secret_keys.length}<p class="hint">Geen sleutel nodig.</p>{/if}
-
-          <details class="more" open={form.headers.length > 0 || !!form.extra}>
-            <summary>{form.kind === 'rest' ? 'vaste headers en extra instellingen' : 'extra instellingen'}</summary>
-            {#if form.kind === 'rest'}
-              {#each form.headers as r, i}
-                <div class="kv"><input bind:value={r.k} placeholder="Accept" /><input bind:value={r.v} placeholder="application/json" />
-                  <button class="mini x" onclick={() => form.headers.splice(i, 1)}>✕</button></div>
-              {/each}
-              <button class="mini" onclick={() => form.headers.push({ k: '', v: '' })}>+ header</button>
-            {/if}
-            <label class="lbl" for="ap-extra">Instellingen (JSON) voor alle tegels met deze API{form.kind !== 'rest' ? '; per tegel (bv. node) zet je in de tegel zelf' : ''}</label>
-            <textarea id="ap-extra" bind:value={form.extra} placeholder={'{ }'}></textarea>
-            {#if kinds[form.kind]?.config}
-              <div class="hint">{#each Object.entries(kinds[form.kind].config).filter(([k]) => k !== 'url') as [k, v]}<div><code>{k}</code> {v}</div>{/each}</div>
-            {/if}
-          </details>
-
-          {#if msg}<p class="okm">{msg}</p>{/if}
-          <div class="row act">
-            <button class="btn" onclick={saveApi} disabled={busy}>Bewaren</button>
-            <button class="btn alt danger right" onclick={delApi}>Verwijderen</button>
-          </div>
-
-          <div class="sect">
-            <h4>Calls <small>{sel.kind === 'rest' ? 'wat de tegels van deze API tonen' : `extra endpoints naast wat ${sel.kind_label} al toont`}</small></h4>
-            {#each sel.calls as c, i (c.id)}
-              <div class="call">
-                <button class="cl" onclick={() => { callSel = c; view = 'call' }}>
-                  <span class="m m-{c.method}">{c.method}</span><span class="cn">{c.name}</span><code>{c.path || '/'}</code>
-                  <small>{SHOW[c.show]}{c.fields.length ? ` · ${c.fields.length} velden` : ''}{c.table?.columns?.length ? ' · tabel' : ''}</small>
-                </button>
-                <button class="mini" onclick={() => moveCall(i, -1)} disabled={!i} aria-label="Hoger">↑</button>
-                <button class="mini" onclick={() => moveCall(i, 1)} disabled={i === sel.calls.length - 1} aria-label="Lager">↓</button>
-              </div>
-            {:else}
-              <p class="hint">Nog geen calls.{sel.kind === 'rest' ? ' Voeg er een toe: daarmee bepaal je wat de tegel toont.' : ''}</p>
-            {/each}
-            <button class="mini ok" onclick={() => { callSel = {}; view = 'call' }}>+ call</button>
-          </div>
-
-          <div class="sect">
-            <h4>Tegels <small>{sel.tiles.length} gebruiken deze API</small></h4>
-            <div class="chips">
-              {#each sel.tiles as t (t.id)}
-                <span class="chip">{t.name}<button class="mini x" onclick={() => link([t.id], false)} aria-label="{t.name} loskoppelen">✕</button></span>
-              {/each}
-            </div>
-            {#if !linking}
-              <button class="mini" onclick={() => { linking = true; linkSel = new Set(); linkQ = '' }}>+ tegels koppelen</button>
-            {:else}
-              <div class="pick">
-                <div class="row"><input bind:value={linkQ} placeholder="zoek tegel" aria-label="Zoek tegel" />
-                  <button class="mini" onclick={() => (linkSel = new Set(linkList.map((t) => t.id)))}>alles zichtbaar</button>
-                  <button class="mini" onclick={() => (linkSel = new Set())}>niets</button></div>
-                <div class="plist">
-                  {#each linkList as t (t.id)}
-                    <label class="chk"><input type="checkbox" checked={linkSel.has(t.id)} onchange={() => toggleLink(t.id)} />
-                      {t.name} <small>{t.url ? host(t.url) : ''}{t.api_id ? ' · heeft al een API' : t.own_keys ? ' · eigen sleutels' : ''}</small></label>
-                  {/each}
-                </div>
-                <div class="row">
-                  <button class="btn" onclick={() => link(linkSel)} disabled={!linkSel.size}>Koppel {linkSel.size} tegels</button>
-                  <button class="btn alt" onclick={() => (linking = false)}>Annuleren</button>
-                </div>
-              </div>
-            {/if}
-          </div>
-        {/if}
-      </section>
-    </div>
+        </div>
+      {/if}
+    </section>
   </div>
-</div>
+</Window>
 
 <datalist id="api-cats">{#each data?.categories || [] as c}<option value={c}></option>{/each}</datalist>
 
 <style>
-  .ov { position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, .65); padding: 2vh 1vw; display: flex }
-  .win { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden }
   .cols { flex: 1; display: grid; grid-template-columns: 290px minmax(0, 1fr); min-height: 0; border-top: 1px solid var(--line) }
   .side { border-right: 1px solid var(--line); overflow: auto; padding: 10px; display: flex; flex-direction: column; gap: 4px }
   .sact { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 4px }

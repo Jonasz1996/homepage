@@ -3,6 +3,7 @@
   import { api } from './lib/api.js'
   import Auth from './lib/Auth.svelte'
   import Dashboard from './lib/Dashboard.svelte'
+  import Dialogs from './lib/Dialogs.svelte'
 
   let state = $state(null)
   let error = $state('')
@@ -34,6 +35,7 @@
 {:else}
   <Auth auth={state} ondone={refresh} />
 {/if}
+<Dialogs />
 
 <style>
   .boot { text-align: center; margin-top: 30vh }

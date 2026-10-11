@@ -4,6 +4,7 @@
   import { bytes, duration } from './format.js'
   import { rel } from './cronfmt.js'
   import CopyCmd from './CopyCmd.svelte'
+  import { ask } from './dialog.svelte.js'
   import ProefPlan from './ProefPlan.svelte'
 
   // Back-updekking per VM/CT (job, kopieën per PBS, nieuwste, hersteltest) en een sync tussen twee PBS'en.
@@ -64,7 +65,7 @@
     if (side === 'src') plan.host = pbs.find((p) => p.service_id === id)?.host || ''
   }
   async function create() {
-    if (!confirm(`Op ${checked.source} een sync-gebruiker met leesrecht maken, en op ${checked.target} een sync-job die elke dag om ${plan.schedule} ophaalt?`)) return
+    if (!(await ask(`Op ${checked.source} een sync-gebruiker met leesrecht maken, en op ${checked.target} een sync-job die elke dag om ${plan.schedule} ophaalt?`, { ok: 'Aanmaken' }))) return
     busy = 'create'
     steps = null
     proef = null

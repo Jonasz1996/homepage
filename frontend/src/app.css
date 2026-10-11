@@ -7,7 +7,8 @@
   --text: #ddd;
   --text-h: #fff;
   --muted: #999;
-  --dim: #777;
+  /* Kleine grijze tekst: minstens 4,5:1 tegen de kaarten (#777 haalde dat niet). */
+  --dim: #8f8f8f;
   --accent: 170, 170, 170;
   --ok: #8fd6a4;
   --err: #e58b8b;
@@ -141,6 +142,15 @@ main.wrap.shk { animation: shk .45s }
 @keyframes zap { 0% { background: #fff; color: #000 } 50% { background: #9cc9ff } 100% { opacity: 0; transform: scale(.96) } }
 
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important } }
+
+/* Effecten uit (Instellingen → Effecten, standaard op een touchscreen): geen beweging en geen blur, wel dezelfde
+   kleuren. Scheelt rekenwerk en batterij op de gsm. */
+html.calm body::after { display: none }
+html.calm #bg { display: none }
+html.calm .card { backdrop-filter: none; -webkit-backdrop-filter: none; background: rgba(18, 18, 18, .96) }
+html.calm .card.glow::before { animation: none }
+html.calm h1 { animation: none; background: none; color: var(--text-h) }
+html.calm .cur { animation: none }
 
 /* Gsm en Android-app: niet onder de notch of de navigatiebalk, en geen blauwe tik-flits. */
 body { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left) }

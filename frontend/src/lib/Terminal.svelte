@@ -7,6 +7,7 @@
   import SshKeys from './SshKeys.svelte'
   import SshSnippets from './SshSnippets.svelte'
   import TermSession from './TermSession.svelte'
+  import Window from './Window.svelte'
 
   // Terminalvenster: hosts links (in mappen, doorzoekbaar), open sessies als tabbladen. Sessies blijven lopen
   // als het venster dicht is. Het beste van PuTTY en RDM: snel verbinden, standaard login, hosts uit Proxmox,
@@ -175,119 +176,112 @@
 
 <svelte:window onkeydown={key} />
 
-<div class="ov" class:hidden={!open}>
-  <div class="win card glow">
-    <div class="bar">
-      <div class="dots"><i></i><i></i><i></i></div>
-      <span class="title">root@jbogaert:~# ssh</span>
-      <div class="right"><button class="mini x" onclick={onclose} aria-label="Terminal sluiten">✕</button></div>
-    </div>
-    <div class="cols">
-      <aside>
-        <form class="qc" onsubmit={quickConnect}>
-          <input bind:value={quick} placeholder="snel: root@192.168.0.50" aria-label="Snel verbinden" />
-        </form>
-        <input class="flt" bind:value={filter} placeholder="zoeken…" aria-label="Hosts zoeken" />
-        <div class="ah">
-          <span class="lbl">hosts ({hosts.length})</span>
-          <span>
-            <button class="mini" onclick={() => (modal = { kind: 'discover' })} title="Hosts uit Proxmox ophalen">⟳ pve</button>
-            <button class="mini" onclick={() => (modal = { kind: 'host', host: null })} title="Host toevoegen">+</button>
+<Window {open} title="ssh" label="Terminal" {onclose}>
+  <div class="cols">
+    <aside>
+      <form class="qc" onsubmit={quickConnect}>
+        <input bind:value={quick} placeholder="snel: root@192.168.0.50" aria-label="Snel verbinden" />
+      </form>
+      <input class="flt" bind:value={filter} placeholder="zoeken…" aria-label="Hosts zoeken" />
+      <div class="ah">
+        <span class="lbl">hosts ({hosts.length})</span>
+        <span>
+          <button class="mini" onclick={() => (modal = { kind: 'discover' })} title="Hosts uit Proxmox ophalen">⟳ pve</button>
+          <button class="mini" onclick={() => (modal = { kind: 'host', host: null })} title="Host toevoegen">+</button>
+        </span>
+      </div>
+      <div class="list">
+        {#each tree as [folder, items] (folder)}
+          {#if folder}
+            <button class="fold" onclick={() => toggleFolder(folder)}>
+              {collapsed[folder] && !filter ? '▸' : '▾'} {folder} <small>{items.length}</small>
+            </button>
+          {/if}
+          {#if !folder || !collapsed[folder] || filter}
+            {#each items as h (h.id)}
+              <div class="h" class:in={!!folder}>
+                <button class="go" onclick={() => start(h)} ondblclick={(e) => e.preventDefault()}
+                        title="Nieuwe sessie naar {h.username || defaults?.username || 'root'}@{h.host}">
+                  <b>{h.name}</b><small>{h.username || defaults?.username || 'root'}@{h.host}{h.port !== 22 ? `:${h.port}` : ''}</small>
+                </button>
+                <button class="mini ed" onclick={() => (modal = { kind: 'host', host: h })} aria-label="Bewerken">✎</button>
+              </div>
+            {/each}
+          {/if}
+        {/each}
+        {#if !hosts.length}
+          <p class="hint">Haal je machines op met <b>⟳ pve</b>, of voeg er een toe met +. Stel onder <b>⚙ standaard</b>
+            één gebruiker en wachtwoord in voor allemaal.</p>
+        {/if}
+      </div>
+      <div class="foot">
+        <button class="mini" onclick={() => (modal = { kind: 'defaults' })} title="Standaard gebruiker en wachtwoord">⚙ standaard</button>
+        <button class="mini" onclick={() => (modal = { kind: 'keys' })}>sleutels ({keys.length})</button>
+        <button class="mini" onclick={() => (modal = { kind: 'snippets' })}>snippets</button>
+      </div>
+      {#if error}<p class="err">{error}</p>{/if}
+    </aside>
+    <section>
+      <div class="tabs">
+        {#each tabs as t (t.uid)}
+          <span class="tab" class:on={active === t.uid}>
+            <button class="tb" onclick={() => (active = t.uid)} onauxclick={(e) => e.button === 1 && closeTab(t.uid)}>
+              <i class={dot[t.phase]}></i>{t.host.name}</button>
+            {#if t.phase === 'gesloten' || t.phase === 'fout'}
+              <button class="tx" onclick={() => sessions[t.uid]?.reconnect()} title="Opnieuw verbinden">↻</button>
+            {/if}
+            <button class="tx" onclick={() => closeTab(t.uid)} aria-label="Sessie sluiten">✕</button>
+          </span>
+        {/each}
+      </div>
+      {#if tabs.length}
+        <div class="tools">
+          <span class="tg">
+            <button class="mini" class:bc={broadcast} onclick={() => { broadcast = !broadcast; refocus() }}
+                    title="Wat je typt gaat naar alle verbonden tabs">⇶ alle tabs{broadcast ? ` (${connected})` : ''}</button>
+            <span class="snip">
+              <button class="mini" onclick={() => (snipOpen = !snipOpen)} disabled={!snippets.length}
+                      title={snippets.length ? 'Snippet sturen' : 'Nog geen snippets'}>⌘ snippets</button>
+              {#if snipOpen}
+                <div class="menu card">
+                  {#each snippets as s}
+                    <button onclick={() => sendSnippet(s)} title={s.command}><b>{s.name}</b><small>{s.command}</small></button>
+                  {/each}
+                </div>
+              {/if}
+            </span>
+            <button class="mini" onclick={duplicate} title="Nog een sessie naar deze host (Ctrl+Shift+D)">⧉</button>
+          </span>
+          <span class="tg">
+            {#if findOpen}
+              <!-- svelte-ignore a11y_autofocus -->
+              <input class="find" bind:value={findText} onkeydown={findKey} autofocus placeholder="zoeken, Enter / Shift+Enter" />
+            {/if}
+            <button class="mini" onclick={() => { findOpen = !findOpen; if (!findOpen) sessions[active]?.find('') }} title="Zoeken in de uitvoer (Ctrl+Shift+F)">⌕</button>
+            <button class="mini" onclick={() => zoom(-1)} title="Kleiner (Ctrl+scroll)">A−</button>
+            <button class="mini" onclick={() => zoom(1)} title="Groter (Ctrl+scroll)">A+</button>
+            <button class="mini" onclick={() => { sessions[active]?.clear(); refocus() }} title="Scherm en geschiedenis wissen">⌫</button>
+            <button class="mini" onclick={() => sessions[active]?.saveLog()} title="Uitvoer opslaan als .log">⤓ log</button>
           </span>
         </div>
-        <div class="list">
-          {#each tree as [folder, items] (folder)}
-            {#if folder}
-              <button class="fold" onclick={() => toggleFolder(folder)}>
-                {collapsed[folder] && !filter ? '▸' : '▾'} {folder} <small>{items.length}</small>
-              </button>
-            {/if}
-            {#if !folder || !collapsed[folder] || filter}
-              {#each items as h (h.id)}
-                <div class="h" class:in={!!folder}>
-                  <button class="go" onclick={() => start(h)} ondblclick={(e) => e.preventDefault()}
-                          title="Nieuwe sessie naar {h.username || defaults?.username || 'root'}@{h.host}">
-                    <b>{h.name}</b><small>{h.username || defaults?.username || 'root'}@{h.host}{h.port !== 22 ? `:${h.port}` : ''}</small>
-                  </button>
-                  <button class="mini ed" onclick={() => (modal = { kind: 'host', host: h })} aria-label="Bewerken">✎</button>
-                </div>
-              {/each}
-            {/if}
-          {/each}
-          {#if !hosts.length}
-            <p class="hint">Haal je machines op met <b>⟳ pve</b>, of voeg er een toe met +. Stel onder <b>⚙ standaard</b>
-              één gebruiker en wachtwoord in voor allemaal.</p>
-          {/if}
-        </div>
-        <div class="foot">
-          <button class="mini" onclick={() => (modal = { kind: 'defaults' })} title="Standaard gebruiker en wachtwoord">⚙ standaard</button>
-          <button class="mini" onclick={() => (modal = { kind: 'keys' })}>sleutels ({keys.length})</button>
-          <button class="mini" onclick={() => (modal = { kind: 'snippets' })}>snippets</button>
-        </div>
-        {#if error}<p class="err">{error}</p>{/if}
-      </aside>
-      <section>
-        <div class="tabs">
-          {#each tabs as t (t.uid)}
-            <span class="tab" class:on={active === t.uid}>
-              <button class="tb" onclick={() => (active = t.uid)} onauxclick={(e) => e.button === 1 && closeTab(t.uid)}>
-                <i class={dot[t.phase]}></i>{t.host.name}</button>
-              {#if t.phase === 'gesloten' || t.phase === 'fout'}
-                <button class="tx" onclick={() => sessions[t.uid]?.reconnect()} title="Opnieuw verbinden">↻</button>
-              {/if}
-              <button class="tx" onclick={() => closeTab(t.uid)} aria-label="Sessie sluiten">✕</button>
-            </span>
-          {/each}
-        </div>
-        {#if tabs.length}
-          <div class="tools">
-            <span class="tg">
-              <button class="mini" class:bc={broadcast} onclick={() => { broadcast = !broadcast; refocus() }}
-                      title="Wat je typt gaat naar alle verbonden tabs">⇶ alle tabs{broadcast ? ` (${connected})` : ''}</button>
-              <span class="snip">
-                <button class="mini" onclick={() => (snipOpen = !snipOpen)} disabled={!snippets.length}
-                        title={snippets.length ? 'Snippet sturen' : 'Nog geen snippets'}>⌘ snippets</button>
-                {#if snipOpen}
-                  <div class="menu card">
-                    {#each snippets as s}
-                      <button onclick={() => sendSnippet(s)} title={s.command}><b>{s.name}</b><small>{s.command}</small></button>
-                    {/each}
-                  </div>
-                {/if}
-              </span>
-              <button class="mini" onclick={duplicate} title="Nog een sessie naar deze host (Ctrl+Shift+D)">⧉</button>
-            </span>
-            <span class="tg">
-              {#if findOpen}
-                <!-- svelte-ignore a11y_autofocus -->
-                <input class="find" bind:value={findText} onkeydown={findKey} autofocus placeholder="zoeken, Enter / Shift+Enter" />
-              {/if}
-              <button class="mini" onclick={() => { findOpen = !findOpen; if (!findOpen) sessions[active]?.find('') }} title="Zoeken in de uitvoer (Ctrl+Shift+F)">⌕</button>
-              <button class="mini" onclick={() => zoom(-1)} title="Kleiner (Ctrl+scroll)">A−</button>
-              <button class="mini" onclick={() => zoom(1)} title="Groter (Ctrl+scroll)">A+</button>
-              <button class="mini" onclick={() => { sessions[active]?.clear(); refocus() }} title="Scherm en geschiedenis wissen">⌫</button>
-              <button class="mini" onclick={() => sessions[active]?.saveLog()} title="Uitvoer opslaan als .log">⤓ log</button>
-            </span>
+      {/if}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="stage" class:bcast={broadcast} onwheel={wheel}>
+        {#each tabs as t (t.uid)}
+          <TermSession bind:this={sessions[t.uid]} host={t.host} active={open && active === t.uid} {fontSize}
+                       onstate={(p) => (t.phase = p)} ontyped={(d) => typed(t.uid, d)} />
+        {/each}
+        {#if !tabs.length}
+          <div class="empty">
+            <p>Kies links een host om een sessie te openen.</p>
+            <p class="hint">Selecteren = kopiëren · rechtsklik = plakken · middenklik = laatste selectie plakken ·
+              Ctrl+Shift+C/V · Ctrl+scroll = lettergrootte · Ctrl+Shift+←/→ = andere tab</p>
           </div>
         {/if}
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="stage" class:bcast={broadcast} onwheel={wheel}>
-          {#each tabs as t (t.uid)}
-            <TermSession bind:this={sessions[t.uid]} host={t.host} active={open && active === t.uid} {fontSize}
-                         onstate={(p) => (t.phase = p)} ontyped={(d) => typed(t.uid, d)} />
-          {/each}
-          {#if !tabs.length}
-            <div class="empty">
-              <p>Kies links een host om een sessie te openen.</p>
-              <p class="hint">Selecteren = kopiëren · rechtsklik = plakken · middenklik = laatste selectie plakken ·
-                Ctrl+Shift+C/V · Ctrl+scroll = lettergrootte · Ctrl+Shift+←/→ = andere tab</p>
-            </div>
-          {/if}
-        </div>
-      </section>
-    </div>
+      </div>
+    </section>
   </div>
-</div>
+</Window>
 
 {#if modal?.kind === 'host'}
   <HostForm host={modal.host} {keys} {services} {folders} {defaults} onclose={closeModal} onsaved={load}
@@ -303,9 +297,6 @@
 {/if}
 
 <style>
-  .ov { position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, .65); padding: 2vh 1vw; display: flex }
-  .ov.hidden { display: none }
-  .win { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden }
   .cols { flex: 1; display: flex; min-height: 0 }
   aside { width: 250px; flex: none; border-right: 1px solid var(--line); padding: 10px; display: flex; flex-direction: column; gap: 6px; min-height: 0 }
   aside input { padding: 7px 10px; font-size: 12.5px }

@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte'
   import { api, poll, withReauth } from './api.js'
+  import { ask } from './dialog.svelte.js'
   import ProefPlan from './ProefPlan.svelte'
 
   // Hersteltest van back-ups: één keer per maand een CT uit PBS terugzetten, opstarten en weer weggooien.
@@ -39,7 +40,7 @@
     } catch (e) { error = e.message } finally { busy = false }
   }
   async function runNow() {
-    if (!confirm('Nu een CT uit PBS terugzetten op een vrij ID (zonder netwerk), opstarten en weer verwijderen?')) return
+    if (!(await ask('Nu een CT uit PBS terugzetten op een vrij ID (zonder netwerk), opstarten en weer verwijderen?', { ok: 'Testen' }))) return
     busy = true
     try {
       await withReauth(() => api('/restoretest/run', { method: 'POST' }))

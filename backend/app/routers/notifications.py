@@ -11,14 +11,25 @@ from ..models import Notification, PushQueue, User
 router = APIRouter(prefix="/api/notifications", tags=["notifications"])
 
 
+async def _unread(db: AsyncSession) -> int:
+    return (await db.execute(
+        select(func.count()).select_from(Notification).where(Notification.read_at.is_(None))
+    )).scalar_one()
+
+
+async def badge(db: AsyncSession) -> dict:
+    """Voor het overzicht: hoeveel meldingen ongelezen zijn, en de nieuwste (of None)."""
+    n = (await db.execute(select(Notification).order_by(Notification.id.desc()).limit(1))).scalar_one_or_none()
+    return {"unread": await _unread(db),
+            "newest": {"id": n.id, "level": n.level, "read": n.read_at is not None, "title": n.title} if n else None}
+
+
 @router.get("")
 async def list_notifications(limit: int = 50, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(
         select(Notification).order_by(Notification.id.desc()).limit(min(max(limit, 1), 200))
     )).scalars().all()
-    unread = (await db.execute(
-        select(func.count()).select_from(Notification).where(Notification.read_at.is_(None))
-    )).scalar_one()
+    unread = await _unread(db)
     return {
         "unread": unread,
         "items": [

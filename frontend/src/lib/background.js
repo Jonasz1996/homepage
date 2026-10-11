@@ -25,17 +25,18 @@ export function startBackground(canvas) {
   addEventListener('mousemove', (e) => { mouse.x = e.clientX; mouse.y = e.clientY }, { passive: true })
   document.addEventListener('mouseleave', () => { mouse.x = mouse.y = -999 })
 
-  // Een dashboard staat de hele dag open: ~30 beelden per seconde volstaan, en niets tekenen als de effecten uit staan.
-  let last = 0, cleared = false
+  // Een dashboard staat de hele dag open: ~30 beelden per seconde volstaan. Staan de effecten uit, dan stopt de lus
+  // helemaal (geen werk per beeld meer) tot ze weer aangaan.
+  let last = 0, running = false
   const frame = (now) => {
+    if (!fxEnabled()) {
+      running = false
+      c.clearRect(0, 0, W, H)
+      return
+    }
     requestAnimationFrame(frame)
     if (document.hidden || now - last < 32) return
     last = now
-    if (!fxEnabled()) {
-      if (!cleared) { c.clearRect(0, 0, W, H); cleared = true }
-      return
-    }
-    cleared = false
     {
       c.clearRect(0, 0, W, H)
       c.font = '11px monospace'
@@ -77,5 +78,11 @@ export function startBackground(canvas) {
       })
     }
   }
-  requestAnimationFrame(frame)
+  const start = () => {
+    if (running || !fxEnabled()) return
+    running = true
+    requestAnimationFrame(frame)
+  }
+  addEventListener('hp:fx', start)
+  start()
 }

@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte'
   import { api, withReauth } from './api.js'
+  import { ask } from './dialog.svelte.js'
 
   // Gepland onderhoud: vooraf vastleggen wanneer een service of groep in onderhoud gaat (eenmalig of herhalend).
   // Met `service` alleen de vensters van die service (en zijn groep); zonder alles, met een keuze van het doel.
@@ -69,7 +70,7 @@
     } catch (e) { error = e.message }
   }
   async function remove(w) {
-    if (!confirm(`Gepland onderhoud "${w.name}" verwijderen?`)) return
+    if (!(await ask(`Gepland onderhoud "${w.name}" verwijderen?`, { ok: 'Verwijderen', danger: true }))) return
     try { await api(`/maintenance/windows/${w.id}`, { method: 'DELETE' }); await load() } catch (e) { error = e.message }
   }
   function day(i) {

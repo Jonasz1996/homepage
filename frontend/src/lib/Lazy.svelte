@@ -1,9 +1,20 @@
+<script module>
+  // Eén belofte per venster: zo bouwt een nieuwe waarde van een andere prop het venster niet opnieuw op. Met {...props}
+  // leest load dezelfde spreiding als de rest, en een nieuwe belofte zou het venster telkens opnieuw laden.
+  const loaded = new WeakMap()
+  function once(load) {
+    if (!loaded.has(load)) loaded.set(load, load())
+    return loaded.get(load)
+  }
+</script>
+
 <script>
   // Laadt een venster pas als je het opent: de eerste lading van het dashboard blijft klein.
   let { load, ...rest } = $props()
+  let promise = $derived(once(load))
 </script>
 
-{#await load() then m}
+{#await promise then m}
   <m.default {...rest} />
 {:catch}
   <div class="lazyerr" role="alert">

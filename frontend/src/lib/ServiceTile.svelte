@@ -173,19 +173,24 @@
   .cert { color: var(--mid); margin-right: 4px }
   .cert.bad { color: var(--err) }
   .upd { color: var(--muted); margin-right: 4px }
-  .zb { display: inline-flex; align-items: center; gap: 3px; margin-right: 5px; color: var(--muted); font-size: 10.5px }
+  .zb { display: inline-flex; align-items: center; gap: 3px; margin-right: 5px; color: var(--muted); font-size: 11px }
   .zb i { width: 7px; height: 7px; border-radius: 50%; background: var(--ok) }
   .zb.bad { color: var(--err) }
   .zb.bad i { background: var(--err); box-shadow: 0 0 6px var(--err) }
   .upd.sec { color: var(--mid) }
-  .downtxt { color: var(--err); margin-right: 4px; text-transform: uppercase; font-size: 10.5px; letter-spacing: .06em }
+  .downtxt { color: var(--err); margin-right: 4px; text-transform: uppercase; font-size: 11px; letter-spacing: .06em }
   .spark { position: absolute; left: 56px; right: 12px; bottom: 3px; width: calc(100% - 68px); height: 12px; pointer-events: none }
   .spark path { fill: none; stroke: rgba(255, 255, 255, .22); stroke-width: 1.2; vector-effect: non-scaling-stroke }
+  /* Details: een echte knop van 30 px (36 px op een touchscreen) in de hoek, zodat je de link ernaast niet raakt. */
   .info {
-    position: absolute; top: 4px; right: 4px; border: 0; background: none; color: var(--dim); cursor: pointer;
-    font-size: 12px; padding: 2px 5px; border-radius: 5px; opacity: 0; transition: opacity .15s
+    position: absolute; top: 3px; right: 3px; width: 30px; height: 30px; display: grid; place-items: center;
+    border: 1px solid transparent; background: none; color: var(--muted); cursor: pointer; font-size: 13px;
+    border-radius: 8px; opacity: 0; transition: opacity .15s
   }
   .tile:hover .info, .info:focus-visible { opacity: 1 }
-  .info:hover { color: var(--text-h); background: rgba(255, 255, 255, .1) }
-  @media (hover: none) { .info { opacity: 1 } }
+  .info:hover, .info:focus-visible { color: var(--text-h); background: rgba(255, 255, 255, .1); border-color: var(--line-2) }
+  @media (hover: none) {
+    .info { opacity: 1; top: 0; right: 0; width: 38px; height: 38px; border-radius: 0 10px 0 10px; background: rgba(255, 255, 255, .05) }
+    .tile { padding-right: 40px }
+  }
 </style>
