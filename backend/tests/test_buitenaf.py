@@ -102,6 +102,21 @@ def test_welke_routes_van_buitenaf_uit_staan():
     assert ws == {"/api/ssh/ws/{host_id}", "/api/cron/ws/run/{job_id}", "/api/cron/ws/tail/{target}"}
 
 
+async def test_nieuwe_service_van_buitenaf_uit(authed):
+    """Een nieuwe service maken of opruimen verandert NPM, Cloudflare en Proxmox: van buitenaf staat dat uit, ook de
+    proef (die probeert een poort). Kijken gaat wel."""
+    new = {"name": "x", "ip": "192.168.0.27", "port": 80}
+    for path, body in (("/api/nieuweservice/proef", new), ("/api/nieuweservice/maken", {**new, "plan_hash": "0" * 16}),
+                       ("/api/nieuweservice/opruimen/proef", {"fqdn": "x.jbogaert.be"}),
+                       ("/api/nieuweservice/opruimen", {"fqdn": "x.jbogaert.be", "plan_hash": "0" * 16}),
+                       ("/api/nieuweservice/runs/ns-x/ongedaan/proef", None),
+                       ("/api/nieuweservice/runs/ns-x/ongedaan", {"plan_hash": "0" * 16})):
+        r = await authed.post(path, json=body, headers=CF)
+        assert r.status_code == 403 and r.json()["detail"] == "buiten:acties", (path, r.text)
+    assert (await authed.get("/api/nieuweservice/domein", headers=CF)).json() == {"domain": None}
+    assert (await authed.get("/api/nieuweservice/runs", headers=CF)).json() == {"runs": [], "busy": None}
+
+
 async def test_thuis_en_buiten(authed):
     r = (await authed.get("/api/outside")).json()
     assert r["outside"] is False and r["why"] == "thuisnetwerk"

@@ -457,8 +457,8 @@ Later, deel 3 (Authentik en gsm):
   Cloudflare of een tunnel), met een vervalste header van Cloudflare of vanaf een publiek IP, dan staan de terminal
   (ook cronjobs starten of bewaken, rsyslog uitrollen, sleutels vastzetten), updates installeren, acties (aan/uit,
   Wake-on-LAN, zelfherstel, snapshots verwijderen, hersteltest, API-calls die iets veranderen, poortscan, API's
-  instellen of calls uitproberen, een tegel met integratie maken, importeren of een ander adres geven) en
-  configuraties downloaden standaard uit. Die tegels en API's vragen van buitenaf ook altijd een verse 2FA-code,
+  instellen of calls uitproberen, een tegel met integratie maken, importeren of een ander adres geven, een nieuwe
+  service maken of opruimen) en configuraties downloaden standaard uit. Die tegels en API's vragen van buitenaf ook altijd een verse 2FA-code,
   ook als acties op *altijd aan* staat, want ze halen iets op bij een adres in je netwerk. Kijken kan altijd;
   bovenaan staat dan "buiten". Per functie: uit, één uur aan (ook onderweg, met je 2FA-code) of altijd aan (alleen
   thuis). Aanzetten geeft een melding. Je LAN, VPN en Tailscale tellen als thuis, net als je eigen publieke IP (wie
