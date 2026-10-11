@@ -271,7 +271,9 @@ class Worker:
             if self.self_cleanup:
                 await cleanup(db)
             await housekeeping(db)
-            await webpush.forget_gone(db, datetime.now(timezone.utc))
+            now = datetime.now(timezone.utc)
+            await webpush.switch_off_failing(db, now)
+            await webpush.forget_gone(db, now)
             await db.commit()
 
     def spawn(self, coro) -> asyncio.Task:
