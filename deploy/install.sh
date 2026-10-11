@@ -157,6 +157,7 @@ install -m 755 "$APP_DIR/deploy/terugzetten.sh" /usr/local/sbin/homepage-terugze
 install -m 644 "$APP_DIR/deploy/homepage-api.service" "$APP_DIR/deploy/homepage-worker.service" \
   "$APP_DIR/deploy/homepage-syslog.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/homepage-backup.service" "$APP_DIR/deploy/homepage-backup.timer" /etc/systemd/system/
+install -m 755 "$APP_DIR/deploy/homepage-backup.sh" /usr/local/sbin/homepage-backup
 systemctl daemon-reload
 systemctl enable --now homepage-backup.timer
 systemctl enable homepage-api homepage-worker homepage-syslog

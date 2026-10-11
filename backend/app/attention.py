@@ -324,9 +324,13 @@ async def homepage(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
     if off.get("enabled") and off.get("error"):
         out.append(item("offsite", "err", "homepage", "Kopie buiten de container mislukt", str(off["error"]), fix,
                         sig=off["error"]))
-    if (s.get("alerts") or {}).get("disk"):
-        out.append(item("selfdisk", "err", "homepage", "De schijf van de container is bijna vol",
-                        "Ruim op of maak de schijf van de CT groter.", fix))
+    disk = sc.disk_alert(s)
+    if disk:
+        pct = max((d.get("pct") or 0 for d in s.get("disks") or []), default=0)
+        out.append(item("selfdisk", disk, "homepage", f"De schijf van de container is {pct:.0f}% vol",
+                        "Vanaf 100% stopt PostgreSQL. Ruim op of maak de schijf van de CT groter." if disk == "err" else
+                        f"Boven {sc.DISK_WARN}% ruimt het dashboard zelf de oudste logregels op (de laatste 3 dagen "
+                        "blijven). Helpt dat niet, ruim dan op of maak de schijf van de CT groter.", fix, sig=disk))
     return out
 
 

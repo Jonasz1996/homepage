@@ -327,7 +327,7 @@
         <div class="host lv-ok">
           <div class="hh"><b>database</b><span class="right">{bytes(sc.db?.total)}</span></div>
           {#each sc.db?.tables || [] as t}<p class="dim small row2"><span>{t.name}</span><span>{bytes(t.size)}</span></p>{/each}
-          {#each sc.disks || [] as d}<p class="small row2" class:w={d.pct >= 90}><span>schijf {d.path}</span><span>{d.pct}% · {bytes(d.free)} vrij</span></p>{/each}
+          {#each sc.disks || [] as d}<p class="small row2" class:w={d.pct >= 75 && d.pct < 90} class:e={d.pct >= 90}><span>schijf {d.path}</span><span>{d.pct}% · {bytes(d.free)} vrij</span></p>{/each}
         </div>
         <div class="host wide lv-{!data?.settings?.offsite ? 'unknown' : sc.offsite?.error ? 'warn' : 'ok'}">
           <div class="hh"><b>kopie buiten de container</b><small>{data?.offsite_dir}</small></div>

@@ -57,7 +57,8 @@ async def test_container_logs_into_log_viewer(authed):
     world = Portainer()
     http = HttpClients(httpx.MockTransport(world))
     g = await _group(authed)
-    await _svc(authed, g, "portainer", "https://portainer.jbogaert.be", secrets={"key": "k"}, name="portainer")
+    await _svc(authed, g, "portainer", "https://portainer.jbogaert.be", config={"logs": "true"}, secrets={"key": "k"},
+               name="portainer")
     await authed.post("/api/logs/rules", json={"name": "transcoder faalt", "pattern": "transcode.*failed", "level": "err",
                                                "cooldown_minutes": 0})
     world.add("aaa", 1, "Plex Media Server started", -20)
@@ -86,8 +87,9 @@ async def test_container_logs_into_log_viewer(authed):
     found = (await authed.get("/api/logs?q=transcode")).json()["items"]
     assert [i["host"] for i in found] == ["plex"]
 
-    # Uit te zetten per tegel.
+    # Standaard uit: een tegel zonder logs = true (of met false) haalt niets op.
     await _svc(authed, g, "portainer", "https://p2.jbogaert.be", config={"logs": "false"}, secrets={"key": "k"}, name="p2")
+    await _svc(authed, g, "portainer", "https://p3.jbogaert.be", secrets={"key": "k"}, name="p3")
     world.calls.clear()
     await containerlogs.run_containerlogs(db, http)
     assert len(world.calls) == 2

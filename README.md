@@ -11,7 +11,7 @@ Fase 1 en 2 van het [stappenplan](https://claude.ai/code/artifact/fe2b226c-d5ef-
 - export naar YAML, en een versiegeschiedenis van de layout waarmee je elke wijziging terugzet
 - eigen meldingencentrum in de titelbalk (bv. login vanaf een nieuw IP)
 - zoeken met `Ctrl+K` of `/`, Enter opent het eerste resultaat
-- dagelijkse back-up van de database (`/var/backups/homepage`, 14 dagen)
+- dagelijkse back-up van de database, zonder de logregels (`/var/backups/homepage`, de 5 nieuwste blijven)
 
 Fase 3, monitoring:
 
@@ -100,7 +100,9 @@ Fase 5, SSH-terminal (knop `>_` in de titelbalk):
 Fase 6, logs (knop `logs` in de titelbalk):
 
 - eigen syslog-ontvanger op poort 514 (udp en tcp, service `homepage-syslog`), alleen van je eigen netwerken
-- alle regels in PostgreSQL; met TimescaleDB gecomprimeerd na 3 dagen en 30 dagen bewaard
+- alle regels in PostgreSQL; met TimescaleDB gecomprimeerd na 1 dag en 30 dagen bewaard. Zit de schijf van de
+  container boven 75%, dan gaan de oudste logregels eerder weg (de laatste 3 dagen blijven altijd). De dagelijkse
+  back-up neemt de logregels niet mee
 - logviewer: per machine, zoeken, filter op ernst, 1 u tot 30 dagen, histogram, live meekijken
 - meldingsregels (regex, machine, ernst, max. één melding per x minuten) naar het meldingencentrum;
   standaard staat "alles vanaf crit" aan
@@ -257,7 +259,14 @@ Later, deel 3 (Authentik en gsm):
   - **domeinen**: dagelijks vervaldatum, registrar en nameservers via RDAP (rdap.org). Meldingen 30, 7 en 1 dag op
     voorhand, en als de nameservers veranderen. DNS Belgium geeft voor .be geen vervaldatum: vul die zelf in
   - **homepage zelf**: leeft de worker (zo niet, dan meldt de API het), is er een back-up van vannacht en is die
-    leesbaar (`pg_restore --list`), hoe groot is de database per tabel, hoe vol de schijf
+    leesbaar (`pg_restore --list`), hoe groot is de database per tabel, hoe vol de schijf (oranje vanaf 75%, rood
+    vanaf 90%). De back-up van elke nacht (03:30, `homepage-backup`) laat de logregels weg: de tabel is er na het
+    terugzetten wel, maar leeg. De 5 nieuwste blijven staan
+  - **schijfbewaker**: elke 10 minuten kijkt de worker hoe vol de schijf van de container is. Vanaf 75% gooit hij de
+    oudste logregels weg, dag per dag, tot de schijf weer onder 75% zit of alleen de laatste 3 dagen nog over zijn.
+    Daarover één melding; helpt het niet, dan zegt een melding wat de schijf wel vult (de grootste tabellen en de
+    back-ups). Zonder TimescaleDB komt de plaats van verwijderde regels niet terug op de schijf, maar gebruikt
+    PostgreSQL ze opnieuw voor nieuwe regels
   - **kopie buiten de container**: elk uur de nieuwste dumps naar `/mnt/homepage-backup`, samen met `secret.key`
     versleuteld met een wachtzin die nergens bewaard wordt (scrypt + AES-GCM). Koppel er een NAS-share, PBS-opslag of
     USB-schijf aan, bv. `pct set <id> -mp0 /mnt/nas/homepage,mp=/mnt/homepage-backup` en
@@ -307,8 +316,8 @@ Later, deel 3 (Authentik en gsm):
   NPM-hosts ernaar doorsturen, welke services en welke cronjobs van die machine erbij horen
 - **containerlogs uit Portainer** in de logviewer: elke 30 s de nieuwe regels van elke draaiende container, als
   machine met de containernaam (▣) en app `docker`. Zoeken, filters, live meekijken en meldingsregels werken zoals
-  bij syslog; de ernst komt uit de regel zelf (ERROR, WARN, ...). Uit te zetten per Portainer-tegel met de
-  instelling `logs` = `false`
+  bij syslog; de ernst komt uit de regel zelf (ERROR, WARN, ...). Staat standaard uit, want het vult de kleine schijf
+  van de container snel: zet het aan per Portainer-tegel met de instelling `logs` = `true`
 - **net → apparaten**: elke 5 minuten de ARP- en DHCP-tabel van OPNsense (ISC en Kea), met IP, MAC, fabrikant,
   hostnaam en interface. Wat er bij de eerste keer al is, geldt als gekend; een nieuw MAC-adres daarna geeft een
   melding. Geef apparaten een naam of zet ze op "ken ik". Met **volgen** wordt een apparaat elke 6 uur gescand op
