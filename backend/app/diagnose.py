@@ -16,9 +16,9 @@ import contextlib
 import importlib.metadata
 import json
 import logging
+from contextvars import ContextVar
 import os
 import platform
-import re
 import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -73,6 +73,8 @@ NAMES = ("key", "name", "service", "service_id", "vmid", "node")
 USER_KEYS = ("username", "user", "action_username")
 WITHHELD = "(weggelaten: kan een commando met een wachtwoord bevatten)"
 PAIRS = (("username", "password"), ("user", "password"), ("action_username", "action_password"))
+# De bekende geheimen van de export die nu gemaakt wordt: inkorten laat er ook geen stuk van staan.
+_KNOWN: ContextVar[tuple[str, ...]] = ContextVar("diagnose_known", default=())
 
 
 def filename(at: datetime) -> str:
@@ -80,10 +82,10 @@ def filename(at: datetime) -> str:
 
 
 def _tail(t: str | None, n: int) -> str | None:
-    """De laatste n tekens, zonder een half woord vooraan (een afgekapt token herkent het maskeren niet meer)."""
+    """De laatste n tekens, zonder een half woord of een stuk van een geheim vooraan."""
     if not t or len(t) <= n:
         return t
-    return "… " + re.sub(r"^\S*", "", t[-n:])
+    return "… " + logring.after(t, len(t) - n, _KNOWN.get())
 
 
 async def _value(db: AsyncSession, key: str) -> dict:
@@ -99,7 +101,7 @@ async def _rows(db: AsyncSession, stmt) -> list[dict]:
 
 def _bounded(x):
     if isinstance(x, str):
-        return logring.bound(x, MAX_TEXT)
+        return logring.bound(x, MAX_TEXT, _KNOWN.get())
     if isinstance(x, dict):
         return {k: _bounded(v) for k, v in x.items()}
     if isinstance(x, list):
@@ -280,7 +282,7 @@ async def _integraties(db: AsyncSession) -> list[dict]:
 def _errors(x):
     """Fouten zoals ze bewaard zijn (tekst, lijst of per naam), ingekort."""
     if isinstance(x, str):
-        return logring.cut(x, 1000)
+        return logring.cut(x, 1000, _KNOWN.get())
     if isinstance(x, list):
         return [_errors(i) for i in x[:MAX_ERRORS]]
     if isinstance(x, dict):
@@ -297,7 +299,7 @@ def brief(value: dict, depth: int = 0) -> dict:
             out[k] = _errors(x)
         elif x is None or isinstance(x, (str, int, float, bool)):
             if k in SCALARS:
-                out[k] = logring.cut(x, 200) if isinstance(x, str) else x
+                out[k] = logring.cut(x, 200, _KNOWN.get()) if isinstance(x, str) else x
         elif isinstance(x, list) and depth == 0:
             bad = [{**{n: i[n] for n in NAMES if n in i}, "error": _errors(i["error"])}
                    for i in x if isinstance(i, dict) and i.get("error")]
@@ -414,6 +416,28 @@ async def _logs(db: AsyncSession) -> dict:
 
 async def build(db: AsyncSession, user: User, frontend_nr: int | None = None) -> dict:
     """De hele export, gemaskeerd en klaar voor JSON. Schrijft niets."""
+    counts: Counter = Counter()
+    raw = set(await known_secrets(db, counts))
+    # Een kort wachtwoord of een gewoon woord (homepage, proxmox, ...) overal vervangen, zou het net verraden
+    # ("***-worker"). Zulke waarden vangen alleen de patronen; de export zegt dat ze er zijn.
+    weak = {v for v in raw if len(v.strip()) < MIN_KNOWN or v.strip().isalpha() and len(v.strip()) <= 12}
+    known = variants(raw - weak)
+    token = _KNOWN.set(tuple(known))
+    try:
+        # Eerst alles tekst (tijdstippen ook), dan maskeren: zo ontsnapt er niets via de JSON-codering.
+        out = mask_tree(_bounded(jsonable_encoder(await _export(db, user, frontend_nr))), known, counts)
+    finally:
+        _KNOWN.reset(token)
+    if weak:
+        counts["zwak"] = len(weak)
+        out["let_op"] = (f"{len(weak)} bewaarde wachtwoorden of geheimen zijn kort of een gewoon woord. Die zijn "
+                         "alleen gemaskeerd waar ze eruitzien als een wachtwoord (in een url, header of key=value). "
+                         "Kies sterkere wachtwoorden, of kijk het bestand extra na voor je het deelt.")
+    out["gemaskeerd"] = dict(sorted(counts.items()))
+    return out
+
+
+async def _export(db: AsyncSession, user: User, frontend_nr: int | None) -> dict:
     now = datetime.now(timezone.utc)
     # Eerst de checklist: die vraagt de API's van de tegels (en vult zo ook de fouten per tegel aan). De sessie van
     # het verzoek houdt intussen geen transactie open.
@@ -470,18 +494,4 @@ async def build(db: AsyncSession, user: User, frontend_nr: int | None = None) ->
         d = a["detail"]
         if a["action"] == "login_failed" and isinstance(d, dict) and d.get("username") not in names:
             a["detail"] = {**d, "username": "***"}
-    counts: Counter = Counter()
-    raw = set(await known_secrets(db, counts))
-    # Een kort wachtwoord of een gewoon woord (homepage, proxmox, ...) overal vervangen, zou het net verraden
-    # ("***-worker"). Zulke waarden vangen alleen de patronen; de export zegt dat ze er zijn.
-    weak = {v for v in raw if len(v.strip()) < MIN_KNOWN or v.strip().isalpha() and len(v.strip()) <= 12}
-    known = variants(raw - weak)
-    # Eerst alles tekst (tijdstippen ook), dan maskeren: zo ontsnapt er niets via de JSON-codering.
-    out = mask_tree(_bounded(jsonable_encoder(export)), known, counts)
-    if weak:
-        counts["zwak"] = len(weak)
-        out["let_op"] = (f"{len(weak)} bewaarde wachtwoorden of geheimen zijn kort of een gewoon woord. Die zijn "
-                         "alleen gemaskeerd waar ze eruitzien als een wachtwoord (in een url, header of key=value). "
-                         "Kies sterkere wachtwoorden, of kijk het bestand extra na voor je het deelt.")
-    out["gemaskeerd"] = dict(sorted(counts.items()))
-    return out
+    return export

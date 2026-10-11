@@ -13,7 +13,7 @@ Token-ID's en gebruikersnamen blijven leesbaar: "PVEAPIToken=homepage@pve!dashbo
 import base64
 import re
 from collections import Counter
-from typing import Iterable
+from typing import Iterable, Sequence
 from urllib.parse import quote
 
 MASK = "***"
@@ -86,6 +86,52 @@ def mask(text: str, known: Iterable[str] = (), counts: Counter | None = None) ->
         if n and counts is not None:
             counts[kind] += n
     return text
+
+
+# Inkorten mag geen stuk van een geheim laten staan: zonder zijn naam ("password:", "Bearer ", "-----BEGIN ...")
+# herkent mask() de rest niet meer. Zo ver rond een snede kijken de patronen: ruim meer dan hun langste match (een
+# PEM-sleutel van 4096 bits is zo'n 3300 tekens).
+CUT_CONTEXT = 8192
+# Zoveel keer schuift een snede op voor ze het opgeeft (en dan alles aan die kant weglaat).
+_CUT_TRIES = 64
+
+
+def _across(text: str, i: int, known: Sequence[str]) -> tuple[int, int] | None:
+    """Het stuk dat mask() zou vervangen en dat over positie i loopt (begin < i < einde), of None."""
+    a = max(0, i - CUT_CONTEXT)
+    w, j = text[a:i + CUT_CONTEXT], i - a
+    lo = hi = j
+    for v in known:
+        s = w.find(v, max(0, j - len(v) + 1), j + len(v))
+        if 0 <= s < j:
+            lo, hi = min(lo, s), max(hi, s + len(v))
+    for _, rx, _ in PATTERNS:
+        for m in rx.finditer(w):
+            if m.start() >= j:
+                break
+            if m.end() > j:
+                lo, hi = min(lo, m.start()), max(hi, m.end())
+    return (a + lo, a + hi) if hi > j else None
+
+
+def cut_before(text: str, i: int, known: Sequence[str] = ()) -> int:
+    """Waar text[:i] mag stoppen zonder een stuk van een geheim: vóór elk geheim dat over i loopt."""
+    for _ in range(_CUT_TRIES):
+        c = _across(text, i, known)
+        if c is None:
+            return i
+        i = c[0]
+    return 0
+
+
+def cut_after(text: str, i: int, known: Sequence[str] = ()) -> int:
+    """Waar text[i:] mag beginnen zonder een stuk van een geheim: na elk geheim dat over i loopt."""
+    for _ in range(_CUT_TRIES):
+        c = _across(text, i, known)
+        if c is None:
+            return i
+        i = c[1]
+    return len(text)
 
 
 def mask_tree(obj, known: Iterable[str] = (), counts: Counter | None = None):

@@ -15,11 +15,12 @@ import os
 import re
 import sys
 from collections import deque
+from collections.abc import Sequence
 from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .masking import mask
+from .masking import cut_after, cut_before, mask
 from .models import AppState
 
 log = logging.getLogger("homepage.logring")
@@ -44,25 +45,34 @@ def state_key(role: str) -> str:
 # toch niet: de blob gaat eruit, alleen zijn lengte blijft.
 LONG = re.compile(r"\S{500,}")
 _UPTO_SPACE = re.compile(r"(?s).*\s")
-_CUT_START = re.compile(r"^\S*\s*[:=]?\s*\S*")
+_WORD = re.compile(r"\S*")
 
 
-def cut(text: str, n: int) -> str:
-    """Het begin en (vooral, bij een traceback) het einde, samen hoogstens n tekens. Zonder een half woord aan de
-    snede: een afgekapt token herkent het maskeren niet meer."""
+def after(text: str, i: int, known: Sequence[str] = ()) -> str:
+    """text vanaf positie i, zonder een stuk van een geheim aan de snede (dat valt er helemaal af) en zonder een half
+    woord: een afgekapt token herkent het maskeren niet meer."""
+    j = cut_after(text, i, known)
+    if j and not text[j - 1].isspace():
+        # Het halve woord gaat weg. Was dat (een stuk van) de naam van een geheim, dan de waarde ook.
+        j = cut_after(text, _WORD.match(text, j).end(), known)
+    return text[j:]
+
+
+def cut(text: str, n: int, known: Sequence[str] = ()) -> str:
+    """Het begin en (vooral, bij een traceback) het einde, samen hoogstens n tekens. Een geheim dat over een snede
+    loopt valt er helemaal af: zonder zijn naam ("password:", "Bearer ") herkent het maskeren de rest niet meer.
+    known: bekende geheimen die ook niet half mogen blijven staan."""
     if len(text) <= n:
         return text
     k = n // 4
-    head = _UPTO_SPACE.match(text[:k])
-    # Het halve woord aan de snede gaat weg, en ook het woord erna: was het halve woord de naam van "password: x" of
-    # "Bearer x", dan herkent het maskeren de losse waarde niet meer.
-    tail = _CUT_START.sub("", text[len(text) - (n - k - 3):])
+    head = _UPTO_SPACE.match(text[:cut_before(text, k, known)])
+    tail = after(text, len(text) - (n - k - 3), known)
     return f"{head.group(0).rstrip() if head else ''} … {tail.lstrip()}"
 
 
-def bound(text: str, n: int) -> str:
+def bound(text: str, n: int, known: Sequence[str] = ()) -> str:
     """Klaar om te maskeren: elke blob vervangen door zijn lengte, en hoogstens n tekens."""
-    return cut(LONG.sub(lambda m: f"[{len(m.group())} tekens]", text), n)
+    return cut(LONG.sub(lambda m: f"[{len(m.group())} tekens]", text), n, known)
 
 
 class RingHandler(logging.Handler):

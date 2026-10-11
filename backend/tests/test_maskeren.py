@@ -1,4 +1,5 @@
 import logging
+import re
 from collections import Counter
 
 from app import logring, proef
@@ -79,24 +80,41 @@ def test_waarde_tussen_aanhalingstekens_helemaal_gemaskeerd():
         assert mask(want) == want, want  # al gemaskeerd: blijft zo
 
 
+def _pieces(out: str, value: str) -> list[str]:
+    """Woorden in out die een stuk (3+ tekens) van value zijn."""
+    return [w for w in re.split(r"[\s'\"]+", out) if len(w) >= 3 and w in value]
+
+
 def test_afkappen_laat_geen_losse_waarde_achter():
-    """Valt de snede in "password: hunter2pw" of "Bearer ...", dan verdwijnt ook de waarde: een losse waarde zonder
-    haar naam herkent het maskeren niet meer. Zoals een property-test: elke plaats van de snede."""
+    """Valt een snede in of vlak bij "password: hunter2pw" of "Bearer ...", ook in het woord ervoor of op de spatie
+    tussen naam en waarde, dan verdwijnt de waarde helemaal: zonder haar naam herkent het maskeren haar niet meer.
+    Zoals een property-test: elke lengte, dus elke plaats van beide sneden."""
     words = " ".join(f"w{i:03d}" for i in range(60))
     for secret, value in (("password: hunter2pw", "hunter2pw"), ("password = hunter2pw", "hunter2pw"),
-                          ("Bearer abcdefghijklmnop", "abcdefghijklmnop")):
+                          ("Bearer abcdefghijklmnop", "abcdefghijklmnop"),
+                          ('"password": "een twee drie vier"', "een twee drie vier"),
+                          ("Authorization: Bearer abcdefghijklmnop", "abcdefghijklmnop")):
         text = f"{words} {secret} {words}"
-        at = text.index(secret)
-        seen = set()
         for n in range(8, len(text)):
-            # cut houdt n // 4 tekens vooraan en de rest achteraan: daar begint het einde.
-            start = len(text) - (n - n // 4 - 3)
-            if not at <= start <= at + len(secret):
-                continue
-            seen.add(start)
             out = mask(logring.cut(text, n))
-            assert value not in out, (secret, n, out)
-        assert seen == set(range(at, at + len(secret) + 1))
+            assert len(out) <= n, (secret, n, out)
+            assert value not in out and not _pieces(out, value), (secret, n, out)
+
+
+def test_afkappen_midden_in_een_sleutel_of_bekend_geheim():
+    """Een PEM-sleutel of een bekend geheim met spaties dat over een snede loopt, valt er helemaal af."""
+    body = "\n".join("MIIEv" + f"{i:059d}" for i in range(20))
+    pem = f"-----BEGIN PRIVATE KEY-----\n{body}\n-----END PRIVATE KEY-----"
+    text = f"fout bij inloggen: {pem}\nTraceback (most recent call last): klaar"
+    for n in range(40, len(text), 7):
+        out = mask(logring.cut(text, n))
+        assert "MIIEv" not in out, (n, out)
+    phrase = "correct paard nietje batterij"
+    text = " ".join(f"w{i:03d}" for i in range(40)) + f" {phrase} " + " ".join(f"w{i:03d}" for i in range(40))
+    for n in range(8, len(text)):
+        out = mask(logring.cut(text, n, [phrase]), [phrase])
+        assert not _pieces(out, phrase), (n, out)
+        assert not logring.after(text, len(text) - n, [phrase]).startswith(("paard", "nietje", "batterij"))
 
 
 def test_logregel_zonder_nul():
@@ -111,3 +129,22 @@ def test_logregel_zonder_nul():
     finally:
         lg.removeHandler(h)
         lg.propagate = True
+
+
+def test_einde_van_een_update_zonder_losse_waarde():
+    """De diagnose toont van een update-run alleen het einde van de uitvoer: ook daar valt een geheim dat over de
+    snede loopt er helemaal af, en een bekend geheim met spaties ook."""
+    from app import diagnose
+
+    words = " ".join(f"w{i:03d}" for i in range(60))
+    phrase = "correct paard nietje batterij"
+    for secret, value in (("password: hunter2pw", "hunter2pw"), ("Bearer abcdefghijklmnop", "abcdefghijklmnop"),
+                          (phrase, phrase)):
+        text = f"{words} {secret} {words}"
+        token = diagnose._KNOWN.set((phrase,))
+        try:
+            for n in range(1, len(text)):
+                out = mask(diagnose._tail(text, n), [phrase])
+                assert value not in out and not _pieces(out, value), (secret, n, out)
+        finally:
+            diagnose._KNOWN.reset(token)
