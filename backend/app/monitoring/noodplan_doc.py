@@ -641,9 +641,12 @@ def _keys(value: dict, d: dict) -> list[tuple]:
     me = dash.get("guest")
     off = dash.get("offsite") or {}
     kfile = dash.get("secret_key_file") or "/etc/homepage/secret.key"
-    if off.get("enabled") and off.get("key"):
-        copy: object = (f"versleuteld in {off.get('dir')}/secret.key.enc"
-                        + (f" (wachtzin ingesteld {day(dash['offsite_key_at'])})" if dash.get("offsite_key_at") else ""))
+    if off.get("enabled") and off.get("key") and off.get("key_stale"):
+        copy: object = Bad(f"verouderd: {off.get('dir')}/secret.key.enc hoort bij een oude secret.key — stel de "
+                           "wachtzin opnieuw in (Gezondheid › homepage zelf)")
+    elif off.get("enabled") and off.get("key"):
+        copy = (f"versleuteld in {off.get('dir')}/secret.key.enc"
+                + (f" (wachtzin ingesteld {day(dash['offsite_key_at'])})" if dash.get("offsite_key_at") else ""))
     elif dash.get("secret_saved_at"):
         copy = f"je bevestigde op {day(dash['secret_saved_at'])} dat je een kopie bewaarde"
     else:
@@ -687,7 +690,12 @@ def _keys(value: dict, d: dict) -> list[tuple]:
              ["Aanmelden op het dashboard", login, "—", "2FA-app op je gsm"]]
     out = [("h2", "7. Sleutels: welke je nodig hebt en waar ze staan", "sleutels"),
            ("table", ["sleutel", "waarvoor", "waar", "kopie"], rows, "sleutels"), *notes]
-    if isinstance(copy, Bad):
+    if isinstance(copy, Bad) and off.get("key_stale"):
+        out.append(("note", "err", "secret.key.enc hoort bij een oude secret.key. Wie het opent, krijgt de oude sleutel "
+                                   "en de wachtwoorden en API-sleutels in de back-ups van nu blijven onleesbaar. Stel de "
+                                   "wachtzin opnieuw in (Gezondheid › homepage zelf) of bewaar secret.key in je "
+                                   "wachtwoordkluis."))
+    elif isinstance(copy, Bad):
         out.append(("note", "err", "Er is geen kopie van secret.key bekend: zonder dat bestand zijn de wachtwoorden en "
                                    "API-sleutels in elke back-up van het dashboard onleesbaar. Zet de kopie buiten de "
                                    "container aan (Gezondheid › homepage zelf) of bewaar het bestand in je "
@@ -711,9 +719,10 @@ def _dashboard(value: dict, d: dict) -> list[tuple]:
             "nog geen") + (f"; laatst gelukt {day(rs['last_ok'])}" if rs.get("last_ok") and rs.get("status") != "ok" else "")
     off = dash.get("offsite") or {}
     if dash.get("offsite_on"):
+        key = "✕ verouderd" if off.get("key") and off.get("key_stale") else "✓" if off.get("key") else "✕"
         copy = (f"{off.get('dir') or dash.get('offsite_dir')}: {off.get('count') or 0} dumps"
                 + (f", nieuwste {off['latest']}" if off.get("latest") else "")
-                + f", secret.key.enc {'✓' if off.get('key') else '✕'}"
+                + f", secret.key.enc {key}"
                 + (f" ({off['error']})" if off.get("error") else ""))
     else:
         copy = "staat uit (Gezondheid › homepage zelf)"

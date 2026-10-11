@@ -73,6 +73,20 @@ def test_document_html_en_md():
     assert mask(md) == md and mask(html) == html
 
 
+def test_sleutel_verouderd():
+    # De zelfcontrole zag dat secret.key.enc bij een oude secret.key hoort: op papier geen geldige kopie.
+    off = {"enabled": True, "dir": "/mnt/homepage-backup", "count": 3, "key": True, "key_stale": True}
+    dash = {**_value()["data"]["dashboard"], "offsite": off, "offsite_key_at": "2026-09-03T18:10:00+00:00"}
+    md = doc.to_md(doc.blocks(_value(dashboard=dash)))
+    assert "**verouderd: /mnt/homepage-backup/secret.key.enc hoort bij een oude secret.key" in md
+    assert "wachtzin ingesteld" not in md and "secret.key.enc hoort bij een oude secret.key. Wie het opent" in md
+    assert "/mnt/homepage-backup: 3 dumps, secret.key.enc ✕ verouderd" in md
+    from app.masking import mask
+    assert mask(md) == md
+    fine = doc.to_md(doc.blocks(_value(dashboard={**dash, "offsite": {**off, "key_stale": False}})))
+    assert "secret.key.enc (wachtzin ingesteld 3/9)" in fine and "secret.key.enc ✓" in fine and "verouderd" not in fine
+
+
 def test_escape():
     bad = {"name": "<script>alert(1)</script>", "url": "javascript:alert(1)"}
     v = _value()
