@@ -45,6 +45,44 @@ async def test_zonder_worker_staat_dat_bovenaan(authed):
     assert r["items"][0]["fix"] == {"window": "health", "tab": "homepage"}
 
 
+async def test_syslog_ontvanger_onder_aandacht(authed):
+    agen, db = await _db()
+    now = datetime.now(timezone.utc)
+    _state(db, sc.HEARTBEAT_KEY, {"at": now.isoformat(), "started": now.isoformat()})
+    _state(db, "syslog", {
+        "at": (now - timedelta(minutes=12)).isoformat(), "started": (now - timedelta(days=1)).isoformat(),
+        "received": 9000, "stored": 7766, "lost": 1234, "backlog": 0, "down_since": None,
+        "last_error": {"since": (now - timedelta(hours=2)).isoformat(), "until": (now - timedelta(hours=1)).isoformat(),
+                       "error": "ConnectionRefusedError: [Errno 111] Connect call failed"},
+        "loss": {"since": (now - timedelta(hours=2)).isoformat(), "at": (now - timedelta(hours=1)).isoformat(),
+                 "n": 1234, "why": "vol"}})
+    await db.commit()
+    r = (await authed.get("/api/attention")).json()
+    by = {i["key"]: i for i in r["items"]}
+    down = by["syslog"]
+    assert (down["level"], down["area"], down["title"]) == ("warn", "homepage", "De syslog-ontvanger draait niet")
+    assert down["text"].startswith("Laatste teken van leven 12 min geleden.") and "homepage-syslog" in down["text"]
+    loss = by["syslog:verlies"]
+    assert (loss["level"], loss["title"]) == ("warn", "1.234 logregels niet bewaard")
+    assert "50.000 regels" in loss["text"] and "UDP" in loss["text"] and "ConnectionRefusedError" in loss["text"]
+    assert loss["fix"] == down["fix"] == {"window": "health", "tab": "homepage"}
+    assert r["counts"]["err"] == 0
+    # Ook in Gezondheid › homepage.
+    h = (await authed.get("/api/health")).json()["syslog"]
+    assert h["ok"] is False and h["loss"]["n"] == 1234 and "12 min" in h["why"]
+
+    # Draait weer, en het verlies is meer dan een dag oud: niets meer onder Aandacht.
+    st = await db.get(AppState, "syslog")
+    st.value = {**st.value, "at": now.isoformat(), "loss": {**st.value["loss"], "n": 1,
+                                                             "at": (now - timedelta(hours=25)).isoformat()}}
+    await db.commit()
+    keys = [i["key"] for i in (await authed.get("/api/attention")).json()["items"]]
+    assert not [k for k in keys if k.startswith("syslog")]
+    h = (await authed.get("/api/health")).json()["syslog"]
+    assert h["ok"] is True and h["loss"] is None and h["lost"] == 1234
+    await agen.aclose()
+
+
 async def _seed(authed) -> dict[str, int]:
     http = {"check": {"type": "http"}}
     ids = await _tiles(authed, ("pve2", "link", http), ("plex", "link", http), ("nas", "link", http),

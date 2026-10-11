@@ -16,6 +16,7 @@ from .integrations.zabbix import RED_FROM
 from .models import AppState, CronJob, Device, MaintenanceWindow, Service, ServiceState, UpdateRun
 from .monitoring import cluster, coverage, planned, restoretest, updates as upd, zabbix as zbx
 from .monitoring.engine import MASS_KEY, active
+from .syslog import server as rxs
 
 ACK_KEY = "attention_ack"
 RANK = {"err": 0, "warn": 1, "info": 2}
@@ -298,6 +299,44 @@ async def hardware(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
     return _cap(out, "hardware", "Nog {n} hardwarepunten", fix)
 
 
+def _n(n: int) -> str:
+    """1234 → 1.234"""
+    return f"{n:,}".replace(",", ".")
+
+
+LOSS_WHY = {
+    rxs.FULL: f"De database was onbereikbaar en de wachtrij van de syslog-ontvanger ({_n(rxs.QUEUE_MAX)} regels) zat "
+              "vol: de oudste regels vielen weg. Machines die via TCP sturen (rsyslog uitgerold vanuit het dashboard) "
+              "houden hun regels dan zelf vast; apparaten die via UDP sturen (router, switch, NAS) niet.",
+    rxs.REJECTED: "De database weigerde ze (of ze waren onleesbaar); waarom staat in de logregels van de "
+                  "syslog-ontvanger (diagnose).",
+    rxs.STOPPED: "Bij het stoppen van de syslog-ontvanger (herstart of update) raakte de wachtrij niet op tijd leeg: "
+                 "de database was onbereikbaar of traag.",
+}
+
+
+def syslog_items(rx: dict | None, fix: dict) -> list[dict]:
+    """De syslog-ontvanger: draait hij, en raakten er logregels niet in de database? Oranje en zonder push: de
+    logregels zelf zijn geen storing, en een herstart van PostgreSQL 's nachts is geen reden om iemand te wekken."""
+    if rx is None:
+        return []
+    out = []
+    if not rx["ok"]:
+        out.append(item("syslog", "warn", "homepage", "De syslog-ontvanger draait niet",
+                        f"{rx['why'][:1].upper()}{rx['why'][1:]}. Zonder ontvanger komen er geen logregels binnen en "
+                        "werken de meldingsregels niet. Draait hij wel, dan kan hij misschien niet in de database "
+                        "schrijven (schijf vol?). In de container: systemctl status homepage-syslog.", fix))
+    loss = rx.get("loss")
+    if loss:
+        n = loss["n"]
+        # Bij een volle wachtrij of een te trage stop was de database de oorzaak.
+        err = (rx.get("last_error") or {}).get("error") if loss.get("why") in (rxs.FULL, rxs.STOPPED) else None
+        out.append(item("syslog:verlies", "warn", "homepage", f"{_n(n)} logregel{'s' if n != 1 else ''} niet bewaard",
+                        LOSS_WHY.get(loss.get("why"), "") + (f" Laatste fout van de database: {err}" if err else ""),
+                        fix, sig=loss["since"], since=loss["since"]))
+    return out
+
+
 async def homepage(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
     fix = {"window": "health", "tab": "homepage"}
     out = []
@@ -306,6 +345,7 @@ async def homepage(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
         out.append(item("worker", "err", "homepage", "De worker van het dashboard draait niet",
                         f"Zonder worker geen checks, meldingen of back-ups: {worker['why']}. "
                         "In de container: systemctl status homepage-worker.", fix))
+    out.extend(syslog_items(sc.syslog_status(await _state(db, rxs.STATE_KEY), now), fix))
     mass = await _state(db, MASS_KEY)
     if mass.get("since"):
         since = _aware(datetime.fromisoformat(mass["since"]))

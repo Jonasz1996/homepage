@@ -17,6 +17,7 @@ from ..health import domains as dom, scan as hw, selfcheck as sc, snapshots as s
 from ..monitoring import cluster, coverage
 from ..integrations import IntegrationError
 from ..models import AppState, Reading, Service, User
+from ..syslog import server as rxs
 from .integrations import clients
 
 router = APIRouter(prefix="/api/health", tags=["health"])
@@ -85,8 +86,9 @@ async def overview(user: User = Depends(current_user), db: AsyncSession = Depend
     # Eerst de samenvatting: die kijkt in alerts of de schijf vol is.
     summ = await _with_cluster(db, _summary(hardware, snaps, domains, selfc, worker, cfg))
     selfc.pop("alerts", None)
+    syslog = sc.syslog_status(await _value(db, rxs.STATE_KEY), datetime.now(timezone.utc))
     return {"settings": cfg, "hardware": hardware, "snapshots": snaps, "domains": domains, "selfcheck": selfc,
-            "worker": worker, "offsite_key": {"set": bool(key.get("blob")), "at": key.get("at")},
+            "worker": worker, "syslog": syslog, "offsite_key": {"set": bool(key.get("blob")), "at": key.get("at")},
             "offsite_dir": str(get_settings().offsite_dir),
             "running": [k for k in _tasks if _running(k)],
             "summary": summ}
