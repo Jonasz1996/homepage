@@ -18,6 +18,8 @@ os.environ.update(
     HOMEPAGE_SECRET_KEY_FILE=str(_tmp / "secret.key"),
     HOMEPAGE_SETUP_TOKEN_FILE=str(_tmp / "setup-token"),
     HOMEPAGE_COOKIE_SECURE="false",
+    # Niet in /var/lib/homepage-syslog (ook niet vanuit de syslog-ontvanger die een test als proces start).
+    HOMEPAGE_SYSLOG_STATE_FILE=str(_tmp / "syslog-verlies.json"),
 )
 
 from app.db import get_db  # noqa: E402

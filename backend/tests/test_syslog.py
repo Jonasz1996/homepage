@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import signal
 import socket
@@ -11,8 +12,10 @@ import pytest
 from sqlalchemy import event, func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.attention import syslog_items
 from app.config import get_settings
 from app.db import get_db
+from app.health import selfcheck as sc
 from app.main import app
 from app.models import AppState, Base, LogEntry, LogRule, Notification
 from app.syslog import rollout, server
@@ -396,6 +399,78 @@ async def test_start_without_database(receiver, monkeypatch, tmp_path):
     assert v["stored"] == 2 and v["lost"] == 0 and v["last_error"]["until"]
     if own:
         await own.dispose()
+
+
+async def test_loss_survives_a_stop_while_the_database_is_away(receiver, monkeypatch, tmp_path):
+    """Herstart (de container, om een volle schijf op te lossen) terwijl de database weg is: ook het laatste teken van
+    leven raakt dan niet in de database. Vroeger verdween het verlies met het proces en stond er niets onder !."""
+    rx0, _ = receiver
+    real, own = rx0.maker, None
+    if not PG:
+        # Zoals in test_start_without_database: een verbinding per sessie.
+        own = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'syslog.db'}")
+        async with own.begin() as c:
+            await c.run_sync(Base.metadata.create_all)
+        real = async_sessionmaker(own, expire_on_commit=False)
+    for k, v in (("RETRY_FIRST", 0.01), ("RETRY_MAX", 0.05), ("FLUSH_SECONDS", 0.05), ("DRAIN_SECONDS", 0.2),
+                 ("QUEUE_MAX", 3)):
+        monkeypatch.setattr(server, k, v)
+    kept = tmp_path / "verlies.json"
+    monkeypatch.setattr(get_settings(), "syslog_state_file", kept)
+    dead = create_async_engine(DEAD)
+    first, stop = Receiver(async_sessionmaker(dead)), asyncio.Event()
+    task = asyncio.create_task(server.serve(first, "127.0.0.1", _free_port(), stop))
+    try:
+        await asyncio.sleep(0.1)
+        for i in range(5):
+            first.accept(f"<14>udp {i}".encode(), "192.168.0.9")  # 3 in de wachtrij, 2 vallen weg
+        await _until(lambda: first.down_since is not None)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 15)
+        await dead.dispose()
+    # De 2 van de volle wachtrij en de 3 die bij het stoppen niet meer weggeschreven raakten.
+    assert first.lost == 5 and json.loads(kept.read_text())["loss"]["n"] == 5
+
+    second, stop = Receiver(real), asyncio.Event()
+    task = asyncio.create_task(server.serve(second, "127.0.0.1", _free_port(), stop))
+    try:
+        # Meteen bij het starten meegeteld en het bestand weg; na het eerste teken van leven staat het in de database.
+        await _until(lambda: not kept.exists() and second._loss["n"] == 0)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 15)
+    async with real() as s:
+        v = (await s.get(AppState, server.STATE_KEY)).value
+    assert v["lost"] == 0 and v["loss"]["n"] == 5 and v["loss"]["why"] == server.STOPPED
+    # De fout van toen, en dat schrijven nu weer lukt.
+    assert v["last_error"]["error"] and v["last_error"]["until"]
+    [item] = syslog_items(sc.syslog_status(v, datetime.now(timezone.utc)), {})
+    assert item["title"] == "5 logregels niet bewaard" and "Laatste fout van de database" in item["text"]
+    assert not kept.exists()
+    if own:
+        await own.dispose()
+
+
+async def test_kept_loss_counts_once(monkeypatch, tmp_path):
+    kept = tmp_path / "verlies.json"
+    monkeypatch.setattr(get_settings(), "syslog_state_file", kept)
+    rx = Receiver(None)
+    rx.lose(2, server.FULL)  # sinds deze start: nieuwer dan wat in het bestand staat
+    kept.write_text(json.dumps({"loss": {"n": 5, "since": 1000.0, "at": 2000.0, "why": server.STOPPED},
+                                "last_error": {"since": "2026-10-03T18:00:00+00:00", "until": None, "error": "weg"}}))
+    rx.restore_loss()
+    assert (rx._loss["n"], rx._loss["since"], rx._loss["why"], rx.lost) == (7, 1000.0, server.FULL, 2)
+    assert rx.last_error["error"] == "weg" and not kept.exists()
+    rx.restore_loss()
+    assert rx._loss["n"] == 7
+    # Onleesbaar: niet meegeteld, en weg (anders bij elke start dezelfde waarschuwing).
+    kept.write_text("{kapot")
+    rx.restore_loss()
+    assert rx._loss["n"] == 7 and not kept.exists()
+    # Niets verloren en geen fout: geen bestand.
+    Receiver(None).keep_loss()
+    assert not kept.exists()
 
 
 async def _hypertable(maker) -> bool:
