@@ -277,8 +277,9 @@ Later, deel 2 (internet, Wake-on-LAN en stroom):
      je thuis-IP voor iedereen naar NPM gaat of alleen voor Cloudflare. Zonder kopie gaat het ervan uit dat hij open
      staat zodra een record naar je thuis-IP wijst
   4. Lees eerst het kader *hoe het binnenkomt*. Staat daar *rechtstreeks naar NPM: open voor iedereen*, beperk de
-     doorverwijzing van 443 dan tot Cloudflare (een alias met `https://www.cloudflare.com/ips-v4`), gebruik alleen de
-     tunnel, of laat NPM het certificaat van Cloudflare eisen (Authenticated Origin Pulls met `ssl_verify_client on`).
+     doorverwijzing van 443 dan tot Cloudflare (een alias met `https://www.cloudflare.com/ips-v4` als bron, in de
+     NAT-regel of in de WAN-filterregel die hem doorlaat), gebruik alleen de tunnel, of laat NPM het certificaat van
+     Cloudflare eisen (Authenticated Origin Pulls met `ssl_verify_client on`).
      Werk daarna de rode namen af: Cloudflare Access met een echte regel (niet "iedereen"), Authentik of een access
      list met wachtwoord, of *bewust open*. Een IP-lijst die je LAN toelaat, houdt via de tunnel niemand tegen:
      cloudflared komt zelf van je LAN
