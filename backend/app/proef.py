@@ -8,7 +8,9 @@ commando's. plan() maskeert voor de zekerheid nog alles wat op een geheim lijkt.
 Een plan is gewone JSON:
     {proef: true, title, at,
      checks:   [{what, ok: true|false|null, detail}],          wat vooraf nagekeken is (null = niet na te gaan)
-     steps:    [{nr, machine, via, who, call, data, wait, when, on_fail, note}],
+     steps:    [{nr, machine, via, who, call, data, script, wait, when, on_fail, note}],
+               call is wat er gebeurt in een paar regels; script (optioneel) het volledige commando zoals het verstuurd
+               wordt, voor wie het precies wil zien
      skipped:  [{what, why}],                                   wat niet zou gebeuren en waarom
      after:    [tekst],                                         wat daarna volgt (meldingen, tijdlijn, een scan)
      warnings: [tekst]}
@@ -46,9 +48,10 @@ def api_who(token_id: str | None) -> str:
 
 
 def step(machine: str, via: str, call: str, *, who: str | None = None, data: dict | None = None,
-         wait: str | None = None, when: str | None = None, on_fail: str | None = None, note: str | None = None) -> dict:
-    s = {"machine": machine, "via": via, "who": who, "call": call, "data": data, "wait": wait, "when": when,
-         "on_fail": on_fail, "note": note}
+         script: str | None = None, wait: str | None = None, when: str | None = None, on_fail: str | None = None,
+         note: str | None = None) -> dict:
+    s = {"machine": machine, "via": via, "who": who, "call": call, "data": data, "script": script, "wait": wait,
+         "when": when, "on_fail": on_fail, "note": note}
     return {k: v for k, v in s.items() if v is not None}
 
 
@@ -81,6 +84,8 @@ def text(p: dict) -> str:
         lines.append(f"   {s['call']}")
         if s.get("data"):
             lines.append(f"   {s['data']}")
+        if s.get("script"):
+            lines.append(f"   (volledig script: {len(s['script'].splitlines())} regels)")
         for label, k in (("wacht", "wait"), ("als dit mislukt", "on_fail"), ("let op", "note")):
             if s.get(k):
                 lines.append(f"   {label}: {s[k]}")

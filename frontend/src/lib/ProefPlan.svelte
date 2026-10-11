@@ -38,6 +38,7 @@
           {#if s.when}<div class="note">alleen {s.when}</div>{/if}
           <code>{s.call}</code>
           {#if s.data}<code class="data">{JSON.stringify(s.data)}</code>{/if}
+          {#if s.script}<details><summary>volledig commando</summary><code>{s.script}</code></details>{/if}
           {#if s.wait}<div class="note">wacht: {s.wait}</div>{/if}
           {#if s.on_fail}<div class="note">als dit mislukt: {s.on_fail}</div>{/if}
           {#if s.note}<div class="note w">let op: {s.note}</div>{/if}
@@ -82,6 +83,7 @@
          border: 1px solid var(--line); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; color: var(--text-h) }
   code.data { color: var(--muted) }
   .note { color: var(--muted); font-size: 11.5px }
+  summary { color: var(--muted); font-size: 11.5px; cursor: pointer }
   .sec { color: var(--muted); font-size: 11.5px; margin-top: 6px }
   .none { color: var(--muted); margin: 6px 0 }
   .g { color: var(--ok) }
