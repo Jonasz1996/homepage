@@ -387,6 +387,33 @@ def test_regels_herschrijven():
     assert new.endswith("\n")
 
 
+def test_alleen_een_los_ip_adres():
+    """Het IP komt van de machine zelf (SSH_CLIENT): alleen een los IPv4- of IPv6-adres mag in from=."""
+    assert ssh_pin.ip_literal("192.168.10.156") == "192.168.10.156"
+    assert ssh_pin.ip_literal(" fd00:0::1 ") == "fd00::1"
+    for bad in ("", None, "*", "192.168.*", "?", "!10.0.0.1", "192.168.0.0/24", "10.0.0.1,10.0.0.2", "pve50.lan",
+                '10.0.0.1"', '10.0.0.1",command="sh', 'fe80::1%x",command="sh', "fe80::1%eth0", "010.0.0.1"):
+        assert ssh_pin.ip_literal(bad) is None, bad
+
+
+def test_status_een_patroon_is_niet_vast():
+    """from= met een patroon, een netwerk of een naam: werkt ook vanaf andere IP's, dus los (de veiligheidscheck
+    toont het niet als groen)."""
+    path = "/root/.ssh/authorized_keys"
+
+    def state(frm: str, ip: str | None) -> dict:
+        return ssh_pin._host_status(BLOB, ip, path, f'from="{frm}" ssh-ed25519 {BLOB} homepage\n')
+
+    assert state("192.168.10.156", "192.168.10.156")["state"] == "vast"
+    assert state("192.168.10.156,10.0.0.5", "10.0.0.5")["state"] == "vast"
+    assert state("10.0.0.5", "192.168.10.156")["state"] == "anders"
+    for frm in ("*", "192.168.10.*", "192.168.10.0/24", "192.168.10.156,*", "dashboard.lan", "!10.0.0.1,192.168.10.156"):
+        st = state(frm, frm.split(",")[-1])
+        assert st["state"] == "los" and "geen los IP-adres" in st["text"], (frm, st)
+    st = state("10.0.0.5", None)
+    assert st["state"] == "anders" and "geen geldig IP" in st["text"]
+
+
 class PinServer(asyncssh.SSHServer):
     """Leest authorized_keys bij elke verbinding opnieuw, en asyncssh past from= toe zoals sshd."""
 
@@ -485,6 +512,53 @@ async def test_vastzetten_zet_terug_als_het_dashboard_er_niet_meer_in_kan(authed
     res = r.json()["results"][str(hid)]
     assert res["error"].startswith("Teruggezet"), res
     assert pin_sshd["ak"].read_text() == before
+
+
+@pytest.mark.parametrize("sender", ["*", "127.0.0.0/8", "127.0.0.1,*", '127.0.0.1",command="touch${{IFS}}{pwnd}',
+                                    "dashboard.lan"])
+async def test_vastzetten_weigert_een_ip_dat_geen_ip_is(authed, pin_sshd, sender):
+    """Een overgenomen machine meldt een patroon, een netwerk of een eigen optie als afzender: niet vastzetten, en
+    niets in authorized_keys veranderen."""
+    hid = await _pin_host(authed, pin_sshd)
+    before = pin_sshd["ak"].read_text()
+    pwnd = pin_sshd["ak"].parent.parent / "gepwnd"
+    pin_sshd["state"]["client"] = sender.format(pwnd=pwnd)
+    r = await authed.post("/api/ssh/pin", json={"host_ids": [hid]})
+    assert r.status_code == 200, r.text
+    res = r.json()["results"][str(hid)]
+    assert res["error"] == "De machine gaf geen geldig IP door (SSH_CLIENT): niet vastgezet", res
+    assert res["state"] != "vast" and not res.get("changed")
+    assert pin_sshd["ak"].read_text() == before
+    assert not pwnd.exists()
+    # Ook niet bewaard als IP van het dashboard, voor de from= van de andere machines.
+    agen, db = await _db()
+    assert await ssh_pin.seen_ips(db) == set()
+    assert (await db.get(AppState, ssh_pin.STATE_KEY)).value["hosts"][str(hid)].get("ip") is None
+    await agen.aclose()
+
+
+async def test_vastzetten_met_het_eigen_ip_van_de_container(authed, pin_sshd, monkeypatch):
+    """Altijd ook syslog_target (het IP van de container), en van de andere machines alleen losse IP's."""
+    from app.config import get_settings
+    monkeypatch.setattr(get_settings(), "syslog_target", "192.168.10.156")
+    hid = await _pin_host(authed, pin_sshd)
+    agen, db = await _db()
+    # Wat een machine vroeger (voor deze controle) als afzender meldde, en een andere machine die 10.0.0.7 zag.
+    db.add(AppState(key=ssh_pin.STATE_KEY, value={"hosts": {"998": {"state": "los", "ip": '*",command="sh'},
+                                                            "999": {"state": "vast", "ip": "10.0.0.7"}}}))
+    await db.commit()
+    assert await ssh_pin.seen_ips(db) == {"10.0.0.7"}
+    await agen.aclose()
+
+    r = await authed.post("/api/ssh/pin", json={"host_ids": [hid]})
+    res = r.json()["results"][str(hid)]
+    assert res["state"] == "vast" and res["changed"] == 1, res
+    text = pin_sshd["ak"].read_text()
+    assert f'from="10.0.0.7,127.0.0.1,192.168.10.156" {pin_sshd["key"].export_public_key().decode()}' in text, text
+
+    # Een syslog_target dat geen IP is (bv. een naam), komt er niet in.
+    monkeypatch.setattr(get_settings(), "syslog_target", "homepage.lan")
+    assert ssh_pin._pin_ips("127.0.0.1", {"10.0.0.7"}) == "10.0.0.7,127.0.0.1"
 
 
 async def test_vastzetten_vraagt_herbevestiging_en_mag_niet_van_buitenaf(authed, pin_sshd):

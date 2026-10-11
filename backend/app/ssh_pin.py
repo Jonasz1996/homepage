@@ -2,7 +2,9 @@
 
 Het dashboard zet `from="<IP>"` voor zijn sleutel in ~/.ssh/authorized_keys van elke machine. Een gestolen sleutel
 werkt dan alleen nog vanaf de dashboard-container. Het IP is wat de machine zelf als afzender ziet (SSH_CLIENT),
-dus ook achter een router tussen de VLAN's klopt het.
+dus ook achter een router tussen de VLAN's klopt het. Dat meldt de machine zelf: een overgenomen machine kan er van
+alles zetten. Daarom alleen een los IP-adres (geen patroon zoals *, geen netwerk, geen aanhalingsteken), en altijd
+ook het eigen IP van de container (syslog_target).
 
 Zo gaat het per machine:
 1. inloggen, authorized_keys lezen (via readlink: op een Proxmox-node is het een link naar /etc/pve/priv, gedeeld
@@ -15,6 +17,7 @@ Zo gaat het per machine:
 
 import asyncio
 import hashlib
+import ipaddress
 import re
 import shlex
 from dataclasses import dataclass
@@ -24,6 +27,7 @@ import asyncssh
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .config import get_settings
 from .models import AppState, SshHost
 from .ssh_exec import SshFail, connect
 from .ssh_login import Login, login_for
@@ -60,6 +64,23 @@ RESTORE = r'''cat "$HOME/.ssh/authorized_keys.homepage-bak" > "$1" && echo OK'''
 class KeyLine:
     options: str
     rest: str  # "ssh-ed25519 AAAA... commentaar"
+
+
+def ip_literal(value: str | None) -> str | None:
+    """Het IP-adres als value precies één IPv4- of IPv6-adres is, anders None. Wat in from= komt, is zo nooit een
+    patroon (*, ?, !), een netwerk (/24), een naam, een lijst of iets met een aanhalingsteken (een eigen optie)."""
+    try:
+        ip = ipaddress.ip_address((value or "").strip())
+    except ValueError:
+        return None
+    # fe80::1%eth0: na de % laat ipaddress alles toe, ook " en ,.
+    return None if getattr(ip, "scope_id", None) else str(ip)
+
+
+def _literals(value: str) -> list[str] | None:
+    """De IP's in een from=, of None als er ook iets anders in staat: dan werkt de sleutel vanaf meer dan die IP's."""
+    ips = [ip_literal(x) for x in value.split(",")]
+    return None if None in ips else ips
 
 
 def _split(line: str, blob: str) -> KeyLine | None:
@@ -130,11 +151,14 @@ async def _read(conn) -> tuple[str | None, str, str]:
         return None, "", ""
     ip, _, rest = out.partition("\n")
     real, _, text = rest.partition("\n")
-    return ip.strip() or None, real.strip(), text
+    # Alleen een los IP-adres; de rest (leeg, een patroon, iets met een aanhalingsteken) telt als niet doorgegeven.
+    return ip_literal(ip), real.strip(), text
 
 
 def _covers(value: str | None, ip: str | None) -> bool:
-    return bool(value and ip and ip in [x.strip() for x in value.split(",")])
+    """Staat ip in from=, en staan daar alleen losse IP-adressen?"""
+    ips = _literals(value) if value else None
+    return bool(ips and ip_literal(ip) in ips)
 
 
 def _host_status(blob: str, ip: str | None, real: str | None, text: str) -> dict:
@@ -143,12 +167,16 @@ def _host_status(blob: str, ip: str | None, real: str | None, text: str) -> dict
     froms = pinned_from(text, blob)
     if not froms:
         return {"state": "geen", "text": "sleutel staat niet in authorized_keys (aanmelden met wachtwoord?)", "path": real}
+    if not all(froms):
+        return {"state": "los", "text": "werkt vanaf elk IP", "ip": ip, "path": real}
+    # Een patroon (*), een netwerk of een naam in from=: dan werkt de sleutel ook vanaf andere IP's.
+    if wide := sorted({f for f in froms if _literals(f) is None}):
+        return {"state": "los", "text": f'from="{wide[0]}" is geen los IP-adres: werkt ook vanaf andere IP\'s',
+                "ip": ip, "path": real}
     if all(_covers(f, ip) for f in froms):
         return {"state": "vast", "text": f"alleen vanaf {', '.join(sorted(set(froms)))}", "ip": ip, "path": real}
-    if all(f for f in froms):
-        return {"state": "anders", "text": f"vast op {', '.join(sorted(set(froms)))}, het dashboard komt binnen als {ip}",
-                "ip": ip, "path": real}
-    return {"state": "los", "text": "werkt vanaf elk IP", "ip": ip, "path": real}
+    how = f"het dashboard komt binnen als {ip}" if ip else "de machine gaf geen geldig IP door (SSH_CLIENT)"
+    return {"state": "anders", "text": f"vast op {', '.join(sorted(set(froms)))}, {how}", "ip": ip, "path": real}
 
 
 async def check(h: SshHost, login: Login) -> dict:
@@ -169,6 +197,13 @@ async def _verify(h: SshHost, login: Login) -> bool:
         return False
 
 
+def _pin_ips(ip: str, also: set[str] | frozenset) -> str:
+    """Wat er in from= komt: het IP dat de machine ziet, de IP's waarmee het dashboard bij de andere machines
+    binnenkomt en het eigen IP van de container (syslog_target, install.sh vult het in). Alleen losse IP-adressen."""
+    ips = {ip_literal(x) for x in (ip, *also, get_settings().syslog_target)}
+    return ",".join(sorted(ips - {None}))
+
+
 async def change(h: SshHost, login: Login, pin: bool, also: set[str] | frozenset = frozenset()) -> dict:
     """Vastzetten (pin) of losmaken, met controle en terugzetten als het dashboard er daarna niet meer in kan.
     also: IP's waarmee het dashboard bij andere machines binnenkomt. Meestal hetzelfde ene IP, maar een gedeeld
@@ -183,10 +218,11 @@ async def change(h: SshHost, login: Login, pin: bool, also: set[str] | frozenset
             if before["state"] == "geen":
                 return before
             if not ip:
-                return {**before, "error": "De machine geeft niet door van welk IP het dashboard komt (SSH_CLIENT)"}
+                return {**before, "error": "De machine gaf geen geldig IP door (SSH_CLIENT): niet "
+                        + ("vastgezet" if pin else "losgemaakt")}
             if before["state"] == ("vast" if pin else "los"):
                 return before
-            new, n = rewrite(text, blob, ",".join(sorted({ip, *also})) if pin else None)
+            new, n = rewrite(text, blob, _pin_ips(ip, also) if pin else None)
             sha = hashlib.sha256(text.encode()).hexdigest()
             code, out = await _sh(conn, WRITE, real, sha, str(len(new.encode())), stdin=new)
             if "VERANDERD" not in out:
@@ -214,9 +250,11 @@ async def save(db: AsyncSession, results: dict[int, dict]) -> dict:
 
 
 async def seen_ips(db: AsyncSession) -> set[str]:
-    """IP's waarmee het dashboard bij de machines binnenkomt (uit de laatste controles)."""
+    """IP's waarmee het dashboard bij de machines binnenkomt (uit de laatste controles). Alleen losse IP-adressen: wat
+    een machine ooit anders meldde, komt zo niet in de from= van alle andere."""
     st = await db.get(AppState, STATE_KEY)
-    return {r["ip"] for r in ((st.value or {}).get("hosts") or {}).values() if r.get("ip")} if st else set()
+    hosts = ((st.value or {}).get("hosts") or {}).values() if st else ()
+    return {ip for r in hosts if (ip := ip_literal(r.get("ip")))}
 
 
 async def run_all(db: AsyncSession, hosts: list[SshHost], fn) -> dict[int, dict]:
