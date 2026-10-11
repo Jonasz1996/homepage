@@ -69,6 +69,8 @@ def test_welke_routes_van_buitenaf_uit_staan():
         "PUT /api/updates/settings": "updates",
         "POST /api/services/{service_id}/integration/action": "acties", "POST /api/services/{service_id}/wol": "acties",
         "POST /api/heal": "acties", "PUT /api/heal/{rule_id}": "acties", "POST /api/heal/{rule_id}/test": "acties",
+        # De proef van zelfherstel kijkt met de bewaarde login via SSH op de machine.
+        "POST /api/heal/proef": "acties", "POST /api/heal/{rule_id}/proef": "acties",
         "POST /api/health/snapshots/delete": "acties",
         "PUT /api/restoretest/settings": "acties", "POST /api/restoretest/run": "acties",
         "POST /api/devices/{mac}/scan": "acties",
