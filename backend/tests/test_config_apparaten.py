@@ -337,12 +337,17 @@ async def test_privé_adres_alleen_van_een_toestel_met_naam_dat_weg_is(authed):
     (n,) = await _notes()
     assert (n.title, n.level, n.pushed_at) == ("Nieuw apparaat op je netwerk: gsm-jonas", "warn", None)
     assert n.body == "192.168.0.60 · aa:bb:cc:00:02:01 · LAN\nGeef het een naam onder net → apparaten."
-    # Een ander "iPhone" terwijl de gsm van Jonas online is, en een laptop-jonas waar de interface niet te vergelijken
-    # is: allebei nieuw, met de naam als hint.
-    world.leases += [_lease("aa:bb:cc:00:02:02", "iPhone", ip="192.168.0.61"),
-                     _lease("aa:bb:cc:00:02:03", "laptop-jonas", ip="192.168.0.62")]
+    # Een ander "iPhone" terwijl de gsm van Jonas online is: dat kan ook de gsm zelf zijn met een nieuw adres (het oude
+    # staat tot 20 minuten na het laatste antwoord in de ARP-tabel). Het wacht, nog zonder melding.
+    world.leases.append(_lease("aa:bb:cc:00:02:02", "iPhone", ip="192.168.0.61"))
     v = await _refresh(http, t0 + timedelta(minutes=10))
-    assert v["new"] == 2 and v["moved"] == 0
+    assert v["new"] == 0 and v["moved"] == 0 and list(v["pending"]) == ["aa:bb:cc:00:02:02"]
+    assert len(await _notes()) == 1
+    # Een halfuur later staat de gsm van Jonas er nog: twee toestellen. Het "iPhone" komt in de melding van die ronde,
+    # samen met een laptop-jonas waar de interface niet te vergelijken is: allebei nieuw, met de naam als hint.
+    world.leases.append(_lease("aa:bb:cc:00:02:03", "laptop-jonas", ip="192.168.0.62"))
+    v = await _refresh(http, t0 + timedelta(minutes=40))
+    assert v["new"] == 2 and v["moved"] == 0 and v["pending"] == {}
     n = (await _notes())[-1]
     assert (n.title, n.level, n.pushed_at) == ("2 nieuwe apparaten op je netwerk", "warn", None)
     assert n.body.splitlines() == [
@@ -355,6 +360,137 @@ async def test_privé_adres_alleen_van_een_toestel_met_naam_dat_weg_is(authed):
     assert d["aa:00:00:00:01:02"].name == "laptop"
     assert not any(d[m].known or d[m].name for m in ("aa:bb:cc:00:02:01", "aa:bb:cc:00:02:02", "aa:bb:cc:00:02:03"))
     assert not [n for n in await _notes() if n.title.endswith("nieuw privé-adres")]
+
+
+# --- het oude adres staat nog even in de ARP-tabel ---------------------------------------------------------------
+
+async def _gsm_online(authed) -> tuple[World, HttpClients, datetime]:
+    """Zoals _lan, met een naam, een notitie en "volgen" voor gsm-jonas (aa:bb:cc:00:00:02), die online is (in de
+    ARP-tabel)."""
+    world, http, t0 = await _lan(authed)
+    await authed.patch("/api/devices/aa:bb:cc:00:00:02", json={"name": "gsm Jonas", "note": "van mij", "scan": True})
+    world.arp.append({"mac": "aa:bb:cc:00:00:02", "ip": "192.168.0.50", "hostname": "gsm-jonas",
+                      "intf_description": "LAN"})
+    return world, http, t0
+
+
+async def test_privé_adres_wacht_tot_het_oude_uit_de_arp_tabel_is(authed):
+    """De gsm neemt een nieuw privé-adres terwijl het oude nog in de ARP-tabel staat (OPNsense houdt het tot 20
+    minuten na het laatste antwoord): geen melding, en zodra het oude adres eruit is, houdt de gsm zijn naam."""
+    world, http, t0 = await _gsm_online(authed)
+    world.leases.append(_lease("aa:bb:cc:00:00:03"))
+    v = await _refresh(http, t0 + timedelta(minutes=5))
+    assert v["new"] == 0 and v["moved"] == 0
+    assert v["pending"] == {"aa:bb:cc:00:00:03": {"old": "aa:bb:cc:00:00:02",
+                                                  "since": (t0 + timedelta(minutes=5)).isoformat()}}
+    assert not await _notes()
+    # Al in de lijst, als onbekend; de naam blijft voorlopig bij het oude adres.
+    d = await _devs()
+    assert (d["aa:bb:cc:00:00:03"].known, d["aa:bb:cc:00:00:03"].name) == (False, None)
+    assert (d["aa:bb:cc:00:00:02"].name, d["aa:bb:cc:00:00:02"].scan) == ("gsm Jonas", True)
+
+    world.arp.pop()  # het oude adres is uit de ARP-tabel
+    v = await _refresh(http, t0 + timedelta(minutes=10))
+    assert v["new"] == 0 and v["moved"] == 1 and v["pending"] == {} and v["vacated"] == ["aa:bb:cc:00:00:02"]
+    d = await _devs()
+    new, old = d["aa:bb:cc:00:00:03"], d["aa:bb:cc:00:00:02"]
+    assert (new.known, new.name, new.note, new.scan) == (True, "gsm Jonas", "van mij", True)
+    assert (old.known, old.name, old.note, old.scan) == (True, None, None, False)
+    (moved,) = await _notes()
+    assert (moved.title, moved.level, moved.pushed_at is not None) == ("gsm Jonas: nieuw privé-adres", "info", True)
+    assert moved.body.startswith("192.168.0.60 · aa:bb:cc:00:00:03 · LAN (was aa:bb:cc:00:00:02)")
+    # Daarna gebeurt er niets meer.
+    v = await _refresh(http, t0 + timedelta(minutes=40))
+    assert v["new"] == 0 and v["moved"] == 0 and len(await _notes()) == 1
+
+
+async def test_privé_adres_beide_online_een_melding_na_het_wachten(authed):
+    """Staan het oude en het nieuwe adres er een halfuur samen, dan zijn het twee toestellen: één gewone melding, met
+    de naam als hint, en geen enkele eerder of later."""
+    world, http, t0 = await _gsm_online(authed)
+    world.leases.append(_lease("aa:bb:cc:00:00:03"))
+    for m in range(5, 35, 5):
+        v = await _refresh(http, t0 + timedelta(minutes=m))
+        assert v["new"] == 0 and list(v["pending"]) == ["aa:bb:cc:00:00:03"], m
+    assert not await _notes()
+    v = await _refresh(http, t0 + timedelta(minutes=35))
+    assert v["new"] == 1 and v["moved"] == 0 and v["pending"] == {}
+    v = await _refresh(http, t0 + timedelta(minutes=40))
+    assert v["new"] == 0
+    (n,) = await _notes()
+    assert (n.title, n.level, n.pushed_at) == ("Nieuw apparaat op je netwerk: gsm-jonas", "warn", None)
+    assert n.body == ("192.168.0.60 · aa:bb:cc:00:00:03 · LAN (zelfde hostnaam als gsm Jonas, maar dat toestel is nog "
+                      "online)\nGeef het een naam onder net → apparaten.")
+    d = await _devs()
+    assert d["aa:bb:cc:00:00:02"].name == "gsm Jonas" and not d["aa:bb:cc:00:00:03"].known
+    # Een genegeerd aandachtspunt komt pas nu terug: nu is er een echt nieuw apparaat.
+    agen, db = await _db()
+    assert (await db.get(AppState, devices.STATE_KEY)).value["last_new"] == (t0 + timedelta(minutes=35)).isoformat()
+    await agen.aclose()
+
+
+async def test_privé_adres_naam_tijdens_het_wachten(authed):
+    """Geef je het wachtende adres zelf een naam, dan blijft het daarbij: het neemt geen naam over, en er komt geen
+    melding meer."""
+    world, http, t0 = await _gsm_online(authed)
+    world.leases.append(_lease("aa:bb:cc:00:00:03"))
+    await _refresh(http, t0 + timedelta(minutes=5))
+    assert not await _notes()
+    r = await authed.patch("/api/devices/aa:bb:cc:00:00:03", json={"name": "gsm van een gast"})
+    assert r.json()["known"]
+    world.arp.pop()
+    for m in range(10, 45, 5):
+        v = await _refresh(http, t0 + timedelta(minutes=m))
+        assert v["new"] == 0 and v["moved"] == 0 and v["pending"] == {}, m
+    assert not await _notes()
+    d = await _devs()
+    assert (d["aa:bb:cc:00:00:03"].name, d["aa:bb:cc:00:00:03"].scan) == ("gsm van een gast", False)
+    assert (d["aa:bb:cc:00:00:02"].name, d["aa:bb:cc:00:00:02"].scan) == ("gsm Jonas", True)
+
+
+async def test_privé_adres_vergeten_tijdens_het_wachten(authed):
+    """Vergeet je het wachtende adres, dan wacht het niet meer. Vergeet je het oude, dan is er geen naam meer om over
+    te nemen: een gewone melding, meteen."""
+    world, http, t0 = await _gsm_online(authed)
+    world.leases.append(_lease("aa:bb:cc:00:00:03"))
+    await _refresh(http, t0 + timedelta(minutes=5))
+    assert not await _notes()
+    world.leases.pop()
+    assert (await authed.delete("/api/devices/aa:bb:cc:00:00:03")).status_code == 204
+    v = await _refresh(http, t0 + timedelta(minutes=10))
+    assert v["pending"] == {} and not await _notes()
+
+    world.leases.append(_lease("aa:bb:cc:00:00:04"))
+    v = await _refresh(http, t0 + timedelta(minutes=15))
+    assert list(v["pending"]) == ["aa:bb:cc:00:00:04"]
+    # Het oude adres is weg (ook de lease) en vergeten.
+    world.arp.pop()
+    world.leases = [x for x in world.leases if x["mac"] != "aa:bb:cc:00:00:02"]
+    assert (await authed.delete("/api/devices/aa:bb:cc:00:00:02")).status_code == 204
+    v = await _refresh(http, t0 + timedelta(minutes=20))
+    assert v["new"] == 1 and v["moved"] == 0 and v["pending"] == {}
+    (n,) = await _notes()
+    assert n.title == "Nieuw apparaat op je netwerk: gsm-jonas" and "zelfde hostnaam" not in n.body
+    assert (await _devs())["aa:bb:cc:00:00:04"].name is None
+
+
+async def test_verlopen_arp_rij_houdt_niet_tegen(authed):
+    """Een verlopen rij in de ARP-tabel van OPNsense ("expired", nog niet opgeruimd) telt niet als online: het nieuwe
+    adres neemt de naam meteen over. IP-adres en hostnaam komen er wel nog uit."""
+    world, http, t0 = await _gsm_online(authed)
+    world.arp[-1].update({"ip": "192.168.0.49", "expired": True, "expires": -1})
+    world.leases.append(_lease("aa:bb:cc:00:00:03"))
+    v = await _refresh(http, t0 + timedelta(minutes=5))
+    assert v["new"] == 0 and v["moved"] == 1 and v["pending"] == {}
+    d = await _devs()
+    assert d["aa:bb:cc:00:00:03"].name == "gsm Jonas" and d["aa:bb:cc:00:00:02"].ip == "192.168.0.49"
+    assert [n.title for n in await _notes()] == ["gsm Jonas: nieuw privé-adres"]
+    # Een rij die nog loopt ("expires" in seconden), telt wel: dat toestel is online.
+    world.arp.append({"mac": "aa:bb:cc:00:00:03", "ip": "192.168.0.60", "hostname": "gsm-jonas",
+                      "intf_description": "LAN", "expired": False, "expires": 1183})
+    world.leases.append(_lease("aa:bb:cc:00:00:05", ip="192.168.0.61"))
+    v = await _refresh(http, t0 + timedelta(minutes=10))
+    assert v["moved"] == 0 and list(v["pending"]) == ["aa:bb:cc:00:00:05"]
 
 
 async def test_nieuwe_apparaten_samen_in_een_melding(authed, monkeypatch):
