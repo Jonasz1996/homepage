@@ -358,6 +358,33 @@ async def test_selfcheck_uurtotalen(authed, tmp_path, monkeypatch):
     await agen.aclose()
 
 
+
+async def test_uurtotalen_ingehaald_voor_de_volgende_zelfcontrole(authed, tmp_path, monkeypatch):
+    """De zelfcontrole loopt maar elk uur. Haalt de worker de uurtotalen intussen in, dan telt Gezondheid ze meteen
+    niet meer als achter (de stand komt van nu, niet van de laatste zelfcontrole)."""
+    from app.config import get_settings
+    from app.monitoring import rollup
+    monkeypatch.setattr(get_settings(), "backup_dir", tmp_path)
+    monkeypatch.setattr(sc, "disk", lambda p: {"path": str(p), "total": 100, "used": 10, "free": 90, "pct": 10.0})
+    agen, db = await _db()
+    now = datetime.now(timezone.utc)
+    db.add(AppState(key=rollup.KEY, value={"until": (rollup.floor_hour(now) - timedelta(days=2)).isoformat()}))
+    await db.commit()
+    v = await sc.run_selfcheck(db, offsite_on=False)
+    await db.commit()
+    assert v["rollup"]["late"]
+    late = (await authed.get("/api/health/summary")).json()["warn"]
+
+    st = await db.get(AppState, rollup.KEY)
+    st.value = {"until": rollup.floor_hour(now).isoformat()}
+    await db.commit()
+    assert (await authed.get("/api/health/summary")).json()["warn"] == late - 1
+    assert (await authed.get("/api/health")).json()["selfcheck"]["rollup"]["late"] is False
+    # De opgeslagen zelfcontrole zelf blijft ongemoeid tot de volgende ronde.
+    stored = (await db.execute(select(AppState.value).where(AppState.key == sc.STATE_KEY))).scalar()
+    assert stored["rollup"]["late"] is True
+    await agen.aclose()
+
 def test_leesmij_met_versies():
     t = sc.readme({"postgresql": "15.14", "timescaledb": "2.28.1"})
     assert "Bij de laatste kopie: PostgreSQL 15.14 met TimescaleDB 2.28.1." in t

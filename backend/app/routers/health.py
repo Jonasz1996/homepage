@@ -15,7 +15,7 @@ from ..config import get_settings
 from ..db import get_db
 from ..deps import audit, current_user, recent_auth
 from ..health import domains as dom, scan as hw, selfcheck as sc, snapshots as snap
-from ..monitoring import cluster, coverage
+from ..monitoring import cluster, coverage, rollup
 from ..integrations import IntegrationError
 from ..models import AppState, Reading, Service, User
 from ..syslog import server as rxs
@@ -81,13 +81,22 @@ async def _with_cluster(db: AsyncSession, summ: dict) -> dict:
             "backups": b}
 
 
+async def _selfcheck(db: AsyncSession) -> dict:
+    """De laatste zelfcontrole, met de stand van de uurtotalen van nu: de zelfcontrole loopt maar elk uur, en na een
+    lange stilstand haalt de worker de uurtotalen binnen een paar minuten in (anders bleef "achter" een uur staan)."""
+    selfc = await _value(db, sc.STATE_KEY)
+    if "rollup" in selfc:
+        selfc["rollup"] = await rollup.lag(db, datetime.now(timezone.utc))
+    return selfc
+
+
 @router.get("")
 async def overview(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     cfg = await hw.settings(db)
     worker = await sc.check_worker(db)
     await db.commit()
     hardware, snaps = await _value(db, hw.STATE_KEY), await _value(db, snap.STATE_KEY)
-    domains, selfc = await _value(db, dom.STATE_KEY), await _value(db, sc.STATE_KEY)
+    domains, selfc = await _value(db, dom.STATE_KEY), await _selfcheck(db)
     key = await _value(db, sc.KEY_STATE)
     snaps.pop("warned", None)
     # Eerst de samenvatting: die kijkt in alerts of de schijf vol is.
@@ -108,7 +117,7 @@ async def summary(user: User = Depends(current_user), db: AsyncSession = Depends
     worker = await sc.check_worker(db)
     await db.commit()
     return await _with_cluster(db, _summary(await _value(db, hw.STATE_KEY), await _value(db, snap.STATE_KEY),
-                                            await _value(db, dom.STATE_KEY), await _value(db, sc.STATE_KEY), worker, cfg))
+                                            await _value(db, dom.STATE_KEY), await _selfcheck(db), worker, cfg))
 
 
 @router.get("/temps")

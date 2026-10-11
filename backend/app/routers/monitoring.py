@@ -177,29 +177,19 @@ async def _series(db: AsyncSession, service_id: int, start: datetime, size: int)
 
 
 @router.get("/services/{service_id}/history")
-async def history(service_id: int, range: str = Query("24h", pattern="^(1h|24h|7d|30d|1y)$"),
+async def history(service_id: int, range: str = Query("24h", pattern="^(1h|24h|7d|30d|1y)$"), live: bool = False,
                   user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """live: alleen de status van nu en de laatste checks (het mini dashboard ververst die elke 30 s, ook als de
+    grafiek over een week of een jaar maar om de paar minuten opnieuw laadt)."""
     svc = await db.get(Service, service_id)
     if svc is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Service niet gevonden")
-    span, size = RANGES[range]
     now = datetime.now(timezone.utc)
-    series = await _series(db, service_id, now - span, size)
-
     state = await db.get(ServiceState, service_id)
     last = (await db.execute(
         select(CheckResult).where(CheckResult.service_id == service_id).order_by(CheckResult.ts.desc()).limit(10)
     )).scalars().all()
-    return {
-        "range": range,
-        "bucket_seconds": size,
-        # Gaat de check rechtstreeks naar de server achter NPM (zonder DNS), en zo niet, waarom niet.
-        "route": routes.describe(svc.check, svc.url, await routes.load(db)),
-        "uptime": series["uptime"],
-        "uptime_all": await _uptime_all(db, service_id, now),
-        "checks": series["checks"],
-        "points": series["points"],
-        "outages": series["outages"],
+    current = {
         "state": {
             "status": state.status, "since": _aware(state.since), "latency_ms": state.latency_ms,
             "last_error": state.last_error, "last_check": _aware(state.last_check),
@@ -212,6 +202,22 @@ async def history(service_id: int, range: str = Query("24h", pattern="^(1h|24h|7
              "maintenance": bool(r.maintenance)}
             for r in last
         ],
+    }
+    if live:
+        return current
+    span, size = RANGES[range]
+    series = await _series(db, service_id, now - span, size)
+    return {
+        "range": range,
+        "bucket_seconds": size,
+        # Gaat de check rechtstreeks naar de server achter NPM (zonder DNS), en zo niet, waarom niet.
+        "route": routes.describe(svc.check, svc.url, await routes.load(db)),
+        "uptime": series["uptime"],
+        "uptime_all": await _uptime_all(db, service_id, now),
+        "checks": series["checks"],
+        "points": series["points"],
+        "outages": series["outages"],
+        **current,
     }
 
 

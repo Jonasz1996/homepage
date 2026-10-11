@@ -50,8 +50,9 @@
     }
   }
 
-  // Hoe vaak opnieuw laden: bij 1 u en 24 u elke 30 s. Een week, een maand of een jaar (tijdvakken van een uur tot
-  // een dag) verandert nauwelijks per halve minuut; de status van nu staat ook op de tegel.
+  // Hoe vaak de grafiek opnieuw laadt: bij 1 u en 24 u elke 30 s. Een week, een maand of een jaar (tijdvakken van een
+  // uur tot een dag) verandert nauwelijks per halve minuut. De status van nu en de laatste checks blijven wel elke 30 s
+  // vers (loadNow): het venster ligt over de tegel.
   const REFRESH = { '1h': 30000, '24h': 30000, '7d': 300000, '30d': 600000, '1y': 600000 }
 
   $effect(() => {
@@ -60,6 +61,19 @@
   })
 
   $effect(() => poll(load, REFRESH[range]))
+
+  async function loadNow() {
+    const r = range
+    if (REFRESH[r] <= 30000 || !data) return
+    try {
+      const d = await api(`/services/${service.id}/history?range=${r}&live=true`)
+      if (r === range && data) data = { ...data, state: d.state, recent: d.recent }
+    } catch {
+      // De volgende keer opnieuw; wat er staat, blijft staan.
+    }
+  }
+
+  $effect(() => poll(loadNow, 30000))
 
   const pct = (v) => (v == null ? '—' : `${(Math.floor(v * 1000) / 10).toFixed(1)}%`)
   const ms = (v) => (v == null ? '—' : v < 10 ? `${v.toFixed(1)} ms` : `${Math.round(v)} ms`)
