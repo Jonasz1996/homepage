@@ -424,6 +424,15 @@ def _host(lab, name=FQDN) -> dict | None:
     return next((h for h in lab.hosts if name in h["domain_names"]), None)
 
 
+async def _attention(authed) -> dict:
+    return {i["key"]: i for i in (await authed.get("/api/attention")).json()["items"]}
+
+
+async def _checklist(authed) -> dict:
+    r = (await authed.get("/api/attention/setup")).json()
+    return next(x for g in r["groups"] for x in g["rows"] if x["key"] == "nieuweservice")
+
+
 # --- proef -------------------------------------------------------------------------------------------------------
 
 async def test_proef_doet_niets_en_toont_elke_call(lab, authed):
@@ -706,6 +715,11 @@ async def test_stopt_bij_de_eerste_fout(lab, authed):
     assert n.level == "warn" and n.pushed_at is None and n.push_key == f"ns:{run['id']}"
     assert "Gestopt bij stap 3 (DNS-record in Cloudflare)" in n.body and "Al gemaakt: NPM-host #57, tunnelregel" in n.body
     await agen.aclose()
+    item = (await _attention(authed))[f"ns:{run['id']}"]
+    assert item["level"] == "warn" and item["title"] == f"Nieuwe service {FQDN} half gemaakt"
+    assert item["text"].startswith("Gestopt bij stap 3: stap 3 (DNS-record in Cloudflare): Cloudflare:")
+    assert item["text"].endswith("Al gemaakt: NPM-host #57, tunnelregel.")
+    assert item["fix"] == {"window": "nieuweservice", "tab": "geschiedenis"}
 
 
 async def test_nginx_offline_stopt_bij_stap_1(lab, authed):
@@ -745,6 +759,12 @@ async def test_ongedaan_maken(lab, authed):
     assert orig["status"] == "ongedaan" and orig["can_undo"] is False
     r = await authed.post(f"/api/nieuweservice/runs/{run['id']}/ongedaan/proef")
     assert r.status_code == 409
+    assert not [k for k in await _attention(authed) if k.startswith("ns:")]
+    agen, db = await _db()
+    titles = [n.title for n in (await db.execute(select(Notification).where(Notification.source == "nieuweservice")))
+              .scalars()]
+    assert f"Ongedaan gemaakt: {FQDN}" in titles
+    await agen.aclose()
 
 
 async def test_ongedaan_maken_van_een_onbekende_stap(lab, authed):
@@ -784,6 +804,23 @@ async def test_herstart_markeert_onderbroken(lab, authed):
     assert "herstartte" in out["error"]
     run2 = await _start(authed, _body(lab))
     assert run2["status"] == "klaar"
+
+
+async def test_checklist_rij(lab, authed):
+    row = await _checklist(authed)
+    assert row["state"] == "ok" and row["fix"] == {"window": "api"}
+    r = await authed.patch(f"/api/apis/{lab.apis['npm']}", json={
+        "name": "NPM", "kind": "npm", "url": NPM, "secrets": {"action_username": "", "action_password": ""}})
+    assert r.status_code == 200, r.text
+    await authed.delete(f"/api/apis/{lab.apis['adguard']}")
+    row = await _checklist(authed)
+    assert row["state"] == "half"
+    assert any("README → Nieuwe service" in t for t in row["todo"])
+    assert any("LAN-DNS" in t for t in row["todo"])
+    for kind in ("npm", "cloudflare", "proxmox"):
+        await authed.delete(f"/api/apis/{lab.apis[kind]}")
+    row = await _checklist(authed)
+    assert row["state"] == "none" and row["optional"] is True
 
 
 async def test_bezig_zonder_taak_is_onderbroken(lab, authed):

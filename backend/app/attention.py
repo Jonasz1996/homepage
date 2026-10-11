@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from . import nieuweservice as ns
 from .config import get_settings
 from .health import domains as dom, scan as hw, security, selfcheck as sc, snapshots as snap
 from .integrations import REGISTRY
@@ -586,6 +587,29 @@ def adhoc_maintenance(svcs: list[Service], plan: dict[int, datetime], now: datet
     return out
 
 
+async def new_services(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
+    """Een nieuwe service (of opruimen) die halverwege stopte: wat al gemaakt of weg is, blijft zo tot je het ongedaan
+    maakt of afwerkt. Een run die niets achterliet, staat alleen in de geschiedenis."""
+    out = []
+    for raw in ns.runs_of(await _state(db, ns.STATE_KEY)):
+        r = ns.effective(raw)
+        if r.get("status") not in ("gestopt", "onderbroken") or r.get("undone_by"):
+            continue
+        steps = r.get("steps") or []
+        if not (r.get("created") or r.get("removed") or any(s.get("status") == "onbekend" for s in steps)):
+            continue
+        nr = next((s.get("nr") for s in steps if s.get("status") in ("fout", "onbekend")), "?")
+        fqdn = r.get("fqdn") or "?"
+        if r.get("kind") == "maken":
+            title, rest = f"Nieuwe service {fqdn} half gemaakt", f"Al gemaakt: {ns._labels(r.get('created') or [])}."
+        else:
+            what = "Opruimen van" if r.get("kind") == "opruimen" else "Ongedaan maken van"
+            title, rest = f"{what} {fqdn} gestopt", f"Al verwijderd: {ns._labels(r.get('removed') or [])}."
+        out.append(item(f"ns:{r['id']}", "warn", "services", title, f"Gestopt bij stap {nr}: {r.get('error')}. {rest}",
+                        {"window": "nieuweservice", "tab": "geschiedenis"}, sig=r["status"], since=r.get("updated_at")))
+    return out
+
+
 def integrations(errors: dict[int, str], ctx: dict) -> list[dict]:
     names, down = ctx.get("names") or {}, ctx.get("down") or set()
     out = [item(f"api:{sid}", "warn", "integraties", f"{names[sid]}: de API geeft een fout", err,
@@ -596,7 +620,7 @@ def integrations(errors: dict[int, str], ctx: dict) -> list[dict]:
 
 
 SOURCES = (services, backups, clusters, hardware, capacity, network, homepage, zabbix, cron_jobs, updates, safety,
-           maintenance)
+           maintenance, new_services)
 
 
 async def collect(db: AsyncSession, errors: dict[int, str] | None = None) -> dict:
