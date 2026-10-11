@@ -14,7 +14,8 @@ Fase 1 en 2 van het [stappenplan](https://claude.ai/code/artifact/fe2b226c-d5ef-
   privévenster, een andere browser, gewiste cookies of de iPhone-app op je beginscherm (tot die één keer inlogde)
   tellen als nieuw. Je wachtwoord wijzigen of `secret.key` vervangen maakt alle andere toestellen weer onbekend;
   afmelden niet. Een herstart van `homepage-api` wist alle slots (de tellers staan in het geheugen). Hoogstens 8
-  wachtwoordcontroles wachten tegelijk; daarboven antwoordt het dashboard "Even te druk, probeer zo opnieuw"
+  wachtwoordcontroles wachten tegelijk, plus 4 voor bekende toestellen; daarboven antwoordt het dashboard "Even te
+  druk, probeer zo opnieuw"
 - pagina's, groepen en services, aanpasbaar in een edit mode met slepen
 - import van je homepage.dev `services.yaml` (widget-wachtwoorden en API-sleutels worden versleuteld bewaard)
 - export naar YAML, en een versiegeschiedenis van de layout waarmee je elke wijziging terugzet

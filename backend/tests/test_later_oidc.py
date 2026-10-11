@@ -60,9 +60,11 @@ class Provider:
         self.form = None
         # Een ander antwoord van het token-endpoint (bv. de HTML-pagina van een proxy).
         self.token_response = None
+        # Wat Authentik als issuer meldt (in de discovery en in elk ID-token).
+        self.issuer = ISSUER
 
     def id_token(self) -> str:
-        c = {"iss": ISSUER, "sub": SUB, "aud": "homepage", "exp": time.time() + 300, "iat": time.time(),
+        c = {"iss": self.issuer, "sub": SUB, "aud": "homepage", "exp": time.time() + 300, "iat": time.time(),
              "nonce": self.nonce, "preferred_username": "Jonas", "email": "jonas@jbogaert.be", "amr": ["pwd", "mfa"],
              **self.claims}
         return jwt({k: v for k, v in c.items() if v is not None}, self.token_key, self.token_alg, secret="geheim")
@@ -70,7 +72,7 @@ class Provider:
     def __call__(self, req: httpx.Request) -> httpx.Response:
         p = req.url.path
         if p.endswith("/.well-known/openid-configuration"):
-            return httpx.Response(200, json={"issuer": ISSUER, "authorization_endpoint": "https://auth.jbogaert.be/application/o/authorize/",
+            return httpx.Response(200, json={"issuer": self.issuer, "authorization_endpoint": "https://auth.jbogaert.be/application/o/authorize/",
                                              "token_endpoint": "https://auth.jbogaert.be/application/o/token/",
                                              "jwks_uri": "https://auth.jbogaert.be/application/o/homepage/jwks/"})
         if p.endswith("/jwks/"):
@@ -257,6 +259,49 @@ async def test_oidc_andere_uitgever(authed, provider):
     r = await _login(authed, provider)
     assert _target(r)[1]["login_error"] == oidc_router.NOT_LINKED
 
+
+
+async def _authentik_row(c) -> dict:
+    groups = (await c.get("/api/attention/setup")).json()["groups"]
+    return next(x for g in groups for x in g["rows"] if x["key"] == "authentik")
+
+
+async def test_oidc_issuer_veranderd(authed, provider):
+    """Een andere issuer (een andere slug of hostnaam bij Authentik): inloggen zoekt op de issuer van nu, dus de oude
+    koppeling telt niet meer als gekoppeld, en de checklist zegt dat je opnieuw moet koppelen."""
+    await authed.put("/api/auth/oidc/settings", json=SETTINGS)
+    await _link(authed, provider)
+    s = (await authed.get("/api/auth/oidc/settings")).json()
+    assert (s["linked"], s["link_stale"]) == (True, False)
+    assert (await _authentik_row(authed))["state"] == "ok"
+
+    new = "https://auth.jbogaert.be/application/o/dashboard/"
+    provider.issuer = new
+    oidc._cache.clear()
+    r = await authed.put("/api/auth/oidc/settings", json={**SETTINGS, "issuer": new})
+    assert r.status_code == 200, r.text
+    assert (r.json()["linked"], r.json()["link_stale"]) == (False, True)
+    row = await _authentik_row(authed)
+    assert row["state"] == "half" and "andere issuer" in row["text"]
+
+    # Opnieuw koppelen: weer in orde, en inloggen werkt.
+    await _link(authed, provider)
+    s = (await authed.get("/api/auth/oidc/settings")).json()
+    assert (s["linked"], s["link_stale"]) == (True, False)
+    assert (await _authentik_row(authed))["state"] == "ok"
+    await authed.post("/api/auth/logout")
+    await _login(authed, provider)
+    assert (await authed.get("/api/auth/state")).json()["mfa_ok"]
+
+
+async def test_oidc_naam_uit_claim_sub(authed, provider):
+    """Staat "naam tonen uit claim" op sub, dan is een sub met de hashed ID nog altijd geen naam: koppelen lukt."""
+    assert oidc.subject_is_name({"sub": SUB, "preferred_username": "Jonas"}, "sub") is False
+    assert oidc.subject_is_name({"sub": "jonas", "preferred_username": "Jonas"}, "sub") is True
+    await authed.put("/api/auth/oidc/settings", json={**SETTINGS, "username_claim": "sub"})
+    r = await _link(authed, provider)
+    assert "oidc_error" not in _target(r)[1]
+    assert (await authed.get("/api/auth/oidc/settings")).json()["linked"] is True
 
 @pytest.mark.parametrize("case,expect", [
     ("no_mfa", "geen 2FA"), ("unknown", "nog niet gekoppeld"), ("bad_sig", "Handtekening"), ("expired", "verlopen"),
@@ -461,7 +506,11 @@ async def test_oidc_no_transaction_during_provider_calls(authed, provider, monke
         return provider(req)
     c = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     monkeypatch.setattr(oidc_router, "_clients", {False: c, True: c})
+    # Ook bewaren: dat vraagt de discovery opnieuw op.
+    oidc._cache.clear()
     await authed.put("/api/auth/oidc/settings", json=SETTINGS)
+    assert [p for p, _ in seen] == ["/application/o/homepage/.well-known/openid-configuration"]
+    assert all(idle == 0 for _, idle in seen), seen
     oidc._cache.clear()
     seen.clear()
     await _link(authed, provider)

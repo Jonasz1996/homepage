@@ -100,13 +100,17 @@ class SettingsIn(BaseModel):
 @router.get("/settings")
 async def read_settings(request: Request, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     cfg = await _settings(db)
+    # Gekoppeld bij een andere issuer dan die van nu (bv. na een andere slug of hostnaam): inloggen zoekt op de
+    # issuer die Authentik nu meldt, dus die koppeling werkt niet meer.
+    stale = bool(user.oidc_sub and cfg.get("iss") and user.oidc_issuer != cfg["iss"])
     return {"enabled": bool(cfg.get("enabled")), "issuer": cfg.get("issuer", ""), "client_id": cfg.get("client_id", ""),
             "has_secret": bool(cfg.get("client_secret")), "label": cfg.get("label") or "Authentik",
             "require_mfa": cfg.get("require_mfa", True), "username_claim": cfg.get("username_claim") or "preferred_username",
             "insecure": bool(cfg.get("insecure")), "redirect_base": cfg.get("redirect_base", ""),
             "redirect_uri": _redirect_uri(request, cfg),
             # Het gekoppelde Authentik-account van deze gebruiker (de sub zelf gaat niet naar de browser).
-            "linked": bool(user.oidc_sub), "linked_name": user.oidc_name or "", "linked_issuer": user.oidc_issuer or ""}
+            "linked": bool(user.oidc_sub) and not stale, "link_stale": stale, "linked_name": user.oidc_name or "",
+            "linked_issuer": user.oidc_issuer or ""}
 
 
 @router.put("/settings")
@@ -117,13 +121,18 @@ async def put_settings(data: SettingsIn, request: Request, user: User = Depends(
     new["client_secret"] = cfg.get("client_secret")
     if data.client_secret is not None:
         new["client_secret"] = encrypt(data.client_secret) if data.client_secret else None
+    # De issuer zoals Authentik hem meldt (die staat in elk ID-token): daaraan ziet read_settings of de koppeling nog
+    # klopt. Uit staat er niets te controleren; dezelfde issuer houdt wat er al stond.
+    new["iss"] = cfg.get("iss") if data.issuer == cfg.get("issuer") else None
     if data.enabled:
         if not (data.issuer and data.client_id):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Vul issuer en client-id in")
+        await db.commit()  # geen transactie open terwijl de provider antwoordt
         try:
-            await discovery(client(data.insecure), data.issuer, fresh=True)
+            disc = await discovery(client(data.insecure), data.issuer, fresh=True)
         except OidcError as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Issuer niet bruikbaar: {e}") from e
+        new["iss"] = disc.get("issuer") or None
     st = await db.get(AppState, KEY)
     if st:
         st.value = new

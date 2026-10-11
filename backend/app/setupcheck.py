@@ -577,7 +577,19 @@ async def safety(db: AsyncSession, cfg: dict) -> list[dict]:
                    fix={"window": "security", "tab": "outside"}))
     oidc = await _state(db, "oidc")
     sso = {"window": "security", "tab": "sso"}
-    linked = (await db.execute(select(func.count()).select_from(User).where(User.oidc_sub.is_not(None)))).scalar_one()
+    q = select(func.count()).select_from(User).where(User.oidc_sub.is_not(None))
+    linked = (await db.execute(q)).scalar_one()
+    if oidc.get("iss"):
+        # Alleen koppelingen bij de issuer van nu tellen: inloggen zoekt daarop.
+        current = (await db.execute(q.where(User.oidc_issuer == oidc["iss"]))).scalar_one()
+        if oidc.get("enabled") and linked and not current:
+            out.append(row("authentik", "beveiliging", "Inloggen via Authentik", "half",
+                           "Je Authentik-account is gekoppeld bij een andere issuer dan die van nu: inloggen via "
+                           "Authentik werkt pas als je opnieuw koppelt. Wachtwoord en 2FA werken gewoon.",
+                           ["Ingelogd met wachtwoord en 2FA: sleutel-icoon → authentik → opnieuw koppelen."], sso,
+                           optional=True))
+            return out
+        linked = current
     if oidc.get("enabled") and not linked:
         # Het dashboard herkent een Authentik-account alleen nog aan zijn vaste ID: zonder koppeling geen login.
         out.append(row("authentik", "beveiliging", "Inloggen via Authentik", "half",

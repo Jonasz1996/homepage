@@ -37,15 +37,18 @@ def verify_password(password_hash: str | None, password: str) -> bool:
 _pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="argon2")
 # Zoveel wachtwoordcontroles mogen tegelijk wachten. Wie daarna komt, krijgt meteen "even te druk", zonder te rekenen.
 MAX_PENDING = 8
+# Bekende toestellen (zie DEVICE_COOKIE) mogen er nog zoveel bij: wie de wachtrij vult met verzoeken zonder geldig
+# toestelcookie, houdt de eigenaar zo niet buiten. Elk toestel heeft zijn eigen strenge teller.
+KNOWN_EXTRA = 4
 _pending = 0
 
 
 @contextmanager
-def password_slot() -> Iterator[bool]:
+def password_slot(known: bool = False) -> Iterator[bool]:
     """Een plaats in de wachtrij voor argon2 (False: vol). Neem ze vóór de eerste await, net als de limieten: dan
-    kunnen verzoeken tegelijk niet allemaal dezelfde laatste vrije plaats zien."""
+    kunnen verzoeken tegelijk niet allemaal dezelfde laatste vrije plaats zien. known: met een geldig toestelcookie."""
     global _pending
-    if _pending >= MAX_PENDING:
+    if _pending >= MAX_PENDING + (KNOWN_EXTRA if known else 0):
         yield False
         return
     _pending += 1
@@ -113,6 +116,12 @@ def _device_bind(password_hash: str) -> str:
     """Hangt het toestelcookie aan het huidige wachtwoord: een nieuw wachtwoord (een nieuwe hash, met nieuw zout)
     maakt alle bekende toestellen weer onbekend."""
     return hashlib.sha256(b"hp_device\0" + password_hash.encode()).hexdigest()[:32]
+
+
+def session_device(session_id: str) -> str:
+    """Een vast toestel-ID voor een sessie zonder (geldig) toestelcookie: wie een sessie steelt en het cookie telkens
+    wist, krijgt zo steeds hetzelfde toestel, met één strenge teller, en niet eindeloos nieuwe."""
+    return "s" + hashlib.sha256(b"hp_device-sessie\0" + session_id.encode()).hexdigest()[:16]
 
 
 def device_token(user_id: int, username: str, password_hash: str, device: str | None = None) -> str:

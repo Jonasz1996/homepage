@@ -245,11 +245,15 @@
     {#if more}<button class="mini more" onclick={() => loadAudit(true)}>meer laden</button>{/if}
   {:else if tab === 'sso'}
     {#if sso}
-      {#if ssoOn || sso.linked}
+      {#if ssoOn || sso.linked || sso.link_stale}
         <div class="link" class:on={sso.linked}>
           {#if sso.linked}
             <span title={sso.linked_issuer}>Gekoppeld aan Authentik-gebruiker <b>{sso.linked_name || '(zonder naam)'}</b>.</span>
             <button class="mini" onclick={linkSso} disabled={!ssoOn}>opnieuw koppelen</button>
+            <button class="mini x" onclick={unlinkSso}>ontkoppelen</button>
+          {:else if sso.link_stale}
+            <span title={sso.linked_issuer}>Gekoppeld bij een andere issuer dan die van nu: inloggen via Authentik werkt pas als je opnieuw koppelt.</span>
+            <button class="btn" onclick={linkSso} disabled={!ssoOn}>Opnieuw koppelen</button>
             <button class="mini x" onclick={unlinkSso}>ontkoppelen</button>
           {:else}
             <span>Nog niet gekoppeld: inloggen via Authentik werkt pas na koppelen.</span>

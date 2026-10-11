@@ -316,6 +316,27 @@ async def test_password_checks_capped(authed, monkeypatch):
         await c.aclose()
 
 
+
+async def test_known_device_has_room_when_queue_full(authed, monkeypatch):
+    """Wie de wachtrij vult met verzoeken zonder toestelcookie (nieuwe IP's, willekeurige namen), houdt een bekend
+    toestel niet buiten: dat heeft KNOWN_EXTRA plaatsen extra."""
+    secret = authed.totp_secret
+    owner = _client("192.168.0.10")
+    assert (await _login(owner, code=pyotp.TOTP(secret).now())).status_code == 200
+    device = owner.cookies.get(DEVICE_COOKIE)
+    await owner.post("/api/auth/logout")
+    monkeypatch.setattr(security, "_pending", security.MAX_PENDING)  # de wachtrij is vol
+    async with _client("198.51.100.7") as new:
+        r = await _login(new, code=pyotp.TOTP(secret).now())
+        assert r.status_code == 429 and r.json()["detail"] == "Even te druk, probeer zo opnieuw"
+    async with _client("198.51.100.8", device) as known:
+        assert (await _login(known, code=pyotp.TOTP(secret).now())).status_code == 200
+    monkeypatch.setattr(security, "_pending", security.MAX_PENDING + security.KNOWN_EXTRA)
+    async with _client("198.51.100.9", device) as known:
+        assert (await _login(known, code=pyotp.TOTP(secret).now())).status_code == 429
+    await owner.aclose()
+
+
 # --- 4b. bekende toestellen ----------------------------------------------------------
 
 async def test_known_device_not_locked_by_username_limit(authed):
@@ -355,7 +376,8 @@ async def test_known_device_not_locked_by_username_limit(authed):
     assert r.status_code == 200, r.text
     await traveller.post("/api/auth/logout")
     r = await _login(traveller, new_pw, code=pyotp.TOTP(secret).now())
-    assert r.status_code == 429 and "nieuwe toestellen" in r.json()["detail"]
+    # Met een eigen uitleg: "op een toestel waarop je al eens inlogde, lukt het wel" klopt hier niet.
+    assert r.status_code == 429 and "wachtwoord is gewijzigd sinds dit toestel" in r.json()["detail"]
     await owner.post("/api/auth/logout")
     assert (await _login(owner, new_pw, code=pyotp.TOTP(secret).now())).status_code == 200
     await owner.aclose()
@@ -412,6 +434,24 @@ async def test_state_sets_device_cookie_for_logged_in_session(authed):
     await authed.post("/api/auth/logout")
     assert (await _login(authed, code=pyotp.TOTP(authed.totp_secret).now())).status_code == 200
 
+
+
+async def test_state_gives_one_device_per_session(authed):
+    """Wie een sessie steelt en telkens het toestelcookie wist, krijgt steeds hetzelfde toestel (één strenge teller),
+    geen nieuwe toestellen met elk hun eigen pogingen."""
+    ids = set()
+    for _ in range(4):
+        authed.cookies.delete(DEVICE_COOKIE, path="/api/auth")
+        authed.cookies.delete(DEVICE_COOKIE)
+        r = await authed.get("/api/auth/state")
+        assert r.status_code == 200
+        ids.add(security.read_device(authed.cookies.get(DEVICE_COOKIE))["d"])
+    assert len(ids) == 1
+    # Een login maakt wel een eigen toestel (daar hoorden wachtwoord en 2FA bij).
+    await authed.post("/api/auth/logout")
+    authed.cookies.delete(DEVICE_COOKIE)
+    assert (await _login(authed, code=pyotp.TOTP(authed.totp_secret).now())).status_code == 200
+    assert security.read_device(authed.cookies.get(DEVICE_COOKIE))["d"] not in ids
 
 async def test_new_ip_alert_mentions_known_device(authed):
     secret = authed.totp_secret
