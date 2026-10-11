@@ -190,7 +190,8 @@ class Worker:
             log.exception("snapshots van updates opruimen mislukt")
 
     async def auto_updates(self) -> None:
-        """Elke minuut kijken of het tijd is voor de nachtelijke beveiligingsupdates."""
+        """Elke minuut kijken of het tijd is voor de nachtelijke beveiligingsupdates. Als proef komt er niets terug:
+        dan ook geen nieuwe scan (die logt op elke machine in)."""
         try:
             ran = await auto_updates(self.maker, self.http)
         except Exception:

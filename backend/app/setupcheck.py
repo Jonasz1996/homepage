@@ -489,10 +489,18 @@ async def ssh_rows(db: AsyncSession, has_proxmox: bool) -> list[dict]:
         out.append(row("logs", "ssh", title, "ok", f"Logs van {n} machine{'s' if n != 1 else ''} de laatste 24 uur.",
                        fix={"window": "logs"}))
     up = await upgrade.settings(db)
-    out.append(row("autoupdates", "ssh", "Nachtelijke beveiligingsupdates", "ok" if up.get("auto") else "none",
-                   f"Aan, om {int(up.get('hour', 4)):02d}:00, met een snapshot vooraf." if up.get("auto") else
-                   "Staat uit: je installeert updates zelf via apt.",
-                   [] if up.get("auto") else ["Aanzetten in apt → instellingen."], {"window": "updates"}, optional=True))
+    if up.get("auto") and up.get("proef"):
+        out.append(row("autoupdates", "ssh", "Nachtelijke beveiligingsupdates", "half",
+                       f"Aan als proef: er wordt niets geïnstalleerd. Om {int(up.get('hour', 4)):02d}:00 wordt alleen "
+                       "genoteerd wat er zou gebeuren.",
+                       ["Kijk de proef van vannacht na in apt → 's nachts; ziet ze er goed uit, zet dan 'alleen proef' uit."],
+                       {"window": "updates"}, optional=True))
+    else:
+        out.append(row("autoupdates", "ssh", "Nachtelijke beveiligingsupdates", "ok" if up.get("auto") else "none",
+                       f"Aan, om {int(up.get('hour', 4)):02d}:00, met een snapshot vooraf." if up.get("auto") else
+                       "Staat uit: je installeert updates zelf via apt.",
+                       [] if up.get("auto") else ["Aanzetten in apt → instellingen."], {"window": "updates"},
+                       optional=True))
     return out
 
 
