@@ -107,11 +107,16 @@ async def reset_state(db: AsyncSession, service_id: int) -> None:
     await db.execute(delete(ServiceState).where(ServiceState.service_id == service_id))
 
 
+def notify_mode(service: Service) -> str:
+    """Melden, zoals ingesteld op de check: push (hier en op de gsm), centrum (alleen hier) of uit (alleen tijdlijn)."""
+    return (service.check or {}).get("notify") or "push"
+
+
 def alert(db: AsyncSession, service: Service, title: str, body: str | None, level: str,
           data: dict | None = None, key: str | None = None) -> None:
     """Melding voor een service, zoals ingesteld op de check: hier en op de gsm, alleen hier, of alleen tijdlijn.
     Down, nog down en weer bereikbaar gaan over dezelfde storing: op de gsm vervangt de nieuwste de vorige."""
-    mode = (service.check or {}).get("notify") or "push"
+    mode = notify_mode(service)
     if mode == "uit":
         event(db, "storing", title, body, level, service.id, data)
         return

@@ -7,11 +7,12 @@ from sqlalchemy import select
 
 from app.db import get_db
 from app.main import app
-from app.models import AppState, HealRule, Notification, Service, ServiceState, SshHost
-from app.monitoring import healing, upgrade
+from app.models import AppState, CheckResult, Event, HealRule, Notification, Service, ServiceState, SshHost
+from app.monitoring import healing, upgrade, webpush
 from app.monitoring.checks import HttpClients
 
 from .test_integrations import PVE, Fake as PveFake, _group, _svc
+from .test_webpush import A, Phone, PushService, _run, _subscribe
 
 
 class Node:
@@ -284,6 +285,154 @@ async def test_heal_rules_fire_with_cooldown_and_limit(authed, monkeypatch):
 
     listed = (await authed.get(f"/api/heal?service_id={plex}")).json()
     assert listed[0]["describe"] == "herstart CT 101" and listed[0]["service"] == "Plex"
+
+
+def test_limiet_per_uur_past_bij_de_wachttijd():
+    """Met 10 min wachttijd gaat een regel hoogstens 6× per uur af: een limiet van 6 pauzeerde dus nooit."""
+    assert healing.MAX_PER_HOUR == 5
+    t0 = datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc)
+    rule = HealRule(enabled=True, after=3, max_per_hour=6, fired=[], last_at=None, dry_run=False, action={})
+    times, paused = [], 0
+    for m in range(12 * 60):  # elke minuut een check, een storing van 12 uur
+        now = t0 + timedelta(minutes=m)
+        g = healing.gates(rule, 3, False, False, now)
+        if g.blocked is None:
+            rule.fired, rule.last_at = g.fired + [now.isoformat()], now
+            times.append(now)
+        paused += g.blocked == healing.LIMIT
+    assert paused
+    assert max(sum(1 for t in times if s <= t < s + timedelta(hours=1)) for s in times) == 5
+    assert healing.gates(rule, 3, False, False, t0).checks[-1]["what"] == "hoogstens 5× per uur"
+
+
+async def _heal_notes(db) -> list[Notification]:
+    return list((await db.execute(select(Notification).where(Notification.source == "herstel")
+                                  .order_by(Notification.id))).scalars())
+
+
+async def _heal_setup(authed, fake=None, max_per_hour=2):
+    g = await _group(authed)
+    pve = await _svc(authed, g, "proxmox", "https://pve.jbogaert.be",
+                     secrets={"username": "homepage@pve!dash", "password": "geheim"}, name="PVE")
+    plex = await _svc(authed, g, "", "http://plex.jbogaert.be", name="Plex")
+    action = {"kind": "integration", "service_id": pve, "action": "reboot", "label": "herstart CT 101",
+              "params": {"node": "pve50", "type": "lxc", "vmid": 101}}
+    r = await authed.post("/api/heal", json={"service_id": plex, "after": 3, "max_per_hour": max_per_hour,
+                                             "action": action})
+    assert r.status_code == 201, r.text
+    agen, db = await _db()
+    db.add(ServiceState(service_id=plex, status="down", fail_count=3, quiet=False, cert_notified=0))
+    await db.commit()
+    return plex, r.json()["id"], agen, db, HttpClients(httpx.MockTransport(fake or PveFake())), _maker_from(agen)
+
+
+async def test_zelfherstel_een_push_per_storing(authed):
+    """Een lange storing met een herstart om de 10 min: elke poging in 🔔, maar op de gsm alleen de eerste poging en
+    de eerste pauze. Na een geslaagde check (buiten onderhoud) is het een nieuwe storing."""
+    webpush._sent.clear()
+    plex, rid, agen, db, http, maker = await _heal_setup(authed)
+    await _run(PushService([]))  # wat er al was (2FA ingeschakeld), zoals door de worker
+    phone = Phone(A)
+    await _subscribe(authed, phone, "Pixel", "warn")
+    t0 = datetime.now(timezone.utc)
+    # Twee herstarts, pauze, een uur later weer twee herstarts en weer een pauze.
+    for m in (0, 11, 22, 75, 86, 97):
+        await healing.check(maker, plex, http, t0 + timedelta(minutes=m))
+    attempt, pause = "Zelfherstel: Plex was 3× down", "Zelfherstel voor Plex gepauzeerd"
+    notes = await _heal_notes(db)
+    # Alleen wat naar de gsm moet, heeft een sleutel; de rest is meteen "verstuurd" (alleen in 🔔).
+    assert [(n.title, n.level, n.push_key, n.pushed_at is None) for n in notes] == [
+        (attempt, "warn", f"heal{rid}", True), (attempt, "warn", None, False), (pause, "err", f"heal{rid}:pauze", True),
+        (attempt, "warn", None, False), (attempt, "warn", None, False), (pause, "err", None, False)]
+    # Alles staat ook op de tijdlijn.
+    events = (await db.execute(select(Event.title).where(Event.service_id == plex, Event.kind == "actie"))).scalars()
+    assert sorted(events) == sorted(n.title for n in notes)
+    svc = PushService([phone])
+    await _run(svc)
+    got = svc.to(phone)
+    assert [m["title"] for m in got] == [attempt, pause]
+    assert got[0]["tag"] == f"k{webpush.topic_for(f'heal{rid}')}"
+
+    # Een geslaagde check tijdens onderhoud maakt geen einde aan de storing.
+    db.add(CheckResult(service_id=plex, ts=datetime.now(timezone.utc), ok=True, maintenance=True))
+    await db.commit()
+    await healing.check(maker, plex, http, t0 + timedelta(hours=3))
+    # Plex was even terug: wat nu komt, is een nieuwe storing, en mag weer één keer naar de gsm.
+    await asyncio.sleep(0.01)
+    db.add(CheckResult(service_id=plex, ts=datetime.now(timezone.utc), ok=True, maintenance=False))
+    await db.commit()
+    await asyncio.sleep(0.01)
+    for m in (11, 22, 33):
+        await healing.check(maker, plex, http, t0 + timedelta(hours=3, minutes=m))
+    notes = (await _heal_notes(db))[6:]
+    assert [(n.title, n.push_key, n.pushed_at is None) for n in notes] == [
+        (attempt, None, False), (attempt, f"heal{rid}", True), (pause, f"heal{rid}:pauze", True)]
+    await _run(svc)
+    assert [m["title"] for m in svc.to(phone)] == [attempt, pause, attempt, pause]
+    await agen.aclose()
+
+
+class BrokenPve(PveFake):
+    """Proxmox die elke actie weigert: de herstart mislukt."""
+
+    def __call__(self, req: httpx.Request) -> httpx.Response:
+        if req.method == "POST":
+            self.calls.append(req)
+            return httpx.Response(500, text="kapot")
+        return super().__call__(req)
+
+
+async def test_zelfherstel_mislukt_en_melden_van_de_tegel(authed):
+    plex, rid, agen, db, http, maker = await _heal_setup(authed, BrokenPve(), max_per_hour=5)
+    t0 = datetime.now(timezone.utc)
+    assert (await healing.check(maker, plex, http, t0)).startswith("mislukt")
+    assert (await healing.check(maker, plex, http, t0 + timedelta(minutes=11))).startswith("mislukt")
+    notes = await _heal_notes(db)
+    assert [(n.title, n.level, n.push_key, n.pushed_at is None) for n in notes] == [
+        ("Zelfherstel voor Plex mislukt", "err", f"heal{rid}", True),
+        ("Zelfherstel voor Plex mislukt", "err", None, False)]
+
+    async def melden(mode: str) -> None:
+        svc = await db.get(Service, plex)
+        svc.check = {"type": "http", "notify": mode}
+        # Een nieuwe storing: zonder de instelling van de tegel zou dit weer naar de gsm gaan.
+        db.add(CheckResult(service_id=plex, ts=datetime.now(timezone.utc), ok=True, maintenance=False))
+        await db.commit()
+        await asyncio.sleep(0.01)
+
+    # Melden: alleen hier (🔔). Nooit naar de gsm, ook niet de eerste van een nieuwe storing.
+    await melden("centrum")
+    assert (await healing.check(maker, plex, http, t0 + timedelta(minutes=22))).startswith("mislukt")
+    (n,) = (await _heal_notes(db))[2:]
+    assert n.push_key is None and n.pushed_at is not None
+    # Melden: niet (alleen de tijdlijn). Geen melding, wel de tijdlijn; ook de pauze.
+    await melden("uit")
+    before = len(await _heal_notes(db))
+    for m in (33, 44, 55):
+        await healing.check(maker, plex, http, t0 + timedelta(minutes=m))
+    assert len(await _heal_notes(db)) == before
+    titles = list((await db.execute(select(Event.title).where(Event.service_id == plex, Event.kind == "actie")
+                                    .order_by(Event.id))).scalars())
+    assert titles[-2:] == ["Zelfherstel voor Plex mislukt", "Zelfherstel voor Plex gepauzeerd"]
+    rule = await db.get(HealRule, rid)
+    await db.refresh(rule)
+    assert rule.last_result.startswith("limiet")
+
+    # De proef zegt hetzelfde.
+    g = healing.gates(rule, 3, False, False, t0)
+    for mode, end in (("push", "in 🔔; op je gsm alleen de eerste poging van deze storing"),
+                      ("centrum", "in 🔔, niet op je gsm (Melden staat op alleen hier)"),
+                      ("uit", "alleen op de tijdlijn (Melden staat op niet)")):
+        assert healing.rule_plan(rule, "Plex", g, ValueError("x"), t0, mode=mode)["after"][0].endswith(end)
+
+    # Een limiet van 6 kan niet meer (die pauzeerde nooit); een oudere regel op 6 telt als 5.
+    r = await authed.put(f"/api/heal/{rid}", json={"service_id": plex, "after": 3, "max_per_hour": 6,
+                                                   "action": rule.action})
+    assert r.status_code == 422
+    rule.max_per_hour = 6
+    await db.commit()
+    assert (await authed.get(f"/api/heal?service_id={plex}")).json()[0]["max_per_hour"] == 5
+    await agen.aclose()
 
 
 async def test_heal_ssh_action_and_test_button(authed):
