@@ -358,8 +358,14 @@ install -m 644 "$APP_DIR/deploy/homepage-api.service" "$APP_DIR/deploy/homepage-
   "$APP_DIR/deploy/homepage-syslog.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/homepage-backup.service" "$APP_DIR/deploy/homepage-backup.timer" /etc/systemd/system/
 install -m 755 "$APP_DIR/deploy/homepage-backup.sh" /usr/local/sbin/homepage-backup
+# Elke 1e van de maand de nieuwste back-up terugzetten in een testdatabase (die daarna weer weg is), als postgres.
+# Welke fouten van pg_restore tellen, staat in homepage-herstelfouten: homepage-terugzetten gebruikt het ook.
+install -m 644 "$APP_DIR/deploy/homepage-backuptest.service" "$APP_DIR/deploy/homepage-backuptest.timer" \
+  /etc/systemd/system/
+install -m 755 "$APP_DIR/deploy/homepage-backuptest.sh" /usr/local/sbin/homepage-backuptest
+install -m 755 "$APP_DIR/deploy/herstelfouten.sh" /usr/local/sbin/homepage-herstelfouten
 systemctl daemon-reload
-systemctl enable --now homepage-backup.timer
+systemctl enable --now homepage-backup.timer homepage-backuptest.timer
 systemctl enable homepage-api homepage-worker homepage-syslog
 systemctl restart homepage-api homepage-worker homepage-syslog
 API_OK=""

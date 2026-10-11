@@ -8,12 +8,21 @@ on:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    # Elke Python-versie met de PostgreSQL van de Debian-versie die ze meebrengt, zoals install.sh ze installeert:
+    # Debian 12 heeft Python 3.11 en PostgreSQL 15, Debian 13 Python 3.13 en PostgreSQL 17. Telkens gewoon
+    # PostgreSQL, en PostgreSQL met de nieuwste TimescaleDB voor die versie. SQLite (geen server, alleen voor de
+    # ontwikkeling) maar op één van de twee: op 3.13 lopen alle tests al twee keer. Zo duurt de CI ongeveer even lang
+    # als met één PostgreSQL-versie. Elke kant loopt helemaal uit, ook als de andere faalt: zo zie je of het aan de
+    # versie ligt.
     strategy:
+      fail-fast: false
       matrix:
-        python: ["3.11", "3.13"]
+        include:
+          - {python: "3.11", pg: "15", sqlite: true}
+          - {python: "3.13", pg: "17", sqlite: false}
     services:
       postgres:
-        image: postgres:16
+        image: postgres:${{ matrix.pg }}
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: homepage_test
@@ -22,7 +31,7 @@ jobs:
           --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
       # Zoals in productie: PostgreSQL met TimescaleDB (hypertables, compressie, bewaarbeleid).
       timescale:
-        image: timescale/timescaledb:latest-pg16
+        image: timescale/timescaledb:latest-pg${{ matrix.pg }}
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: homepage_test
@@ -50,21 +59,42 @@ jobs:
                   if i["metadata"]["name"] != "homepage"]
           sys.exit(f"Niet (of met een andere versie) in requirements(-dev).lock: {meer}" if meer else 0)
           EOF
+      # pg_dump en pg_restore van dezelfde versie als de server, zoals in de container: de test van de back-up
+      # (tests/test_backuptest.py) draait de scripts uit deploy/ echt. Uit de apt-bron van PostgreSQL zelf.
+      - name: PostgreSQL-client ${{ matrix.pg }}
+        run: |
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y -q postgresql-client-${{ matrix.pg }}
+          echo "/usr/lib/postgresql/${{ matrix.pg }}/bin" >> "$GITHUB_PATH"
+      - name: Versies
+        run: |
+          psql -h localhost -p 5432 -XAtc "SELECT version()"
+          psql -h localhost -p 5433 -XAtc "SELECT version()" \
+            -c "SELECT 'TimescaleDB ' || default_version FROM pg_available_extensions WHERE name = 'timescaledb'"
+          pg_dump --version
+        env:
+          PGUSER: postgres
+          PGPASSWORD: postgres
+          PGDATABASE: homepage_test
       - name: Migraties
         run: alembic upgrade head && alembic check
         env:
           HOMEPAGE_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/homepage_test
       - name: Tests (SQLite)
+        if: matrix.sqlite
         run: pytest -q
-      - name: Tests (PostgreSQL)
+      # Met HOMEPAGE_TEST_PG_CLIENT=verplicht slaat de test van de back-up niet over als pg_dump ontbreekt: dan faalt hij.
+      - name: Tests (PostgreSQL ${{ matrix.pg }})
         run: pytest -q
         env:
           HOMEPAGE_TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/homepage_test
-      - name: Tests (TimescaleDB, schema uit de migraties)
+          HOMEPAGE_TEST_PG_CLIENT: verplicht
+      - name: Tests (TimescaleDB op PostgreSQL ${{ matrix.pg }}, schema uit de migraties)
         run: pytest -q
         env:
           HOMEPAGE_TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5433/homepage_test
           HOMEPAGE_TEST_SCHEMA: migraties
+          HOMEPAGE_TEST_PG_CLIENT: verplicht
 
   frontend:
     runs-on: ubuntu-latest
@@ -88,7 +118,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: timescale/timescaledb:latest-pg16
+        image: timescale/timescaledb:latest-pg17
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: homepage

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import time
@@ -11,7 +12,7 @@ from sqlalchemy import select
 from app.db import get_db
 from app.health import domains as dom, probe, scan as hw, selfcheck as sc, snapshots as snap
 from app.main import app
-from app.models import AppState, Notification, Reading, SshHost
+from app.models import AppState, Event, Notification, Reading, SshHost
 from app.monitoring.checks import HttpClients
 
 from .test_integrations import PVE, _group, _svc
@@ -303,7 +304,10 @@ async def test_selfcheck_backup_offsite_and_worker(authed, tmp_path, monkeypatch
     assert v["offsite"]["error"] is None and v["offsite"]["count"] == 2 and v["offsite"]["key"]
     blob = json.loads((dst / "secret.key.enc").read_text())
     assert sc.decrypt_key(blob, "een lange wachtzin") == s.secret_key_file.read_bytes()
-    assert "pg_restore" in (dst / "LEESMIJ.txt").read_text()
+    leesmij = (dst / "LEESMIJ.txt").read_text()
+    assert "pg_restore" in leesmij and "Bij de laatste kopie: " in leesmij
+    if db.bind.dialect.name == "postgresql":  # met de versie die nodig is om terug te zetten
+        assert "Bij de laatste kopie: PostgreSQL " in leesmij
     # Een kapotte dump valt op als pg_restore er is (anders: onbekend, geen melding).
     assert v["verified"]["name"] == "homepage-2026-10-04.dump"
     assert v["verified"]["ok"] in (False, None)
@@ -352,6 +356,124 @@ async def test_selfcheck_uurtotalen(authed, tmp_path, monkeypatch):
     assert v["rollup"] == {"until": rollup.floor_hour(now).isoformat(), "behind_h": 0, "late": False}
     assert (await warn()).json()["warn"] == before
     await agen.aclose()
+
+
+def test_leesmij_met_versies():
+    t = sc.readme({"postgresql": "15.14", "timescaledb": "2.28.1"})
+    assert "Bij de laatste kopie: PostgreSQL 15.14 met TimescaleDB 2.28.1." in t
+    assert "CREATE EXTENSION timescaledb VERSION '2.28.1'" in t and "PostgreSQL 15." in t
+    t = sc.readme({"postgresql": "17.6", "timescaledb": None})
+    assert "PostgreSQL 17.6, zonder TimescaleDB" in t and "VERSION" not in t
+
+
+async def test_selfcheck_test_van_de_back_up(authed, tmp_path, monkeypatch):
+    from app.config import get_settings
+    monkeypatch.setattr(get_settings(), "backup_dir", tmp_path)
+    monkeypatch.setattr(sc, "disk", lambda p: {"path": str(p), "total": 100, "used": 10, "free": 90, "pct": 10.0})
+    agen, db = await _db()
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+
+    async def run():
+        v = await sc.run_selfcheck(db, offsite_on=False)
+        await db.commit()
+        return v["restore"]
+
+    # Nog nooit getest (de timer loopt pas op de 1e van de maand): onthouden sinds wanneer.
+    r = await run()
+    assert r["status"] is None and r["missing_since"]
+    assert (await run())["missing_since"] == r["missing_since"]
+
+    def result(days_ago: int, ok: str, why: str = "") -> str:
+        at = (now - timedelta(days=days_ago)).isoformat()
+        (tmp_path / sc.RESTORE_FILE).write_text(
+            f"at={at}\ndump=homepage-2026-10-01.dump\nok={ok}\nwhy={why}\nseconden=37\nalembic=0023\n"
+            "tabellen=alembic_version:1,check_results:52000,log_entries:0,services:42,users:1\n"
+            "timescaledb=2.17.2\npostgresql=16.15\n")
+        return at
+
+    good = result(30, "1")
+    r = await run()
+    assert r == {"at": good, "dump": "homepage-2026-10-01.dump", "status": "ok", "why": None, "seconds": 37,
+                 "alembic": "0023", "timescaledb": "2.17.2", "postgresql": "16.15", "last_ok": good,
+                 "tables": {"alembic_version": 1, "check_results": 52000, "log_entries": 0, "services": 42, "users": 1}}
+    assert "terugzetten mislukt" not in (await authed.get("/api/health/summary")).json()["problems"]
+
+    # Mislukt: één melding per test, ook als de zelfcontrole nog eens loopt.
+    bad = result(1, "0", 'pg_restore: COPY failed for table "users": ERROR:  kapot')
+    r = await run()
+    await run()
+    assert r["status"] == "fout" and r["at"] == bad and r["last_ok"] == good and "COPY failed" in r["why"]
+    titles = await _titles(db)
+    assert titles.count("Back-up van de homepage lukt niet terug te zetten") == 1
+    note = (await db.execute(select(Notification).where(
+        Notification.title == "Back-up van de homepage lukt niet terug te zetten"))).scalar_one()
+    assert note.level == "err" and "COPY failed" in note.body and "systemctl start homepage-backuptest" in note.body
+    assert "terugzetten mislukt" in (await authed.get("/api/health/summary")).json()["problems"]
+    items = {i["key"]: i for i in (await authed.get("/api/attention")).json()["items"]}
+    assert items["selfrestore"]["level"] == "err"
+    # De volgende maand weer gelukt: op de tijdlijn, en geen punt meer.
+    result(0, "1")
+    assert (await run())["status"] == "ok"
+    events = [e.title for e in (await db.execute(select(Event))).scalars()]
+    assert "Terugzetten van de back-up van de homepage lukt weer" in events
+    assert "selfrestore" not in {i["key"] for i in (await authed.get("/api/attention")).json()["items"]}
+    # Een onleesbaar resultaat telt als nooit getest; wat er laatst lukte, blijft onthouden.
+    (tmp_path / sc.RESTORE_FILE).write_text("rommel\n")
+    r = await run()
+    assert r["status"] is None and r["last_ok"]
+
+
+async def test_sleutel_buiten_de_container_verouderd(authed, tmp_path, monkeypatch):
+    from app.config import get_settings
+    s = get_settings()
+    src, dst, key = tmp_path / "backups", tmp_path / "offsite", tmp_path / "secret.key"
+    src.mkdir()
+    dst.mkdir()
+    key.write_bytes(b"sleutel-1")
+    monkeypatch.setattr(s, "backup_dir", src)
+    monkeypatch.setattr(s, "offsite_dir", dst)
+    monkeypatch.setattr(s, "secret_key_file", key)
+    monkeypatch.setattr(sc, "disk", lambda p: {"path": str(p), "total": 100, "used": 10, "free": 90, "pct": 10.0})
+    (src / f"homepage-{date.today()}.dump").write_bytes(b"PGDMP" + b"x" * 100)
+    agen, db = await _db()
+
+    async def run():
+        v = await sc.run_selfcheck(db, offsite_on=True)
+        await db.commit()
+        return v["offsite"]
+
+    async def key_state():
+        return (await db.get(AppState, sc.KEY_STATE, populate_existing=True)).value
+
+    # De wachtzin zet de sha256 van secret.key naast de versleutelde sleutel.
+    assert (await authed.put("/api/health/offsite-key", json={"passphrase": "een lange wachtzin"})).status_code == 200
+    assert (await key_state())["sha256"] == hashlib.sha256(b"sleutel-1").hexdigest()
+    assert (await run())["key_stale"] is False
+
+    # secret.key verandert: de kopie daar is oud. Eén melding, een rood punt, en de veiligheidscheck zegt het ook.
+    key.write_bytes(b"sleutel-2")
+    assert (await run())["key_stale"] is True
+    await run()
+    assert (await _titles(db)).count("Sleutel in de kopie buiten de container is verouderd") == 1
+    assert "sleutel buiten de container verouderd" in (await authed.get("/api/health/summary")).json()["problems"]
+    items = {i["key"]: i for i in (await authed.get("/api/attention")).json()["items"]}
+    assert items["offsite-sleutel"]["level"] == "err" and "wachtzin opnieuw" in items["offsite-sleutel"]["text"]
+    checks = {c["key"]: c for c in (await authed.get("/api/security/check")).json()["checks"]}
+    assert checks["secret"]["level"] == "warn"
+
+    # Opnieuw ingesteld: weer in orde.
+    assert (await authed.put("/api/health/offsite-key", json={"passphrase": "een lange wachtzin"})).status_code == 200
+    assert (await run())["key_stale"] is False
+    assert "offsite-sleutel" not in {i["key"] for i in (await authed.get("/api/attention")).json()["items"]}
+
+    # Ingesteld met een vorige versie (zonder sha256): de sleutel van nu wordt aangenomen, een latere wijziging valt op.
+    st = await db.get(AppState, sc.KEY_STATE, populate_existing=True)
+    st.value = {k: x for k, x in st.value.items() if k != "sha256"}
+    await db.commit()
+    assert (await run())["key_stale"] is False
+    assert (await key_state())["sha256"] == hashlib.sha256(b"sleutel-2").hexdigest()
+    key.write_bytes(b"sleutel-3")
+    assert (await run())["key_stale"] is True
 
 
 async def test_settings_and_scan_endpoints(authed):

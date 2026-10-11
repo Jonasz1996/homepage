@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .config import get_settings
 from .health import domains as dom, scan as hw, security, selfcheck as sc, snapshots as snap
 from .integrations import REGISTRY
 from .integrations.zabbix import RED_FROM
@@ -381,11 +382,27 @@ async def homepage(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
                         "De nachtelijke kopie van de database ontbreekt.", fix))
     if (s.get("verified") or {}).get("ok") is False:
         out.append(item("selfverify", "err", "homepage", "De laatste back-up van het dashboard is onleesbaar",
-                        str((s.get("verified") or {}).get("error") or ""), fix))
+                        str((s.get("verified") or {}).get("why") or ""), fix))
+    out += _restore(s.get("restore") or {}, now, fix)
     off = s.get("offsite") or {}
     if off.get("enabled") and off.get("error"):
         out.append(item("offsite", "err", "homepage", "Kopie buiten de container mislukt", str(off["error"]), fix,
                         sig=off["error"]))
+    if off.get("enabled") and off.get("key_stale"):
+        out.append(item("offsite-sleutel", "err", "homepage", "De sleutel in de kopie buiten de container is verouderd",
+                        sc.KEY_STALE, fix))
+    if not (await hw.settings(db)).get("offsite"):
+        # Geen kopie buiten de container: een voorstel. Oranje als er ook nergens een kopie van secret.key is (dan zijn
+        # de geheimen in elke back-up onleesbaar als de container wegvalt), anders ter info.
+        level = "info" if (await security.check_secret_key(db))["level"] == "ok" else "warn"
+        out.append(item("offsite-voorstel", level, "homepage", "Back-up van het dashboard staat alleen in de container",
+                        "Valt de container of zijn node weg, dan zijn de back-ups en secret.key mee weg"
+                        + (", en zonder secret.key zijn de opgeslagen wachtwoorden en API-sleutels onleesbaar"
+                           if level == "warn" else "")
+                        + f". Koppel een NAS-share, PBS-opslag of USB-schijf op {get_settings().offsite_dir} en zet "
+                        "de kopie buiten de container aan, met een wachtzin voor de sleutel. Zit deze CT al in een "
+                        "back-up van PBS, dan staan de dumps en secret.key daar ook in en mag je dit negeren.", fix,
+                        sig=level))
     disk = sc.disk_alert(s)
     if disk:
         pct = max((d.get("pct") or 0 for d in s.get("disks") or []), default=0)
@@ -394,6 +411,28 @@ async def homepage(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
                         f"Boven {sc.DISK_WARN}% ruimt het dashboard zelf de oudste logregels op (de laatste 3 dagen "
                         "blijven). Helpt dat niet, ruim dan op of maak de schijf van de CT groter.", fix, sig=disk))
     return out
+
+
+def _restore(r: dict, now: datetime, fix: dict) -> list[dict]:
+    """De maandelijkse test van de back-up (terugzetten in een testdatabase): mislukt, overgeslagen, of al te lang
+    niet gelukt (de timer loopt niet, of de test was er nog nooit)."""
+    if r.get("status") == "fout":
+        return [item("selfrestore", "err", "homepage", "De back-up van het dashboard lukt niet terug te zetten",
+                     f"{r.get('dump') or 'De nieuwste dump'}: {r.get('why') or 'onbekende fout'}. Wat pg_restore "
+                     f"schreef, staat in backuptest.log bij de back-ups. Opnieuw proberen: {sc.RESTORE_RUN}.", fix,
+                     sig=r.get("at"), since=r.get("at"))]
+    since = r.get("last_ok") or r.get("missing_since")
+    days = (now - _aware(datetime.fromisoformat(since))).days if since else 0
+    if days > sc.RESTORE_STALE.days:
+        skipped = f"De laatste keer overgeslagen: {r.get('why')}. " if r.get("status") == "overgeslagen" else ""
+        return [item("selfrestore", "warn", "homepage",
+                     f"De back-up van het dashboard is al {_days(days)} niet op een testdatabase teruggezet",
+                     f"{skipped}Dat gebeurt elke 1e van de maand om 04:15 (homepage-backuptest.timer). Op de "
+                     f"container: {sc.RESTORE_RUN}", fix, sig=since)]
+    if r.get("status") == "overgeslagen":
+        return [item("selfrestore", "warn", "homepage", "Test van de back-up van het dashboard overgeslagen",
+                     str(r.get("why") or ""), fix, sig=r.get("at"))]
+    return []
 
 
 async def clusters(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:

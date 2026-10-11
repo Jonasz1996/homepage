@@ -314,11 +314,17 @@ def brief(value: dict, depth: int = 0) -> dict:
 
 
 def _selfcheck(v: dict) -> dict:
-    off, size = v.get("offsite") or {}, v.get("db") or {}
+    off, size, r = v.get("offsite") or {}, v.get("db") or {}, v.get("restore") or {}
+    restore = {k: r.get(k) for k in ("status", "at", "dump", "seconds", "alembic", "timescaledb", "postgresql",
+                                     "last_ok", "missing_since")}
+    if isinstance(r.get("why"), str):
+        restore["why"] = logring.cut(r["why"], 200, _KNOWN.get())
+    restore["tabellen"] = len(r.get("tables") or {})
     return {"checked_at": v.get("checked_at"), "stale": v.get("stale"), "backup_dir": v.get("backup_dir"),
-            "backups": (v.get("backups") or [])[:3], "verified": v.get("verified"), "disks": v.get("disks"),
-            "db": {"total": size.get("total"), "tables": (size.get("tables") or [])[:5]},
-            "offsite": {k: off.get(k) for k in ("enabled", "dir", "at", "count", "error")}, "rollup": v.get("rollup"),
+            "backups": (v.get("backups") or [])[:3], "verified": v.get("verified"), "restore": restore,
+            "disks": v.get("disks"), "db": {"total": size.get("total"), "tables": (size.get("tables") or [])[:5]},
+            "offsite": {k: off.get(k) for k in ("enabled", "dir", "at", "count", "error", "key_stale")},
+            "rollup": v.get("rollup"),
             "alerts": v.get("alerts")}
 
 

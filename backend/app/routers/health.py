@@ -1,6 +1,7 @@
 """Gezondheid: schijven en temperaturen, vergeten snapshots, domeinen en de homepage zelf."""
 
 import asyncio
+import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -49,8 +50,13 @@ def _summary(hardware: dict, snaps: dict, domains: dict, selfc: dict, worker: di
         problems.append("geen recente back-up")
     if (selfc.get("verified") or {}).get("ok") is False:
         problems.append("back-up onleesbaar")
-    if (selfc.get("offsite") or {}).get("enabled") and (selfc.get("offsite") or {}).get("error"):
+    if (selfc.get("restore") or {}).get("status") == "fout":
+        problems.append("terugzetten mislukt")
+    off = selfc.get("offsite") or {}
+    if off.get("enabled") and off.get("error"):
         problems.append("kopie buiten de container")
+    if off.get("enabled") and off.get("key_stale"):
+        problems.append("sleutel buiten de container verouderd")
     disk = sc.disk_alert(selfc)
     if disk == "err":
         problems.append("schijf bijna vol")
@@ -211,13 +217,15 @@ class Passphrase(BaseModel):
 @router.put("/offsite-key")
 async def offsite_key(body: Passphrase, request: Request, user: User = Depends(recent_auth),
                       db: AsyncSession = Depends(get_db)):
-    """secret.key versleutelen met een wachtzin, voor de kopie buiten de container. De wachtzin bewaren we niet."""
+    """secret.key versleutelen met een wachtzin, voor de kopie buiten de container. De wachtzin bewaren we niet. De
+    sha256 van secret.key komt ernaast: verandert secret.key later, dan merkt de zelfcontrole dat de kopie oud is."""
     try:
         secret = get_settings().secret_key_file.read_bytes()
     except OSError as e:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "secret.key niet leesbaar") from e
     blob = await asyncio.to_thread(sc.encrypt_key, secret, body.passphrase)
-    value = {"blob": blob, "at": datetime.now(timezone.utc).replace(microsecond=0).isoformat()}
+    value = {"blob": blob, "at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+             "sha256": hashlib.sha256(secret).hexdigest()}
     st = await db.get(AppState, sc.KEY_STATE)
     if st:
         st.value = value
