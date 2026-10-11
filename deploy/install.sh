@@ -125,6 +125,82 @@ bij_fout() {
   exit "$rc"
 }
 
+# Een installatie van voor HOMEPAGE_LAN_OPEN (homepage.env zonder die regel): het vorige script schreef altijd een
+# HOMEPAGE_NPM_IP weg, ook de standaard als er geen opgegeven was. Dat IP is dus niet nagekeken en het LAN blijft open
+# (HOMEPAGE_LAN_OPEN=1), anders sloot een verkeerd IP je bij deze update buiten. Dichtzetten (0) doe je zelf, als het
+# dashboard via NPM werkt. Zet BIJGEWERKT; de regel komt pas in homepage.env als de uitleg in $CONF_DIR/nginx staat
+# (op het einde van de stap nginx): mislukt de update daarvoor, dan ziet de volgende poging nog altijd een installatie
+# van daarvoor.
+lan_bijgewerkt() {
+  BIJGEWERKT=""
+  grep -q '^HOMEPAGE_LAN_OPEN=' "$CONF_DIR/homepage.env" || BIJGEWERKT=1
+}
+
+# Wat nginx het LAN toelaat (__LAN_DICHT__ in deploy/nginx-map.conf), met HOMEPAGE_LAN_OPEN uit homepage.env (al
+# ingelezen). Zet LAN_OPEN, LAN_DICHT, en voor /etc/homepage/nginx LAN_STAAT en LAN_REDEN.
+lan_keuze() {
+  local vorige
+  LAN_OPEN="" LAN_DICHT=1 LAN_STAAT=dicht LAN_REDEN=""
+  case "${HOMEPAGE_LAN_OPEN:-0}" in 1|true|yes|ja|aan) LAN_OPEN=1 ;; esac
+  # Was het IP van NPM een gok, of is het niet nagekeken (BIJGEWERKT): altijd open.
+  [ -z "$NPM_GOK$BIJGEWERKT" ] || LAN_OPEN=1
+  [ -n "$LAN_OPEN" ] || return 0
+  LAN_DICHT=0 LAN_STAAT=open LAN_REDEN=lan-open
+  if [ -n "$NPM_GOK" ]; then LAN_REDEN=npm-onbekend
+  elif [ -n "$BIJGEWERKT" ]; then LAN_REDEN=bijgewerkt
+  else
+    # Zette dit script het LAN eerder zelf open, dan blijft die reden staan tot jij het dichtzet.
+    vorige=$(sed -n 's/^reden=//p' "$CONF_DIR/nginx" 2>/dev/null || true)
+    case "$vorige" in npm-onbekend|bijgewerkt) LAN_REDEN=$vorige ;; esac
+  fi
+}
+
+# Wat voor nginx ook LAN is (__LAN_NETS__ in deploy/nginx-map.conf), naast de privé-adressen: het netwerk van elk
+# globaal IPv6-adres van de container (toestellen op hetzelfde LAN met een publiek IPv6-adres) en HOMEPAGE_LAN_NETS
+# uit homepage.env (al ingelezen). Wat geen netwerk is of de container zelf (127.0.0.0/8, ::1) bevat, slaat het over
+# met een waarschuwing; wat al privé is, telt al. Zet LAN_NETS (de netwerken) en LAN_GEO (de regels voor nginx).
+lan_netwerken() {
+  local eigen uit regel
+  eigen=$(ip -6 -o addr show scope global 2>/dev/null | awk '{print $4}' || true)
+  uit=$(python3 -I - "${HOMEPAGE_LAN_NETS:-}" "$eigen" <<'PY'
+import ipaddress
+import re
+import sys
+
+ZELF = [ipaddress.ip_network(n) for n in ("127.0.0.0/8", "::1/128")]
+PRIVE = [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
+                                           "fc00::/7", "fe80::/10")]
+nets = []
+for bron, waarde in ([("container", a) for a in sys.argv[2].split()]
+                     + [("HOMEPAGE_LAN_NETS", a) for a in re.split(r"[\s,]+", sys.argv[1]) if a]):
+    try:
+        # Van de container: het netwerk van het adres. Zelf opgegeven: precies een netwerk (een tikfout als
+        # 192.168.1.0/2 zou anders een kwart van het internet zijn).
+        net = ipaddress.ip_interface(waarde).network if bron == "container" else ipaddress.ip_network(waarde)
+        # Alleen cijfers, punten en dubbele punten (geen %zone): het komt zo in de configuratie van nginx.
+        if not re.fullmatch(r"[0-9a-f.:]+/[0-9]+", str(net)):
+            raise ValueError
+    except ValueError:
+        print(f"{bron}: {waarde} is geen netwerk zoals 2a02:1810:abcd:1200::/56 of 198.51.100.0/24, overgeslagen.")
+        continue
+    if any(net.overlaps(z) for z in ZELF):
+        print(f"{bron}: {waarde} bevat de container zelf (127.0.0.0/8 of ::1), overgeslagen.")
+        continue
+    if net not in nets and not any(net.version == p.version and net.subnet_of(p) for p in PRIVE):
+        nets.append(net)
+for net in nets:
+    print("net", net)
+PY
+)
+  LAN_NETS="" LAN_GEO=""
+  while IFS= read -r regel; do
+    case "$regel" in
+      "net "*) LAN_NETS+="${LAN_NETS:+ }${regel#net }" LAN_GEO+="${regel#net } lan; " ;;
+      ?*) warn "$regel" ;;
+    esac
+  done <<< "$uit"
+}
+
 [ "$(id -u)" -eq 0 ] || { echo "Voer uit als root."; exit 1; }
 [ -d "$APP_DIR/backend" ] || { echo "Verwacht de repository in $APP_DIR."; exit 1; }
 # shellcheck source=/dev/null
@@ -326,14 +402,14 @@ done
 say "nginx"
 # Alleen NPM en de container zelf, van het LAN alleen push-monitors, webhooks en /api/healthz (deploy/nginx-map.conf).
 # HOMEPAGE_LAN_OPEN=1 in homepage.env (hierboven ingelezen): het hele LAN mag alles, om op http://IP te testen.
-# Was het IP van NPM een gok: altijd open.
-LAN_OPEN="" LAN_DICHT=1
-case "${HOMEPAGE_LAN_OPEN:-0}" in 1|true|yes|ja|aan) LAN_OPEN=1 ;; esac
-[ -z "$NPM_GOK" ] || LAN_OPEN=1
-[ -z "$LAN_OPEN" ] || LAN_DICHT=0
+# Was het IP van NPM een gok of niet nagekeken: altijd open (lan_bijgewerkt, lan_keuze).
+lan_bijgewerkt
+lan_keuze
+lan_netwerken
+[ -z "$LAN_NETS" ] || echo "Ook LAN voor nginx: $LAN_NETS"
 NPM_IP_RE="${NPM_IP//./\\\\.}"
-sed "s/__NPM_IP_RE__/$NPM_IP_RE/; s/__LAN_DICHT__/$LAN_DICHT/" "$APP_DIR/deploy/nginx-map.conf" \
-  > /etc/nginx/conf.d/homepage-map.conf
+sed "s/__NPM_IP_RE__/$NPM_IP_RE/; s/__LAN_DICHT__/$LAN_DICHT/; s#__LAN_NETS__#$LAN_GEO#" \
+  "$APP_DIR/deploy/nginx-map.conf" > /etc/nginx/conf.d/homepage-map.conf
 install -D -m 644 "$APP_DIR/deploy/nginx-headers.conf" /etc/nginx/snippets/homepage-headers.conf
 sed "s/__NPM_IP__/$NPM_IP/" "$APP_DIR/deploy/nginx.conf" > /etc/nginx/sites-available/homepage
 # Zonder IPv6 in de container kan nginx niet op [::] luisteren.
@@ -344,12 +420,10 @@ nginx -t
 systemctl enable nginx
 systemctl reload nginx || systemctl restart nginx
 # Wat nginx nu toelaat, voor de instellingen in het dashboard (rij "Dashboard alleen via NPM").
-LAN_STAAT=dicht LAN_REDEN=""
-if [ -n "$NPM_GOK" ]; then LAN_STAAT=open LAN_REDEN=npm-onbekend
-elif [ -n "$LAN_OPEN" ]; then LAN_STAAT=open LAN_REDEN=lan-open
-fi
-printf 'lan=%s\nreden=%s\nnpm=%s\ndatum=%s\n' "$LAN_STAAT" "$LAN_REDEN" "$NPM_IP" "$(date -Iseconds)" > "$CONF_DIR/nginx"
+printf 'lan=%s\nreden=%s\nnpm=%s\nnetten=%s\ndatum=%s\n' "$LAN_STAAT" "$LAN_REDEN" "$NPM_IP" "$LAN_NETS" \
+  "$(date -Iseconds)" > "$CONF_DIR/nginx"
 chgrp homepage "$CONF_DIR/nginx" && chmod 640 "$CONF_DIR/nginx"
+[ -z "$BIJGEWERKT" ] || echo "HOMEPAGE_LAN_OPEN=1" >> "$CONF_DIR/homepage.env"
 
 say "Services"
 # Een update terugdraaien: vorige versie plus de kopie van de database van vlak voor die update.
@@ -394,14 +468,20 @@ EOF
 else
   cat <<EOF
 Rechtstreeks op http://$IP werkt alleen vanuit de container zelf: nginx laat alleen NPM ($NPM_IP) binnen, en van
-het LAN alleen push-monitors, webhooks en /api/healthz (Zabbix). Eerst testen zonder NPM: zet HOMEPAGE_LAN_OPEN=1
-in $CONF_DIR/homepage.env en voer dit script opnieuw uit: bash $APP_DIR/deploy/install.sh
+het LAN alleen push-monitors, webhooks en /api/healthz (Zabbix). Krijg je ook via NPM een 403, dan klopt
+HOMEPAGE_NPM_IP in $CONF_DIR/homepage.env niet: zet het juiste IP en voer dit script opnieuw uit. Eerst testen
+zonder NPM: zet HOMEPAGE_LAN_OPEN=1 in $CONF_DIR/homepage.env en voer dit script opnieuw uit:
+bash $APP_DIR/deploy/install.sh
 EOF
 fi
 if [ -n "$NPM_GOK" ]; then
   warn "Het IP van Nginx Proxy Manager was niet opgegeven: de standaard $NPM_IP staat nu in $CONF_DIR/homepage.env\
  (HOMEPAGE_NPM_IP). Daarom blijft het LAN open (HOMEPAGE_LAN_OPEN=1), zodat een verkeerd IP je niet buitensluit.\
  Kijk HOMEPAGE_NPM_IP na en zet HOMEPAGE_LAN_OPEN=0 zodra het dashboard via NPM werkt."
+elif [ -n "$BIJGEWERKT" ]; then
+  warn "Bijgewerkt van een versie zonder deze regel: het LAN blijft open (HOMEPAGE_LAN_OPEN=1 staat nu in\
+ $CONF_DIR/homepage.env), want HOMEPAGE_NPM_IP=$NPM_IP is nog niet nagekeken. Open het dashboard via zijn naam in\
+ NPM; werkt dat, zet dan HOMEPAGE_LAN_OPEN=0 en voer dit script opnieuw uit."
 fi
 cat <<EOF
 Bijwerken: hetzelfde bootstrap-commando opnieuw uitvoeren.

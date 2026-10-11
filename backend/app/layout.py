@@ -77,8 +77,10 @@ async def record_revision(db: AsyncSession, user: User | None, summary: str) -> 
 async def restore_snapshot(db: AsyncSession, snap: dict) -> list[str]:
     """Zet de layout terug zonder services te verwijderen die blijven bestaan,
     zodat hun monitoring-historiek bewaard blijft. Geeft de tegels terug waarvan de check daardoor stil valt
-    (gepauzeerd, verwijderd, meldingen uit of onder een ouder die down of in onderhoud is)."""
-    from .monitoring.engine import active, identity, parent_silencing, reset_state, restarts, silencing
+    (gepauzeerd, verwijderd, meldingen uit, onder een ouder die down of in onderhoud is, of terug in een groep met
+    gepland onderhoud, nu of later; zonder eigen check: wat eronder hangt)."""
+    from .monitoring.engine import (active, group_silencing, identity, parent_silencing, reset_state, restarts,
+                                    silencing)
     silenced = []
     changed = []
     page_ids, group_ids, service_ids = set(), set(), set()
@@ -95,14 +97,16 @@ async def restore_snapshot(db: AsyncSession, snap: dict) -> list[str]:
     parents = {}
     # Een API die intussen verwijderd is: de tegel wordt weer een gewone snelkoppeling.
     apis = set((await db.execute(select(ApiConnection.id))).scalars())
-    # Een nieuwe ouder die nu down of in onderhoud is, legt de check ook stil. Eerst, met de afhankelijkheden van nu:
-    # hieronder staan ze even allemaal op leeg.
-    olds = [s for p in snap["pages"] for g in p["groups"] for s in g["services"]]
-    ids = {s["id"] for s in olds}
+    # Een nieuwe ouder die nu down of in onderhoud is, legt de check ook stil, net als een andere groep met gepland
+    # onderhoud. Eerst, met de afhankelijkheden en groepen van nu: hieronder staan de afhankelijkheden even
+    # allemaal op leeg.
+    olds = [(g["id"], s) for p in snap["pages"] for g in p["groups"] for s in g["services"]]
+    ids = {s["id"] for _, s in olds}
     quiet = set()
-    for s in olds:
+    for gid, s in olds:
         now, parent = await db.get(Service, s["id"]), s.get("parent_id")
-        if now is not None and parent in ids and await parent_silencing(db, now, s.get("check"), parent):
+        if now is not None and ((parent in ids and await parent_silencing(db, now, s.get("check"), parent))
+                                or await group_silencing(db, now, s.get("check"), gid)):
             quiet.add(now.id)
     for p in snap["pages"]:
         for g in p["groups"]:

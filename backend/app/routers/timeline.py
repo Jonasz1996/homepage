@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
@@ -19,22 +19,29 @@ from .integrations import clients
 router = APIRouter(prefix="/api", tags=["timeline"])
 log = logging.getLogger("homepage.api")
 
-# Beheeracties uit de auditlog die op de tijdlijn horen (logins en dergelijke staan in de auditlog zelf).
+# Beheeracties uit de auditlog die op de tijdlijn horen (logins en dergelijke staan in de auditlog zelf). Wat een
+# melding geeft, staat via die melding al op de tijdlijn: Authentik koppelen, het wachtwoord wijzigen en wat
+# confirm_silence bevestigt (onderhoud, een logregel verwijderen, ...). Zonder melding (onderhoud stoppen of inkorten,
+# een regel die uit stond verwijderen) zetten die routes zelf een gebeurtenis op de tijdlijn.
 AUDIT_TITLES = {
-    "maintenance": lambda d: f"Onderhoud {d.get('service') or d.get('group') or ''}: "
-                             + (f"{d.get('minutes')} min" if d.get("minutes") else "gestopt"),
     "syslog_rollout": lambda d: f"rsyslog uitgerold op {d.get('host')}",
     "oidc_settings_changed": lambda d: "Authentik-instellingen gewijzigd",
-    # (Koppelen geeft zelf een melding, en staat zo al op de tijdlijn.)
     "oidc_unlinked": lambda d: "Authentik-account ontkoppeld",
-    "password_changed": lambda d: "Wachtwoord gewijzigd",
     "service_secrets_changed": lambda d: f"Geheimen van {d.get('service')} gewijzigd",
     "ssh_host_added": lambda d: f"SSH-host {d.get('name')} toegevoegd",
     "ssh_host_deleted": lambda d: f"SSH-host {d.get('name')} verwijderd",
     "log_rule_added": lambda d: f"Logregel {d.get('name')} toegevoegd",
-    "log_rule_deleted": lambda d: f"Logregel {d.get('name')} verwijderd",
     "integration_action_failed": lambda d: f"{d.get('service')}: {d.get('op')} mislukt",
 }
+# Tot de update met migratie 0024 stonden deze acties alleen in de auditlog: die oude regels (van vóór het moment in
+# app_state LEGACY_KEY) blijven op de tijdlijn. Wat daarna kwam, staat er via de melding of gebeurtenis van de route.
+LEGACY_TITLES = {
+    "maintenance": lambda d: f"Onderhoud {d.get('service') or d.get('group') or ''}: "
+                             + (f"{d.get('minutes')} min" if d.get("minutes") else "gestopt"),
+    "password_changed": lambda d: "Wachtwoord gewijzigd",
+    "log_rule_deleted": lambda d: f"Logregel {d.get('name')} verwijderd",
+}
+LEGACY_KEY = "tijdlijn_audit_tot"
 KINDS = ("storing", "herstart", "backup", "updates", "wijziging", "actie", "capaciteit", "netwerk", "toegang", "log", "cron",
          "gezondheid", "melding")
 
@@ -70,14 +77,18 @@ async def timeline(before: datetime | None = None, kind: list[str] | None = Quer
         for rid, ts, summary in (await db.execute(q)).all():
             items.append({"id": f"r{rid}", "ts": _aware(ts), "kind": "wijziging", "level": "info", "title": summary,
                           "body": None, "service_id": None, "data": {"revision": rid}})
-        q = select(AuditLog).where(AuditLog.action.in_(AUDIT_TITLES)).order_by(AuditLog.id.desc()).limit(limit)
+        which = AuditLog.action.in_(AUDIT_TITLES)
+        if (legacy := await db.get(AppState, LEGACY_KEY)) and (legacy.value or {}).get("tot"):
+            which = or_(which, and_(AuditLog.action.in_(LEGACY_TITLES),
+                                    AuditLog.ts < _aware(datetime.fromisoformat(legacy.value["tot"]))))
+        q = select(AuditLog).where(which).order_by(AuditLog.id.desc()).limit(limit)
         if before:
             q = q.where(AuditLog.ts < before)
         for a in (await db.execute(q)).scalars():
             items.append({"id": f"a{a.id}", "ts": _aware(a.ts), "kind": "wijziging",
                           "level": "err" if a.action.endswith("failed") else "info",
-                          "title": AUDIT_TITLES[a.action](a.detail or {}), "body": None, "service_id": None,
-                          "data": {"ip": a.ip}})
+                          "title": (AUDIT_TITLES.get(a.action) or LEGACY_TITLES[a.action])(a.detail or {}),
+                          "body": None, "service_id": None, "data": {"ip": a.ip}})
 
     items.sort(key=lambda i: i["ts"], reverse=True)
     items = items[:limit]

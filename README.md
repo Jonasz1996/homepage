@@ -14,7 +14,8 @@ Fase 1 en 2 van het [stappenplan](https://claude.ai/code/artifact/fe2b226c-d5ef-
   privévenster, een andere browser, gewiste cookies of de iPhone-app op je beginscherm (tot die één keer inlogde)
   tellen als nieuw. Je wachtwoord wijzigen of `secret.key` vervangen maakt alle andere toestellen weer onbekend;
   afmelden niet. Een herstart van `homepage-api` wist alle slots (de tellers staan in het geheugen). Hoogstens 8
-  wachtwoordcontroles wachten tegelijk; daarboven antwoordt het dashboard "Even te druk, probeer zo opnieuw"
+  wachtwoordcontroles wachten tegelijk, plus 4 voor bekende toestellen; daarboven antwoordt het dashboard "Even te
+  druk, probeer zo opnieuw"
 - pagina's, groepen en services, aanpasbaar in een edit mode met slepen
 - import van je homepage.dev `services.yaml` (widget-wachtwoorden en API-sleutels worden versleuteld bewaard)
 - export naar YAML, en een versiegeschiedenis van de layout waarmee je elke wijziging terugzet
@@ -353,8 +354,10 @@ Later, deel 3 (Authentik en gsm):
   prune-job, anders blijft de kopie groeien
 - **gepland onderhoud**: in het mini dashboard van een service (of `Ctrl+K` → "gepland onderhoud" voor groepen)
   onderhoud vooraf plannen: eenmalig, elke dag of op vaste weekdagen (bv. elke zondag 3:00 tot 4:00 tijdens de
-  back-up). Een herhalend venster duurt hoogstens 12 uur per keer. Tijdens het venster geen meldingen en telt de
-  uptime het niet mee; het begin komt op de tijdlijn
+  back-up). Een herhalend venster duurt hoogstens 12 uur per keer; een ouder venster dat langer bewaard was, loopt
+  ook maar 12 uur en kan gewoon uit. Uitzetten of verwijderen stopt alleen het onderhoud dat het venster zelf zette;
+  onderhoud dat je met de hand verlengde, blijft staan. Tijdens het venster geen meldingen en telt de uptime het niet
+  mee; het begin komt op de tijdlijn
 - **incidentnotities**: bij een storing op de tijdlijn of in het mini dashboard noteer je de oorzaak en de oplossing.
   Gaat dezelfde service later weer down, dan toont het mini dashboard die notities meteen bovenaan
 - **overal zoeken** met `Ctrl+K`: naast tegels en acties ook notities, cronjobs, SSH-hosts, apparaten,
@@ -545,8 +548,11 @@ Monitoring**:
   een melding, zodat wie je sessie steelt niet stilletjes de bewaking uitzet. Hetzelfde geldt voor onderhoud
   beginnen of verlengen, gepland onderhoud aanzetten of verschuiven, een cronjob dempen, een webhook uitzetten,
   vernieuwen of weghalen, een logregel uitzetten, lager zetten of weghalen, een beveiligingspunt in **!** negeren,
-  de meldingen over een certificaat uitzetten en een check onder een ouder hangen die down of in onderhoud is. Een
-  cronjob niet meer bewaken geeft alleen een melding. Een gepauzeerde check staat ter info in **!**, net als
+  de meldingen over een certificaat uitzetten, een check onder een ouder hangen die down of in onderhoud is, of een
+  tegel naar een groep slepen of verplaatsen met gepland onderhoud, ook als dat pas later loopt (ook via een oude
+  versie terugzetten). Een tegel zonder lopende check telt ook als er een tegel met een lopende check onder hangt:
+  onderhoud en een ouder die down is, gelden voor alles eronder. Een cronjob niet meer bewaken geeft alleen een
+  melding. Een gepauzeerde check staat ter info in **!**, net als
   onderhoud dat met de hand gezet is en meer dan een dag loopt of voor veel services tegelijk geldt
 - **uptime** over 24 u, 7 d, 30 d en 1 jaar in het mini dashboard; op de tegel als hij onder 99,9 % zakt
 - **afhankelijkheden**: hangt een tegel af van een andere (CT op een node, container op Portainer), dan krijg je één
@@ -676,13 +682,19 @@ Open het dashboard via zijn naam in NPM. Via NPM met HTTPS is de sessiecookie au
 (`HOMEPAGE_COOKIE_SECURE=auto`). Geef bij de eerste installatie het IP van NPM mee:
 `NPM_IP=192.168.0.245 bash <(curl ...)`; het komt in `/etc/homepage/homepage.env` (`HOMEPAGE_NPM_IP`).
 
-nginx laat zelf alleen dit binnen: van NPM en van de container zelf alles, van je LAN (privé-adressen) alleen
-`/api/push/`, `/api/hooks/` en `/api/healthz`, en de rest krijgt een 403 met uitleg. Zo kan niemand op het LAN NPM en
-Cloudflare omzeilen, en gaat je wachtwoord nooit onversleuteld over het netwerk. In **! → instellingen** staat dat
-als *Dashboard alleen via NPM*. Eerst testen op `http://<IP>` voor er een host in NPM is: zet `HOMEPAGE_LAN_OPEN=1`
-in `/etc/homepage/homepage.env`, voer `bash /opt/homepage/deploy/install.sh` uit, en zet het daarna terug op 0. Gaf
-je bij de eerste installatie geen `NPM_IP` mee, dan neemt het script 192.168.0.245 en laat het het LAN open tot jij
-`HOMEPAGE_LAN_OPEN=0` zet. Krijg je ook via NPM een 403, dan klopt `HOMEPAGE_NPM_IP` niet: zet het juiste IP en
+nginx laat zelf alleen dit binnen: van NPM en van de container zelf alles, van je LAN alleen `/api/push/`,
+`/api/hooks/` en `/api/healthz`, en de rest krijgt een 403 met uitleg. LAN zijn de privé-adressen, het IPv6-netwerk
+van de container en wat je in `HOMEPAGE_LAN_NETS` zet, bv. je IPv6-voorvoegsel voor toestellen met een publiek
+IPv6-adres in een ander VLAN: `HOMEPAGE_LAN_NETS=2a02:1810:abcd:1200::/56` (meer netwerken: gescheiden door spaties,
+tussen aanhalingstekens). Zo kan niemand op het LAN NPM en Cloudflare omzeilen, en gaat je wachtwoord niet meer
+onversleuteld over het LAN tussen je toestel en het dashboard. Alleen tussen NPM en de container is het nog gewone
+http: zet ze in hetzelfde VLAN als dat voor jou telt. In **! → instellingen** staat dat als *Dashboard alleen via
+NPM*. Eerst testen op `http://<IP>` voor er een host in NPM is: zet `HOMEPAGE_LAN_OPEN=1` in
+`/etc/homepage/homepage.env`, voer `bash /opt/homepage/deploy/install.sh` uit, en zet het daarna terug op 0. Gaf je
+bij de eerste installatie geen `NPM_IP` mee, dan neemt het script 192.168.0.245 en laat het het LAN open tot jij
+`HOMEPAGE_LAN_OPEN=0` zet. Een update van een installatie van voor deze regel laat het LAN ook open, want het IP van
+NPM is dan nooit nagekeken: open het dashboard via zijn naam in NPM, en werkt dat, zet dan `HOMEPAGE_LAN_OPEN=0` en
+voer `install.sh` opnieuw uit. Krijg je ook via NPM een 403, dan klopt `HOMEPAGE_NPM_IP` niet: zet het juiste IP en
 voer `install.sh` opnieuw uit in de container (`pct enter <CTID>`). Wat install.sh koos, staat in
 `/etc/homepage/nginx`.
 

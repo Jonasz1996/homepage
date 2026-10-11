@@ -11,8 +11,10 @@
   let items = $state([])
   let error = $state('')
   let form = $state(null)
-  // Herhalend hoogstens 12 u per keer (elke dag 24 u is altijd onderhoud); eenmalig mag langer.
+  // Herhalend hoogstens 12 u per keer (elke dag 24 u is altijd onderhoud); eenmalig mag langer. Een ouder venster dat
+  // nog langer bewaard is, loopt ook maar zo lang: de editor en aan/uit sturen dan 12 u, en dat is niet anders plannen.
   const REPEAT_MAX = 720
+  const runMinutes = (w) => (w.repeat === 'once' ? w.minutes : Math.min(w.minutes, REPEAT_MAX))
   $effect(() => {
     if (form && form.repeat !== 'once' && form.minutes > REPEAT_MAX) form.minutes = REPEAT_MAX
   })
@@ -62,7 +64,7 @@
   async function toggle(w) {
     try {
       await withReauth(() => api(`/maintenance/windows/${w.id}`, { method: 'PUT', body: { name: w.name, repeat: w.repeat, start: w.start,
-        minutes: w.minutes, weekdays: w.weekdays, enabled: !w.enabled, service_id: w.service_id, group_id: w.group_id } }))
+        minutes: runMinutes(w), weekdays: w.weekdays, enabled: !w.enabled, service_id: w.service_id, group_id: w.group_id } }))
       await load()
     } catch (e) { error = e.message }
   }

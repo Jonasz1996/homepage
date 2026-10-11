@@ -165,7 +165,9 @@ def subject_is_name(claims: dict, name_claim: str = "preferred_username") -> boo
     """Is de sub gewoon de gebruikersnaam of het e-mailadres? (Subject mode bij de provider in Authentik.) Die kunnen
     veranderen of later bij iemand anders terechtkomen: dan is de sub geen vaste ID."""
     sub = str(claims.get("sub") or "").strip().lower()
-    names = {str(claims.get(k) or "").strip().lower() for k in ("preferred_username", "email", "upn", name_claim)}
+    # Niet met de sub zelf vergelijken, ook niet als "naam tonen uit claim" op sub staat.
+    names = {str(claims.get(k) or "").strip().lower()
+             for k in {"preferred_username", "email", "upn", name_claim} - {"sub"}}
     return bool(sub) and sub in names
 
 

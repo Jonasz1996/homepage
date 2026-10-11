@@ -31,6 +31,8 @@ from ..security import (
     new_token,
     password_slot,
     read_device,
+    from_session,
+    session_device,
     token_id,
     verify_password_async,
 )
@@ -111,16 +113,28 @@ def _closed_for_new() -> HTTPException:
                          "Op een toestel waarop je al eens inlogde, lukt het wel.")
 
 
+def _stale_device() -> HTTPException:
+    return HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
+                         "Je wachtwoord is gewijzigd sinds dit toestel inlogde: het telt nu als nieuw toestel en moet "
+                         "even wachten. Op het toestel waarop je het wachtwoord wijzigde, lukt het wel.")
+
+
 def _busy() -> HTTPException:
     # Telt niet als mislukte poging: er is niets gecontroleerd.
     return HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Even te druk, probeer zo opnieuw")
 
 
-def _set_device(request: Request, response: Response, user: User) -> None:
+def _set_device(request: Request, response: Response, user: User, fallback: str | None = None,
+                login: bool = False) -> None:
     """Dit toestel onthouden, een jaar lang (bij elke login opnieuw): hier geldt de limiet per gebruikersnaam niet.
-    Lax: ook de terugkeer van Authentik (een navigatie van een ander domein) stuurt het mee."""
+    Lax: ook de terugkeer van Authentik (een navigatie van een ander domein) stuurt het mee. fallback: het toestel-ID
+    als er nog geen geldig cookie is (anders een nieuw). login: net met 2FA ingelogd (of 2FA aangezet); een ID dat van
+    de sessie kwam, wordt dan een eigen: wie die sessie stal, kreeg hetzelfde ID en kon zo de teller van dit toestel
+    vullen."""
     dev = read_device(request.cookies.get(DEVICE_COOKIE))
-    keep = dev["d"] if device_ok(dev, user) else None
+    keep = dev["d"] if device_ok(dev, user) else fallback
+    if login and from_session(keep):
+        keep = None
     response.set_cookie(
         DEVICE_COOKIE, device_token(user.id, user.username, user.password_hash, keep), max_age=DEVICE_DAYS * 86400,
         httponly=True, secure=secure_cookie(request), samesite="lax", path="/api/auth",
@@ -152,7 +166,7 @@ async def _start_session(db: AsyncSession, request: Request, response: Response,
         secure=secure_cookie(request), samesite="strict", path="/",
     )
     if mfa_ok:
-        _set_device(request, response, user)
+        _set_device(request, response, user, login=True)
 
 
 async def _user_count(db: AsyncSession) -> int:
@@ -169,7 +183,7 @@ async def state(request: Request, response: Response, db: AsyncSession = Depends
         # dat nooit opnieuw hoeft in te loggen (de sessie glijdt mee), houdt zo zijn cookie.
         dev = read_device(request.cookies.get(DEVICE_COOKIE))
         if not device_ok(dev, user) or time.time() - dev["t"] > DEVICE_REFRESH:
-            _set_device(request, response, user)
+            _set_device(request, response, user, fallback=session_device(sess.id))
     return {
         "setup_required": await _user_count(db) == 0,
         "user": {"username": user.username, "totp_enabled": user.totp_enabled} if user else None,
@@ -213,7 +227,7 @@ async def totp_enroll(sess: Session = Depends(current_session), db: AsyncSession
 
 
 @router.post("/totp/enable")
-async def totp_enable(data: CodeIn, request: Request, sess: Session = Depends(current_session),
+async def totp_enable(data: CodeIn, request: Request, response: Response, sess: Session = Depends(current_session),
                       db: AsyncSession = Depends(get_db)):
     user = sess.user
     if user.totp_enabled:
@@ -226,6 +240,8 @@ async def totp_enable(data: CodeIn, request: Request, sess: Session = Depends(cu
     await audit(db, request, user, "totp_enabled")
     notify(db, "2FA ingeschakeld", f"Voor gebruiker {user.username}.", level="ok", source="auth")
     await db.commit()
+    # Het toestel waarop je 2FA aanzette, is meteen bekend, met een eigen ID (niet dat van de sessie, via /state).
+    _set_device(request, response, user, login=True)
     return {"ok": True}
 
 
@@ -258,7 +274,7 @@ async def login(data: LoginIn, request: Request, response: Response, db: AsyncSe
         raise _too_many()
     if limiter.blocked(name_key, limit=name_limit):
         raise _too_many() if dev else _closed_for_new()
-    with password_slot() as free:
+    with password_slot(known=dev is not None) as free:
         if not free:
             raise _busy()
         # Nog vóór de eerste await als mislukt tellen: zo zien verzoeken tegelijk elkaars poging, en raken er niet
@@ -271,7 +287,7 @@ async def login(data: LoginIn, request: Request, response: Response, db: AsyncSe
             dev, name_key = None, user_key
             if limiter.blocked(user_key, limit=user_limit):
                 limiter.undo(ip_key)
-                raise _closed_for_new()
+                raise _stale_device()
             limiter.fail(user_key)
         pw_hash = user.password_hash if user else None
         # De verbinding terug naar de pool terwijl argon2 rekent (user blijft bruikbaar: expire_on_commit=False).
@@ -343,7 +359,7 @@ async def change_password(data: PasswordIn, request: Request, response: Response
     keys = _confirm_keys(request, sess)
     if limiter.blocked(*keys):
         raise _too_many()
-    with password_slot() as free:
+    with password_slot(known=True) as free:  # een ingelogde sessie met verse 2FA: de eigenaar
         if not free:
             raise _busy()
         limiter.fail(*keys)  # vóór de eerste await
@@ -362,7 +378,7 @@ async def change_password(data: PasswordIn, request: Request, response: Response
     await webpush.forget_renew(db, user.id)
     await audit(db, request, user, "password_changed")
     notify(db, "Wachtwoord gewijzigd", f"Voor {user.username}, vanaf {client_ip(request) or '?'}. Alle andere "
-           f"apparaten zijn afgemeld.", level="warn", source="auth")
+           f"apparaten zijn afgemeld en tellen als nieuw toestel tot ze opnieuw inloggen.", level="warn", source="auth")
     await db.commit()
     _set_device(request, response, user)
     return {"ok": True}

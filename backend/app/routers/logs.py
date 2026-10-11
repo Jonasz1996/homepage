@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .. import outside
 from ..config import get_settings
 from ..db import get_db, timed_out
-from ..deps import audit, confirm_silence, current_session, current_user, recent_auth
+from ..deps import audit, confirm_silence, current_session, current_user, event, recent_auth
 from ..models import LogEntry, LogRule, Session, SshHost, User
 from ..monitoring.webpush import LEVELS
 from ..ssh_login import login_for
@@ -215,6 +215,8 @@ async def delete_rule(rule_id: int, request: Request, sess: Session = Depends(cu
                               name=r.name)
     else:
         await audit(db, request, user, "log_rule_deleted", name=r.name)
+        # Op de tijdlijn: een regel die aan stond, staat er al via de melding van confirm_silence.
+        event(db, "wijziging", f"Logregel {r.name} verwijderd")
     await db.delete(r)
     await db.commit()
     return {"ok": True}

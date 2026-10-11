@@ -253,11 +253,13 @@ async def test_update_met_gegevens():
                         "SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_name = 'check_results' "
                         "AND is_compressed"))).scalar() > 0
                 after = await tel(conn, since)
-                # 0025 telt de checks die er al waren per uur op, en zet tot waar in app_state.
+                # 0025 telt de checks die er al waren per uur op, en zet tot waar in app_state. 0024 zet in app_state
+                # tot wanneer oude auditregels op de tijdlijn komen.
                 assert after["check_hourly"] > 0
-                assert (await conn.execute(text("SELECT count(*) FROM app_state WHERE key = :k"),
-                                           {"k": rollup.KEY})).scalar() == 1
-                after["app_state"] -= 1
+                for key in (rollup.KEY, "tijdlijn_audit_tot"):
+                    assert (await conn.execute(text("SELECT count(*) FROM app_state WHERE key = :k"),
+                                               {"k": key})).scalar() == 1, key
+                after["app_state"] -= 2
                 # Andere tabellen van na VAN zijn nieuw (en leeg); wat er al was, is er nog, rij voor rij geteld.
                 assert {t: after[t] for t in before} == before
                 # 0019: oude meldingen gaan nooit meer naar de gsm.

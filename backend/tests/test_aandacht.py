@@ -436,7 +436,8 @@ async def test_checklist_proef_staat_op_half(authed):
 
 async def test_checklist_dashboard_alleen_via_npm(authed, monkeypatch, tmp_path):
     """Wat nginx rechtstreeks toelaat (install.sh schrijft het in /etc/homepage/nginx): alleen NPM is in orde, het
-    hele LAN (HOMEPAGE_LAN_OPEN=1, of het IP van NPM was niet opgegeven) is half, zonder bestand onbekend."""
+    hele LAN (HOMEPAGE_LAN_OPEN=1, het IP van NPM was niet opgegeven of na een update niet nagekeken) is half, zonder
+    bestand onbekend."""
     from app.config import get_settings
     f = tmp_path / "nginx"
     monkeypatch.setattr(get_settings(), "nginx_file", f)
@@ -461,6 +462,16 @@ async def test_checklist_dashboard_alleen_via_npm(authed, monkeypatch, tmp_path)
     row = await lan()
     assert row["state"] == "half" and "HOMEPAGE_NPM_IP=192.168.0.245" in row["todo"][0]
     assert "HOMEPAGE_LAN_OPEN=0" in row["todo"][0]
+
+    # Bijgewerkt van een installatie van voor deze regel: open tot Jonas het zelf dichtzet, met wat hij moet doen.
+    f.write_text("lan=open\nreden=bijgewerkt\nnpm=192.168.0.245\nnetten=2a02:1810:abcd:1200::/64\n")
+    row = await lan()
+    assert row["state"] == "half" and "onversleuteld" in row["text"] and len(row["todo"]) == 1, row
+    todo = row["todo"][0]
+    assert todo.startswith("Bijgewerkt van een installatie van voor deze regel")
+    assert "HOMEPAGE_NPM_IP=192.168.0.245" in todo
+    assert "via zijn naam in NPM" in todo and "HOMEPAGE_LAN_OPEN=0 in /etc/homepage/homepage.env" in todo
+    assert "bash /opt/homepage/deploy/install.sh" in todo
 
 
 async def _group(c, sid: int) -> int:
