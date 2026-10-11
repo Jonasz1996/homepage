@@ -39,6 +39,10 @@ BACKUP_STALE = timedelta(hours=36)
 DISK_WARN = 75
 DISK_ERR = 90
 GUARD_KEY = "diskguard"
+# Het percentage is gebruikt/totaal. Op ext4 is 5% voor root gereserveerd: PostgreSQL vindt dan al rond 95% geen
+# plaats meer, niet pas bij 100%.
+DISK_FULL = ("Raakt de vrije ruimte op, dan stopt PostgreSQL (op ext4 al rond 95%: de rest is voor root). "
+             "Ruim op of maak de schijf van de CT groter.")
 OFFSITE_KEEP_DAYS = 30
 MIN_PASSPHRASE = 12
 README = """Kopie van de homepage-database, gemaakt door de homepage zelf.
@@ -284,7 +288,7 @@ async def run_selfcheck(db: AsyncSession, offsite_on: bool) -> dict:
     if level and (was is None or (level, was) == ("err", "warn")) and not told:
         body = f"{d['path']}: nog {d['free'] // 2**20} MB vrij"
         if level == "err":
-            body += "\nVanaf 100% stopt PostgreSQL. Ruim op of maak de schijf van de CT groter."
+            body += "\n" + DISK_FULL
         notify(db, f"Schijf van de homepage is {d['pct']:.0f}% vol", body, level=level, source="homepage")
     alerts["disk"] = level
 

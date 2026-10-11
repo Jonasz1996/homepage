@@ -278,6 +278,8 @@ async def test_selfcheck_backup_offsite_and_worker(authed, tmp_path, monkeypatch
     s = get_settings()
     monkeypatch.setattr(s, "backup_dir", src)
     monkeypatch.setattr(s, "offsite_dir", dst)
+    # Een vaste, lege schijf: vanaf 75% komt er een melding bij, en zo vol mag de schijf van de testmachine zijn.
+    monkeypatch.setattr(sc, "disk", lambda p: {"path": str(p), "total": 100, "used": 10, "free": 90, "pct": 10.0})
     agen, db = await _db()
 
     # Geen dump, geen worker: allebei gemeld.

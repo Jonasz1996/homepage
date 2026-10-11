@@ -3,6 +3,9 @@
 Elke 10 minuten kijken hoe vol de schijf is. Vanaf 75% gaan de oudste logregels weg, dag per dag, tot de schijf weer
 onder 75% zit of alleen de laatste 3 dagen nog over zijn. Daarover één melding per keer dat het gebeurt. Zit de schijf
 daarna nog boven 75%, dan zijn het de logregels niet: een melding zegt wat de schijf wel vult.
+
+Net na de update staan er nog tot 14 volledige dumps (met alle logregels) bij de back-ups; de eerste nieuwe back-up
+(03:30) houdt er 5. Zolang dat nog moet gebeuren, blijven de logregels onder 90% staan en zegt een melding het.
 """
 
 import logging
@@ -25,6 +28,7 @@ LIMIT = sc.DISK_WARN
 CALM = LIMIT - 5
 KEEP_DAYS = 3
 BATCH = 10_000
+KEEP_DUMPS = 5  # zoals deploy/homepage-backup.sh
 
 
 def fullest() -> dict | None:
@@ -37,6 +41,19 @@ def _aware(dt: datetime) -> datetime:
 
 def _day(dt: datetime) -> datetime:
     return _aware(dt).astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _extra_dumps(d: dict) -> int:
+    """Hoeveel dagelijkse dumps er meer staan dan de back-up bewaart, op de schijf die vol is. measure_disks houdt
+    bij één schijf voor alles het pad van de back-ups, dus d["path"] is de map met back-ups als die op deze schijf
+    staat."""
+    folder = get_settings().backup_dir
+    if d["pct"] >= sc.DISK_ERR or d["path"] != str(folder):
+        return 0
+    try:
+        return max(0, sum(1 for p in folder.glob("homepage-????-??-??.dump") if p.is_file()) - KEEP_DUMPS)
+    except OSError:
+        return 0
 
 
 def _local(dt: datetime) -> str:
@@ -119,11 +136,13 @@ async def run_diskguard(db: AsyncSession) -> dict:
             log.info("Schijf weer %s%% vol", d["pct"])
         return _save(db, st, value)
 
-    # Dag per dag de oudste logregels weg, nooit iets van de laatste KEEP_DAYS dagen.
+    # Dag per dag de oudste logregels weg, nooit iets van de laatste KEEP_DAYS dagen. Staan er nog oude dumps die de
+    # volgende back-up opruimt, dan eerst daarop wachten (tot de schijf rood wordt): die logregels krijg je niet terug.
     hyper = await _hypertable(db)
+    extra = _extra_dumps(d)
     floor = _day(now - timedelta(days=KEEP_DAYS))
     before, removed, last = d["pct"], None, None
-    while d["pct"] >= LIMIT:
+    while d["pct"] >= LIMIT and not extra:
         day = await _oldest(db, hyper)
         # Ook stoppen als de vorige stap niets weghaalde (een chunk die over de grens loopt): niet blijven proberen.
         if day is None or day[1] > floor or (last and day[0] <= last):
@@ -138,11 +157,18 @@ async def run_diskguard(db: AsyncSession) -> dict:
 
     value.update(pct=d["pct"], since=prev.get("since") or now.isoformat())
     lines = []
+    if extra and not prev.get("waited"):
+        lines.append(f"In {get_settings().backup_dir} staan {extra + KEEP_DUMPS} dagelijkse dumps; de back-up houdt er "
+                     f"voortaan {KEEP_DUMPS} (zonder logregels) en ruimt de rest om 03:30 op. Niet wachten: "
+                     f"systemctl start homepage-backup. Tot dan blijven de logregels staan, tenzij de schijf "
+                     f"{sc.DISK_ERR}% haalt.")
+        lines.append(await _consumers(db, hyper))
+        value["waited"] = True
     if removed and not prev.get("noted"):
         lines.append(f"Logregels van voor {_local(removed)} verwijderd (de laatste {KEEP_DAYS} dagen blijven). "
                      f"De schijf was {before:.0f}% vol, nu {d['pct']:.0f}%.")
         value["noted"] = True
-    if d["pct"] >= LIMIT and not prev.get("warned"):
+    if d["pct"] >= LIMIT and not extra and not prev.get("warned"):
         lines.append(f"Oude logregels opruimen helpt niet genoeg: de schijf zit nog boven {LIMIT}%.")
         lines.append(await _consumers(db, hyper))
         value["warned"] = True

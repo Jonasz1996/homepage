@@ -328,7 +328,7 @@ async def homepage(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
     if disk:
         pct = max((d.get("pct") or 0 for d in s.get("disks") or []), default=0)
         out.append(item("selfdisk", disk, "homepage", f"De schijf van de container is {pct:.0f}% vol",
-                        "Vanaf 100% stopt PostgreSQL. Ruim op of maak de schijf van de CT groter." if disk == "err" else
+                        sc.DISK_FULL if disk == "err" else
                         f"Boven {sc.DISK_WARN}% ruimt het dashboard zelf de oudste logregels op (de laatste 3 dagen "
                         "blijven). Helpt dat niet, ruim dan op of maak de schijf van de CT groter.", fix, sig=disk))
     return out

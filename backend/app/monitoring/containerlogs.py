@@ -40,7 +40,11 @@ _LEVELS = (
 
 
 def logs_on(svc: Service) -> bool:
-    return str((svc.config or {}).get("logs", "")).strip().lower() in ON
+    # Zoals de integratie zelf (integrations.from_api): de instellingen van de API uit API-beheer, aangevuld met die
+    # van de tegel. Service.api laadt altijd mee, dus geen query.
+    api = svc.__dict__.get("api") if getattr(svc, "api_id", None) else None
+    cfg = {**((api.config or {}) if api is not None else {}), **(svc.config or {})}
+    return str(cfg.get("logs", "")).strip().lower() in ON
 
 
 def severity(msg: str, stderr: bool) -> int:

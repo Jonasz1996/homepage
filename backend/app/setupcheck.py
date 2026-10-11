@@ -570,7 +570,8 @@ async def run(db: AsyncSession, clients, results: dict[int, dict]) -> dict:
                      "Nog geen Portainer-tegel: geen containerlogs of image-updates.",
                      ["Tegel of API van type portainer met een access token (My account → Access tokens)."],
                      "Containers, logs en image-updates werken." if any(map(logs_on, of("portainer"))) else
-                     "Containers en image-updates werken. Containerlogs staan uit: zet logs = true op de tegel.",
+                     "Containers en image-updates werken. Containerlogs staan uit: zet logs = true op de tegel "
+                     "of in de API.",
                      optional=True),
         *await ssh_rows(db, bool(of("proxmox"))),
         *await safety(db, cfg),

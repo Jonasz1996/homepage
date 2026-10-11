@@ -8,7 +8,7 @@ from sqlalchemy import select, text
 
 from app.config import get_settings
 from app.health import diskguard as dg, selfcheck as sc
-from app.models import AppState, LogEntry, Notification, Service
+from app.models import ApiConnection, AppState, LogEntry, Notification, Service
 from app.monitoring.containerlogs import logs_on
 from app.syslog.parse import parse
 
@@ -179,6 +179,46 @@ async def test_schijfbewaker_laat_drie_dagen_staan_en_zegt_wat_de_schijf_vult(au
     await agen.aclose()
 
 
+async def test_schijfbewaker_wacht_op_de_eerste_back_up_na_de_update(authed, monkeypatch, tmp_path):
+    # Net na de update: nog 14 volledige dumps van de oude back-up (met alle logregels); de nieuwe houdt er 5.
+    for day in range(1, 15):
+        (tmp_path / f"homepage-2026-09-{day:02d}.dump").write_bytes(b"x")
+    (tmp_path / "voor-update-2026-09-30.dump").write_bytes(b"x")
+    monkeypatch.setattr(get_settings(), "backup_dir", tmp_path)
+    agen, db = await _db()
+    _rows(db, datetime.now(timezone.utc))
+    await db.commit()
+
+    # Oranje op de schijf met de back-ups: de logregels blijven, één melding over de dumps.
+    monkeypatch.setattr(dg, "fullest", lambda: _usage(80, tmp_path))
+    for _ in range(2):
+        v = await dg.run_diskguard(db)
+        await db.commit()
+    assert await _days_left(db) == set(range(10)) and v["waited"] and not v.get("removed") and not v.get("warned")
+    notes = await _notes(db)
+    assert [(n.title, n.level) for n in notes] == [("Schijf van de homepage is 80% vol", "warn")]
+    assert "staan 14 dagelijkse dumps" in notes[0].body and "systemctl start homepage-backup" in notes[0].body
+    assert f"back-ups in {tmp_path}" in notes[0].body and "helpt niet genoeg" not in notes[0].body
+
+    # Een andere schijf is vol (de dumps staan niet op die schijf): niet wachten.
+    _disk(monkeypatch, 80, 79, 74)
+    await dg.run_diskguard(db)
+    await db.commit()
+    assert await _days_left(db) == set(range(8))
+
+    # Rood: niet langer wachten, ook niet op de schijf met de back-ups.
+    monkeypatch.setattr(dg, "fullest", lambda: _usage(92, tmp_path))
+    v = await dg.run_diskguard(db)
+    await db.commit()
+    assert await _days_left(db) == {0, 1, 2, 3} and v["removed"] and v["warned"]
+
+    # Na de eerste nieuwe back-up (5 dumps) ruimt de bewaker op zoals altijd.
+    for day in range(1, 10):
+        (tmp_path / f"homepage-2026-09-{day:02d}.dump").unlink()
+    assert dg._extra_dumps(_usage(80, tmp_path)) == 0
+    await agen.aclose()
+
+
 async def test_schijfbewaker_zonder_logregels(authed, monkeypatch, tmp_path):
     monkeypatch.setattr(get_settings(), "backup_dir", tmp_path)
     agen, db = await _db()
@@ -221,6 +261,8 @@ async def test_zelfcontrole_oranje_vanaf_75_en_rood_vanaf_90(authed, monkeypatch
 
     assert (await at(92))["alerts"]["disk"] == "err"
     assert [(n.title, n.level) for n in await _notes(db)][1:] == [("Schijf van de homepage is 92% vol", "err")]
+    # Op ext4 is 5% voor root: PostgreSQL stopt dan al rond 95%, niet bij 100%.
+    assert "rond 95%" in (await _notes(db))[1].body and "100%" not in (await _notes(db))[1].body
     assert await selfdisk() == [("err", "De schijf van de container is 92% vol")]
     assert "schijf bijna vol" in (await authed.get("/api/health/summary")).json()["problems"]
     assert "schijf bijna vol" in (await authed.get("/api/health")).json()["summary"]["problems"]
@@ -248,6 +290,14 @@ def test_containerlogs_alleen_als_ze_aan_staan():
     for off in (None, "", "false", "0", "nee", "uit", "no", "misschien", False, 0):
         assert not logs_on(Service(config={} if off is None else {"logs": off})), off
     assert not logs_on(Service(config=None))
+    # Tegel aan een API uit API-beheer: logs = true in de instellingen van de API geldt voor al zijn tegels, de tegel
+    # zelf kan het weer uitzetten.
+    api = ApiConnection(kind="portainer", url="https://portainer", config={"logs": True})
+    assert logs_on(Service(type="portainer", api_id=1, api=api, config={}))
+    assert logs_on(Service(type="portainer", api_id=1, api=api, config=None))
+    assert not logs_on(Service(type="portainer", api_id=1, api=api, config={"logs": "uit"}))
+    assert logs_on(Service(type="portainer", api_id=1, config={"logs": "ja"},
+                           api=ApiConnection(kind="portainer", url="https://portainer", config=None)))
 
 
 def test_klok_van_de_bron_meer_dan_een_uur_verkeerd():

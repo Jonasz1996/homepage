@@ -266,7 +266,9 @@ Later, deel 3 (Authentik en gsm):
     oudste logregels weg, dag per dag, tot de schijf weer onder 75% zit of alleen de laatste 3 dagen nog over zijn.
     Daarover één melding; helpt het niet, dan zegt een melding wat de schijf wel vult (de grootste tabellen en de
     back-ups). Zonder TimescaleDB komt de plaats van verwijderde regels niet terug op de schijf, maar gebruikt
-    PostgreSQL ze opnieuw voor nieuwe regels
+    PostgreSQL ze opnieuw voor nieuwe regels. Staan er bij de back-ups nog meer dan 5 dagelijkse dumps (net na de
+    update, met alle logregels erin), dan wacht hij onder 90% op de back-up van 03:30 die ze opruimt; niet
+    wachten kan met `systemctl start homepage-backup`
   - **kopie buiten de container**: elk uur de nieuwste dumps naar `/mnt/homepage-backup`, samen met `secret.key`
     versleuteld met een wachtzin die nergens bewaard wordt (scrypt + AES-GCM). Koppel er een NAS-share, PBS-opslag of
     USB-schijf aan, bv. `pct set <id> -mp0 /mnt/nas/homepage,mp=/mnt/homepage-backup` en
@@ -317,7 +319,8 @@ Later, deel 3 (Authentik en gsm):
 - **containerlogs uit Portainer** in de logviewer: elke 30 s de nieuwe regels van elke draaiende container, als
   machine met de containernaam (▣) en app `docker`. Zoeken, filters, live meekijken en meldingsregels werken zoals
   bij syslog; de ernst komt uit de regel zelf (ERROR, WARN, ...). Staat standaard uit, want het vult de kleine schijf
-  van de container snel: zet het aan per Portainer-tegel met de instelling `logs` = `true`
+  van de container snel: zet het aan per Portainer-tegel met de instelling `logs` = `true` (of in de instellingen
+  van de API in API-beheer, dan voor al zijn tegels)
 - **net → apparaten**: elke 5 minuten de ARP- en DHCP-tabel van OPNsense (ISC en Kea), met IP, MAC, fabrikant,
   hostnaam en interface. Wat er bij de eerste keer al is, geldt als gekend; een nieuw MAC-adres daarna geeft een
   melding. Geef apparaten een naam of zet ze op "ken ik". Met **volgen** wordt een apparaat elke 6 uur gescand op
