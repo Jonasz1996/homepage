@@ -184,7 +184,8 @@ async def device_patch(mac: str, body: DeviceIn, request: Request, user: User = 
 async def device_forget(mac: str, request: Request, user: User = Depends(current_user),
                         db: AsyncSession = Depends(get_db)):
     """Vergeten: weg uit de lijst. Komt het terug op het netwerk, dan is het een nieuw apparaat (met een melding).
-    Een gekend apparaat met een vast adres verdwijnt alleen zo; de rest ruimt refresh() na 30 dagen zelf op."""
+    Wat gekend is of een naam, notitie of "volgen" heeft, verdwijnt alleen zo (behalve het verlaten oude adres van een
+    toestel met een privé-adres); de rest ruimt refresh() na 30 dagen zelf op."""
     d = await _device(db, mac)
     await audit(db, request, user, "device_forgotten", mac=d.mac, name=d.name, hostname=d.hostname)
     await db.delete(d)

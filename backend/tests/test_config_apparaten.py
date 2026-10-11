@@ -314,6 +314,49 @@ async def test_privé_adres_twijfel_dan_melden(authed):
     assert not d["aa:bb:cc:00:01:03"].known and not d["aa:bb:cc:00:01:04"].known
 
 
+async def test_privé_adres_alleen_van_een_toestel_met_naam_dat_weg_is(authed):
+    """Een nieuw privé-adres neemt alleen de naam over van een toestel met een naam dat niet meer in de ARP-tabel
+    staat, op dezelfde interface. Anders is het een nieuw apparaat (gewoon melden), met de naam hoogstens als hint."""
+    world, http, t0 = await _lan(authed)
+    agen, db = await _db()
+    db.add_all([
+        # Online (staat hieronder in de ARP-tabel), met een naam, een notitie en "volgen".
+        Device(mac="aa:00:00:00:01:01", known=True, name="gsm Jonas", note="van mij", scan=True, hostname="iPhone",
+               intf="LAN", first_seen=t0, last_seen=t0),
+        # Met een naam, maar zonder interface.
+        Device(mac="aa:00:00:00:01:02", known=True, name="laptop", hostname="laptop-jonas", first_seen=t0,
+               last_seen=t0),
+    ])
+    await db.commit()
+    await agen.aclose()
+    world.arp.append({"mac": "aa:00:00:00:01:01", "ip": "192.168.0.40", "hostname": "iPhone", "intf_description": "LAN"})
+    # Een gekend toestel zonder naam (gsm-jonas uit de eerste ronde) staat niet in voor zijn hostnaam.
+    world.leases.append(_lease("aa:bb:cc:00:02:01"))
+    v = await _refresh(http, t0 + timedelta(minutes=5))
+    assert v["new"] == 1 and v["moved"] == 0
+    (n,) = await _notes()
+    assert (n.title, n.level, n.pushed_at) == ("Nieuw apparaat op je netwerk: gsm-jonas", "warn", None)
+    assert n.body == "192.168.0.60 · aa:bb:cc:00:02:01 · LAN\nGeef het een naam onder net → apparaten."
+    # Een ander "iPhone" terwijl de gsm van Jonas online is, en een laptop-jonas waar de interface niet te vergelijken
+    # is: allebei nieuw, met de naam als hint.
+    world.leases += [_lease("aa:bb:cc:00:02:02", "iPhone", ip="192.168.0.61"),
+                     _lease("aa:bb:cc:00:02:03", "laptop-jonas", ip="192.168.0.62")]
+    v = await _refresh(http, t0 + timedelta(minutes=10))
+    assert v["new"] == 2 and v["moved"] == 0
+    n = (await _notes())[-1]
+    assert (n.title, n.level, n.pushed_at) == ("2 nieuwe apparaten op je netwerk", "warn", None)
+    assert n.body.splitlines() == [
+        "iPhone: 192.168.0.61 · aa:bb:cc:00:02:02 · LAN (zelfde hostnaam als gsm Jonas, maar dat toestel is nog online)",
+        "laptop-jonas: 192.168.0.62 · aa:bb:cc:00:02:03 · LAN (zelfde hostnaam als laptop)",
+        "Geef ze een naam onder net → apparaten."]
+    d = await _devs()
+    assert (d["aa:00:00:00:01:01"].name, d["aa:00:00:00:01:01"].note, d["aa:00:00:00:01:01"].scan) == (
+        "gsm Jonas", "van mij", True)
+    assert d["aa:00:00:00:01:02"].name == "laptop"
+    assert not any(d[m].known or d[m].name for m in ("aa:bb:cc:00:02:01", "aa:bb:cc:00:02:02", "aa:bb:cc:00:02:03"))
+    assert not [n for n in await _notes() if n.title.endswith("nieuw privé-adres")]
+
+
 async def test_nieuwe_apparaten_samen_in_een_melding(authed, monkeypatch):
     world, http, t0 = await _lan(authed)
     monkeypatch.setattr(devices, "LIST_MAX", 3)
@@ -386,7 +429,10 @@ async def test_oude_apparaten_opgeruimd(authed):
         Device(mac="aa:00:00:00:00:02", known=False, first_seen=old, last_seen=t0 - timedelta(days=29)),  # te kort
         Device(mac="00:11:22:33:44:55", known=True, first_seen=old, last_seen=t0 - timedelta(days=365)),  # vast adres
         Device(mac="aa:00:00:00:00:03", known=True, name="laptop", first_seen=old, last_seen=old),  # met naam
-        Device(mac="aa:00:00:00:00:04", known=True, first_seen=old, last_seen=old),  # privé-adres zonder naam: weg
+        # "ken ik" voor een privé-adres zonder naam (een VM, de laptop van een gast): geen verlaten oud adres, blijft.
+        Device(mac="aa:00:00:00:00:04", known=True, first_seen=old, last_seen=old),
+        Device(mac="aa:00:00:00:00:05", known=True, scan=True, first_seen=old, last_seen=old),  # volgen: blijft
+        Device(mac="aa:00:00:00:00:06", known=False, note="van de buren", first_seen=old, last_seen=old),  # notitie
         Device(mac="00:11:22:33:44:66", known=False, first_seen=old, last_seen=old),  # onbekend vast adres: weg
     ])
     await db.commit()
@@ -394,11 +440,12 @@ async def test_oude_apparaten_opgeruimd(authed):
     # Een ronde met een fout: "niet gezien" is dan niets waard, er verdwijnt niets.
     world.broken = True
     v = await _refresh(http, t0 + timedelta(minutes=5))
-    assert v["errors"] and v["pruned"] == 0 and len(await _devs()) == 8
+    assert v["errors"] and v["pruned"] == 0 and len(await _devs()) == 10
     world.broken = False
     v = await _refresh(http, t0 + timedelta(minutes=10))
-    assert v["pruned"] == 3
+    assert v["pruned"] == 2
     assert sorted(await _devs()) == ["00:11:22:33:44:55", "aa:00:00:00:00:02", "aa:00:00:00:00:03",
+                                     "aa:00:00:00:00:04", "aa:00:00:00:00:05", "aa:00:00:00:00:06",
                                      "aa:bb:cc:00:00:01", "aa:bb:cc:00:00:02"]
     assert not await _notes()
 
@@ -413,3 +460,27 @@ async def test_oude_apparaten_opgeruimd(authed):
                       "hostname": "nas", "intf_description": "LAN"})
     v = await _refresh(http, t0 + timedelta(minutes=15))
     assert v["new"] == 1 and [n.title for n in await _notes()] == ["Nieuw apparaat op je netwerk: nas"]
+
+
+async def test_verlaten_privé_adres_opgeruimd(authed):
+    """Het oude adres van een toestel dat een nieuw privé-adres nam, verdwijnt na 30 dagen niet gezien. Staat zo'n
+    oud adres intussen weer in de ARP-tabel, dan was het niet verlaten en blijft het."""
+    world, http, t0 = await _lan(authed)
+    await authed.patch("/api/devices/aa:bb:cc:00:00:02", json={"name": "gsm Jonas"})
+    agen, db = await _db()
+    db.add(Device(mac="aa:00:00:00:00:07", known=True, name="tablet", hostname="tablet", intf="LAN", first_seen=t0,
+                  last_seen=t0))
+    await db.commit()
+    await agen.aclose()
+    world.leases = [_lease("aa:bb:cc:00:00:03"), _lease("aa:bb:cc:00:00:08", "tablet", ip="192.168.0.68")]
+    v = await _refresh(http, t0 + timedelta(minutes=5))
+    assert v["moved"] == 2 and v["vacated"] == ["aa:00:00:00:00:07", "aa:bb:cc:00:00:02"]
+    # De tablet neemt toch zijn oude adres weer.
+    world.arp.append({"mac": "aa:00:00:00:00:07", "ip": "192.168.0.67", "hostname": "tablet", "intf_description": "LAN"})
+    v = await _refresh(http, t0 + timedelta(minutes=10))
+    assert v["vacated"] == ["aa:bb:cc:00:00:02"]
+    world.arp.pop()
+    v = await _refresh(http, t0 + timedelta(days=30, minutes=11))
+    assert v["pruned"] == 1 and v["vacated"] == []
+    assert sorted(await _devs()) == ["aa:00:00:00:00:07", "aa:bb:cc:00:00:01", "aa:bb:cc:00:00:03",
+                                     "aa:bb:cc:00:00:08"]
