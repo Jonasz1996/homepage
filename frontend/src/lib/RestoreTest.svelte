@@ -1,13 +1,17 @@
 <script>
   import { onMount } from 'svelte'
   import { api, poll, withReauth } from './api.js'
+  import ProefPlan from './ProefPlan.svelte'
 
   // Hersteltest van back-ups: één keer per maand een CT uit PBS terugzetten, opstarten en weer weggooien.
+  // "proef" toont wat ▶ nu testen zou doen, zonder iets te doen; "alleen proef" doet dat ook voor de maandelijkse test.
   let data = $state(null)
   let opts = $state(null)
   let form = $state(null)
   let error = $state('')
   let busy = $state(false)
+  let plan = $state(null)
+  let openDry = $state(null)
 
   async function load() {
     try { data = await api('/restoretest'); error = '' } catch (e) { error = e.message }
@@ -42,6 +46,12 @@
       setTimeout(load, 800)
     } catch (e) { error = e.message } finally { busy = false }
   }
+  async function proef() {
+    // Leest alleen in Proxmox en bewaart niets: geen bevestiging nodig.
+    busy = true
+    plan = null
+    try { plan = await api('/restoretest/proef', { method: 'POST' }); error = '' } catch (e) { error = e.message } finally { busy = false }
+  }
   function toggle(v) {
     form.only = form.only.includes(v) ? form.only.filter((x) => x !== v) : [...form.only, v]
   }
@@ -56,27 +66,32 @@
     {#if data}
       <small class="st">
         {#if data.running}<span class="w">bezig: {data.running.step}{data.running.vmid ? ` (CT ${data.running.vmid})` : ''}…</span>
-        {:else if data.settings.enabled}elke maand op dag {data.settings.day} om {data.settings.hour}:00{data.next ? ` · volgende ${when(data.next)}` : ''}
+        {:else if data.settings.enabled}elke maand op dag {data.settings.day} om {data.settings.hour}:00{data.settings.dry ? ' (proef)' : ''}{data.next ? ` · volgende ${when(data.next)}` : ''}
         {:else}staat uit{/if}
       </small>
       <span class="sp"></span>
       {#if !form}
+        <button class="mini" disabled={busy || !!data.running} onclick={proef}
+                title="toont wat ▶ nu testen zou doen, zonder iets te doen">proef</button>
         <button class="mini" disabled={busy || !!data.running} onclick={runNow}>▶ nu testen</button>
         <button class="mini" onclick={edit}>instellingen</button>
       {/if}
     {/if}
   </div>
   {#if error}<p class="err">{error}</p>{/if}
+  {#if plan}<ProefPlan {plan} onclose={() => (plan = null)} />{/if}
   {#if data && !data.history.length && !form}
     <p class="hint small">Zet maandelijks een CT uit PBS terug op een vrij ID, zonder netwerk, kijkt of hij opstart en blijft draaien,
       en gooit hem daarna weg. Elke keer een andere CT (die het langst niet getest is). Het resultaat komt op de tijdlijn en
-      in je meldingen.</p>
+      in je meldingen. Met proef zie je eerst welke CT en welke calls, zonder dat er iets gebeurt.</p>
   {/if}
 
   {#if form}
     <div class="form">
       {#if opts?.error}<p class="err">{opts.error}</p>{/if}
       <label class="chk"><input type="checkbox" bind:checked={form.enabled} /> elke maand automatisch testen</label>
+      <label class="chk"><input type="checkbox" bind:checked={form.dry} disabled={!form.enabled} /> alleen proef: elke maand
+        alleen tonen wat er zou gebeuren (op de tijdlijn), niets terugzetten</label>
       {#if opts?.services?.length > 1}
         <label>Proxmox-tegel
           <select bind:value={form.service_id} onchange={() => loadOptions(form.service_id)}>
@@ -132,6 +147,19 @@
   {:else if last === undefined && data?.settings?.enabled}
     <p class="hint small">Nog niet getest.</p>
   {/if}
+
+  {#if data?.dry_history?.length}
+    <div class="sec">proeven van de maandelijkse test</div>
+    <ul class="dry">
+      {#each data.dry_history.slice(0, 6) as d (d.at)}
+        <li>
+          <button class="mini" class:on={openDry === d.at} onclick={() => (openDry = openDry === d.at ? null : d.at)}>{when(d.at)}</button>
+          <span class="m">{d.plan?.title}</span>
+          {#if openDry === d.at && d.plan}<ProefPlan plan={d.plan} onclose={() => (openDry = null)} />{/if}
+        </li>
+      {/each}
+    </ul>
+  {/if}
 </div>
 
 <style>
@@ -154,5 +182,8 @@
   .e { color: var(--err) }
   .w { color: var(--mid) }
   .small { font-size: 12px; margin: 2px 0 }
+  .sec { color: var(--muted); font-size: 11.5px; margin-top: 8px }
+  .dry { list-style: none; padding: 0; margin: 4px 0 }
+  .dry li { padding: 2px 0 }
   @media (max-width: 640px) { .tbl td:nth-child(3) { display: none } }
 </style>

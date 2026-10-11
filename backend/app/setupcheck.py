@@ -131,6 +131,10 @@ async def restore(db: AsyncSession) -> dict:
                    "actietoken heeft dan extra rechten nodig (README)."], fix, optional=True)
     last = (rt.get("history") or [None])[0]
     when = f"elke maand op dag {cfg['day']} om {int(cfg['hour']):02d}:00"
+    if cfg.get("dry"):
+        return row("restoretest", "proxmox", title, "half", "Aan in proefmodus: er wordt niets echt teruggezet.",
+                   [f"De maandelijkse test ({when}) toont alleen wat hij zou doen. Klopt het plan, zet dan \"alleen "
+                    "proef\" uit in het venster hersteltest (Ctrl+K → hersteltest)."], fix, optional=True)
     if last and not last.get("ok"):
         return row("restoretest", "proxmox", title, "half", f"Aan ({when}), maar de laatste test mislukte.",
                    [f"Bij {last.get('step')}: {last.get('error')}"], fix, optional=True)
