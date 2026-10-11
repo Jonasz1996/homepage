@@ -40,6 +40,8 @@
   let planErr = $state('')
   let steps = $state.raw(null)
   let proef = $state.raw(null)
+  // Welke proef de laatste is: een antwoord op een proef van voor een wijziging, telt niet meer.
+  let proefNr = 0
   $effect(() => { if (data?.sync?.plan && !plan) untrack(() => (plan = { ...data.sync.plan })) })
   let timer
   $effect(() => {
@@ -47,6 +49,7 @@
     const body = $state.snapshot(plan)
     // Een proef hoort bij het plan waarmee ze liep: na een wijziging is ze niet meer geldig.
     proef = null
+    proefNr++
     clearTimeout(timer)
     timer = setTimeout(async () => {
       try { checked = await api('/backups/sync/plan', { method: 'POST', body }); planErr = '' } catch (e) { checked = null; planErr = e.message }
@@ -74,12 +77,13 @@
   // Proef: wat de knop hiernaast zou doen, zonder iets te veranderen. Met SSH-hosts kijkt ze op beide PBS'en (alleen
   // lezen) wat er al bestaat; zonder toont ze wat vooraf te zien is, ook waarom de echte knop zou weigeren.
   async function runProef() {
+    const nr = ++proefNr
     busy = 'proef'
     proef = null
     try {
-      proef = await api('/backups/sync/proef', { method: 'POST', body: $state.snapshot(plan) })
-      planErr = ''
-    } catch (e) { planErr = e.message } finally { busy = '' }
+      const r = await api('/backups/sync/proef', { method: 'POST', body: $state.snapshot(plan) })
+      if (nr === proefNr) { proef = r; planErr = '' }
+    } catch (e) { if (nr === proefNr) planErr = e.message } finally { busy = '' }
   }
 </script>
 

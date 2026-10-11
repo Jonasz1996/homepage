@@ -22,7 +22,15 @@ MIN_KNOWN = 4
 
 _SECRET_NAME = r"[\w.-]{0,40}(?:passw(?:or)?d|passwd|secret|token|api[_-]?key|apikey|private[_-]?key|psk)[\w.-]{0,40}"
 
-PATTERNS: list[tuple[str, re.Pattern, str]] = [
+
+def _value(m: re.Match) -> str:
+    """key=value of "key": "value": een waarde tussen aanhalingstekens helemaal, ook met spaties of komma's."""
+    v = m.group(3)
+    q = v[0] if v[:1] in "\"'" else ""
+    return f"{m.group(1)}{m.group(2)}{q}{MASK}{q if len(v) > 1 and v[-1] == q else ''}"
+
+
+PATTERNS: list[tuple[str, re.Pattern, object]] = [
     ("sleutel", re.compile(r"-----BEGIN ([A-Z0-9 ]*)PRIVATE KEY-----.*?-----END \1PRIVATE KEY-----", re.S),
      r"-----BEGIN \1PRIVATE KEY----- *** -----END \1PRIVATE KEY-----"),
     ("token", re.compile(r"(PVEAPIToken=[^=\s\"',;]+=)[^\s\"',;]+"), r"\1***"),
@@ -37,8 +45,8 @@ PATTERNS: list[tuple[str, re.Pattern, str]] = [
     ("versleuteld", re.compile(r"gAAAAA[A-Za-z0-9_=-]{20,}"), MASK),
     ("token", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}"), MASK),
     ("sessie", re.compile(r"(hp_session=)[^;\s\"']+"), r"\1***"),
-    ("waarde", re.compile(r"(?i)\b(?!(?:PVE|PBS)APIToken=)(" + _SECRET_NAME + r")"
-                          r"(\"?'?\s*[:=]\s*\"?'?)(?!\*\*\*)[^\s\"',;&}]+"), r"\1\2***"),
+    ("waarde", re.compile(r"(?i)\b(?!(?:PVE|PBS)APIToken=)(" + _SECRET_NAME + r")(\"?'?\s*[:=]\s*)(?!\"?'?\*\*\*)"
+                          r"(\"(?:[^\"\\\n]|\\.){0,500}\"|'[^'\n]{0,500}'|[\"']?[^\s\"',;&}]+)"), _value),
 ]
 
 

@@ -23,9 +23,15 @@ _task: asyncio.Task | None = None
 
 def _out(value: dict | None) -> dict:
     value = value or {}
+    now = datetime.now(timezone.utc)
+    # Een "bezig" van meer dan 2 uur oud is een onderbroken test: die ruimt de volgende test op, en hij mag de knoppen
+    # niet blokkeren (een proef 's nachts laat hem staan).
+    busy = restoretest.is_busy(value, now)
     return {"settings": restoretest.settings(value), "history": value.get("history") or [],
             "dry_history": value.get("dry_history") or [],
-            "running": value.get("running"), "next": restoretest.next_run(value, datetime.now(timezone.utc))}
+            "running": value.get("running") if busy else None,
+            "interrupted": value.get("running") if value.get("running") and not busy else None,
+            "next": restoretest.next_run(value, now)}
 
 
 def _conflict(value: dict | None) -> None:

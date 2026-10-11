@@ -235,10 +235,14 @@ async def refusal(db: AsyncSession, plan: Plan, snapshot: bool) -> dict | None:
 PX_API = "/api2/json"
 
 
+class GuestGone(IntegrationError):
+    """De Proxmox-tegel of de VM/CT bestaat niet meer: zeker, geen storing die vanzelf overgaat."""
+
+
 async def _px_service(db: AsyncSession, http: HttpClients, snap: dict):
     svc = await db.get(Service, snap["service_id"])
     if svc is None or svc.type != "proxmox":
-        raise IntegrationError("De Proxmox-tegel van deze machine bestaat niet meer")
+        raise GuestGone("De Proxmox-tegel van deze machine bestaat niet meer")
     return build(svc, http)
 
 
@@ -249,7 +253,7 @@ async def _px_node(px, snap: dict) -> None:
             if r.get("vmid") == snap["vmid"] and r.get("type") == snap["type"]:
                 snap["node"] = r.get("node")
         if not snap.get("node"):
-            raise IntegrationError(f"{snap['type']} {snap['vmid']} niet gevonden in Proxmox")
+            raise GuestGone(f"{snap['type']} {snap['vmid']} niet gevonden in Proxmox")
 
 
 async def _px_guest(db: AsyncSession, http: HttpClients, snap: dict):
@@ -780,12 +784,13 @@ async def describe_batch(db: AsyncSession, http: HttpClients, keys: list[tuple[s
             continue
         # Zoals _snapshot: een kopie van plan.snap met de naam erbij; _px_node vult er de node in.
         it = {"plan": plan, "login": login, "packages": packages, "services": await related(db, plan),
-              "snap": {**plan.snap, "name": name} if snapshot else None, "px": None, "px_error": None}
+              "snap": {**plan.snap, "name": name} if snapshot else None, "px": None, "px_error": None,
+              "px_gone": False}
         if it["snap"] and it["snap"]["kind"] == "api":
             try:
                 it["px"] = await _px_service(db, http, it["snap"])
             except IntegrationError as e:
-                it["px_error"] = str(e)
+                it["px_error"], it["px_gone"] = str(e), isinstance(e, GuestGone)
         items.append(it)
     for x in refused:
         out_refused.append(x)
@@ -797,7 +802,7 @@ async def describe_batch(db: AsyncSession, http: HttpClients, keys: list[tuple[s
             try:
                 await _px_node(it["px"], it["snap"])
             except IntegrationError as e:
-                it["px_error"] = str(e)
+                it["px_error"], it["px_gone"] = str(e), isinstance(e, GuestGone)
 
     steps, checks, after = [], [], []
     for it in items:
@@ -817,12 +822,15 @@ async def describe_batch(db: AsyncSession, http: HttpClients, keys: list[tuple[s
                                         wait=f"max. {SNAP_TIMEOUT // 60} min", on_fail=stop,
                                         note="de naam krijgt het tijdstip van de echte run"))
             else:
-                checks.append(proef.check(f"{n}: snapshot via de Proxmox-API", None if it["px_error"] else True,
+                # Tegel of VM/CT weg: de echte run stopt zeker bij de snapshot. Proxmox die niet antwoordt: misschien.
+                ok = False if it["px_gone"] else None if it["px_error"] else True
+                checks.append(proef.check(f"{n}: snapshot via de Proxmox-API", ok,
                                           it["px_error"] or f"{snap['type']} {snap['vmid']} staat op node {snap['node']}"))
                 steps.append(proef.step(_px_machine(it["px"], snap), "proxmox-api", _api_call(c), who=_px_who(it["px"]),
                                         data=c["data"], wait=f"tot de Proxmox-taak klaar is, max. {SNAP_TIMEOUT // 60} min",
                                         on_fail=stop + " (het token heeft VM.Snapshot nodig)",
-                                        note="de naam krijgt het tijdstip van de echte run"))
+                                        note=(f"de echte run stopt hier: {it['px_error']}" if it["px_gone"] else
+                                              "de naam krijgt het tijdstip van de echte run")))
         if auto:
             on_fail = f"run mislukt; de homepage draait zelf terug naar de snapshot en stuurt een melding {failed}"
         elif snap:
@@ -943,7 +951,7 @@ async def describe_cleanup(db: AsyncSession, http: HttpClients, now: datetime | 
     d = await defaults(db)
     steps, skipped = [], []
     again = "de snapshot blijft staan; over 6 uur opnieuw"
-    for _, snap, tname in todo:
+    for i, (_, snap, tname) in enumerate(todo):
         what = f"{snap['name']} van {tname}"
         c = delsnapshot_call(snap)
         if c["via"] == "ssh":
@@ -953,8 +961,11 @@ async def describe_cleanup(db: AsyncSession, http: HttpClients, now: datetime | 
                 continue
             login, err = await _login(db, h, d)
             if err:
-                skipped.append(proef.skip(what, f"{err}: het opruimen zou hier stoppen"))
-                continue
+                # Zoals cleanup_snapshots: een login die niet te lezen is, stopt de hele ronde.
+                skipped.append(proef.skip(what, f"{err}: het opruimen stopt hier"))
+                skipped += [proef.skip(f"{s2['name']} van {t2}", f"niet bereikt: het opruimen stopt bij {snap['name']}")
+                            for _, s2, t2 in todo[i + 1:]]
+                break
             steps.append(proef.step(proef.ssh_machine(h, login), "ssh", c["cmd"], who=proef.ssh_who(login),
                                     script=command(c["cmd"], login), wait=f"max. {SNAP_TIMEOUT // 60} min",
                                     on_fail=f"{again} (bestaat hij al niet meer, dan telt hij als opgeruimd)"))

@@ -68,6 +68,7 @@
         {#if data.running}<span class="w">bezig: {data.running.step}{data.running.vmid ? ` (CT ${data.running.vmid})` : ''}…</span>
         {:else if data.settings.enabled}elke maand op dag {data.settings.day} om {data.settings.hour}:00{data.settings.dry ? ' (proef)' : ''}{data.next ? ` · volgende ${when(data.next)}` : ''}
         {:else}staat uit{/if}
+        {#if data.interrupted}<span class="w"> · een onderbroken test liet CT {data.interrupted.vmid || '?'} achter: de volgende test ruimt hem op</span>{/if}
       </small>
       <span class="sp"></span>
       {#if !form}

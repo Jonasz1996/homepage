@@ -255,9 +255,15 @@ class Worker:
     async def beat(self) -> None:
         async with self.maker() as db:
             await heartbeat(db, self.started)
-            # De laatste logregels voor de diagnose (alleen als er iets bijkwam).
-            await logring.flush(db, "worker")
             await db.commit()
+        # De laatste logregels voor de diagnose (alleen als er iets bijkwam). Apart van de hartslag: kan een regel
+        # niet in de database, dan mag dat de hartslag niet kosten.
+        try:
+            async with self.maker() as db:
+                if await logring.flush(db, "worker"):
+                    await db.commit()
+        except Exception:  # noqa: BLE001
+            log.exception("eigen logregels bewaren mislukt")
 
     async def tidy(self) -> None:
         from . import webpush

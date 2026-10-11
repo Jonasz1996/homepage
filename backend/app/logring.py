@@ -44,6 +44,7 @@ def state_key(role: str) -> str:
 # toch niet: de blob gaat eruit, alleen zijn lengte blijft.
 LONG = re.compile(r"\S{500,}")
 _UPTO_SPACE = re.compile(r"(?s).*\s")
+_CUT_START = re.compile(r"^\S*\s*[:=]?\s*\S*")
 
 
 def cut(text: str, n: int) -> str:
@@ -53,7 +54,9 @@ def cut(text: str, n: int) -> str:
         return text
     k = n // 4
     head = _UPTO_SPACE.match(text[:k])
-    tail = re.sub(r"^\S*", "", text[len(text) - (n - k - 3):])
+    # Het halve woord aan de snede gaat weg, en ook het woord erna: was het halve woord de naam van "password: x" of
+    # "Bearer x", dan herkent het maskeren de losse waarde niet meer.
+    tail = _CUT_START.sub("", text[len(text) - (n - k - 3):])
     return f"{head.group(0).rstrip() if head else ''} … {tail.lstrip()}"
 
 
@@ -74,7 +77,8 @@ class RingHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             # Begrensd, dan gemaskeerd, dan afgekapt: zo blijft het maskeren snel en komt er geen half geheim in.
-            msg = cut(mask(bound(self.format(record), 3 * MAX_MSG)), MAX_MSG)
+            # Zonder NUL: PostgreSQL weigert \u0000 in JSONB, en dan zou flush() blijven mislukken.
+            msg = cut(mask(bound(self.format(record).replace("\x00", ""), 3 * MAX_MSG)), MAX_MSG)
             ts = datetime.fromtimestamp(record.created, timezone.utc).isoformat(timespec="milliseconds")
             self.lines.append({"ts": ts, "level": record.levelname, "name": record.name, "msg": msg})
             self.total += 1

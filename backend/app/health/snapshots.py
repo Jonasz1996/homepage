@@ -109,14 +109,15 @@ async def delete_snapshot(svc: Service, http, node: str, kind: str, vmid: int, n
     return (upid or {}).get("data") or ""
 
 
-def _holds(snap: dict | None, node: str, kind: str, vmid: int, name: str) -> bool:
+def _holds(snap: dict | None, kind: str, vmid: int, name: str) -> bool:
     """Is dit de snapshot van een update-run (UpdateRun.snapshot), en bewaart die run hem nog? Een pct-snapshot is
-    altijd van een CT; zijn node is de naam van de SSH-host van de node."""
+    altijd van een CT. De node telt niet mee: bij een pct-snapshot staat daar de naam van de SSH-host (die kan anders
+    heten dan de node), een VM kan verhuisd zijn, en een VMID is uniek in de cluster terwijl de naam het tijdstip tot
+    op de seconde draagt."""
     if not snap or snap.get("name") != name or snap.get("removed_at"):
         return False
     t = "lxc" if snap.get("kind") == "pct" else snap.get("type")
-    same_node = not snap.get("node") or str(snap["node"]).lower() == node.lower()
-    return t == kind and int(snap.get("vmid") or 0) == int(vmid) and same_node
+    return t == kind and int(snap.get("vmid") or 0) == int(vmid)
 
 
 async def held_by(db: AsyncSession, node: str, kind: str, vmid: int, name: str) -> list[UpdateRun]:
@@ -124,7 +125,7 @@ async def held_by(db: AsyncSession, node: str, kind: str, vmid: int, name: str) 
     if not name.startswith(SNAP_PREFIX):
         return []
     rows = (await db.execute(select(UpdateRun).where(UpdateRun.snapshot["name"].as_string() == name))).scalars().all()
-    return [r for r in rows if _holds(r.snapshot, node, kind, vmid, name)]
+    return [r for r in rows if _holds(r.snapshot, kind, vmid, name)]
 
 
 async def mark_removed(db: AsyncSession, node: str, kind: str, vmid: int, name: str) -> list[int]:

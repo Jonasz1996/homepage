@@ -520,9 +520,25 @@ def proef_plan(c: dict, value: dict, hs: SshHost | None, hd: SshHost | None, ls:
     if ran and (ran[0]["error"] or ran[0]["code"]):
         skipped.append(proef.skip(f"Stap 2 op {dst['name']}", f"in het echt stopt de run al op {src['name']}; de "
                                                              f"controle op {dst['name']} liep toch, ter informatie"))
-    after = [f"melding en tijdlijn: PBS-sync ingesteld: {src['name']} → {dst['name']}",
-             "de back-updekking opnieuw ophalen (alleen lezen)",
-             f"{dst['name']} haalt zelf elke dag om {p['schedule']} een kopie op; zet er ook een prune-job bij"]
+    # Bestaat de sync-job al, dan laat de echte run hem staan (ook zijn uur) en zegt de melding "bijgewerkt".
+    if ran and len(ran) > 1 and not ran[1]["error"]:
+        job = _said(ran[1]["out"], *_target(p, src["name"]), "sync-job")
+    else:
+        ids = {j.get("id") for j in dst.get("syncs") or []}
+        job = True if p["job"] in ids else False if ids or dst.get("remotes") else None
+    if job:
+        after = [f"melding en tijdlijn: PBS-sync bijgewerkt: {src['name']} → {dst['name']} (sync-job {p['job']} "
+                 "bestond al en blijft zoals hij was)",
+                 "de back-updekking opnieuw ophalen (alleen lezen)",
+                 f"{dst['name']} haalt verder op volgens de bestaande sync-job: het uur {p['schedule']} wordt niet "
+                 "ingesteld"]
+    else:
+        after = [f"melding en tijdlijn: PBS-sync ingesteld: {src['name']} → {dst['name']}",
+                 "de back-updekking opnieuw ophalen (alleen lezen)",
+                 f"{dst['name']} haalt zelf elke dag om {p['schedule']} een kopie op; zet er ook een prune-job bij"]
+        if job is None:
+            after.append(f"bestaat sync-job {p['job']} toch al, dan blijft hij zoals hij was en zegt de melding "
+                         "'PBS-sync bijgewerkt'")
     return proef.plan(f"PBS-sync instellen: {src['name']} → {dst['name']}, elke dag om {p['schedule']}", st,
                       checks=checks, skipped=skipped, after=after, warnings=warnings, controle=bool(ran))
 

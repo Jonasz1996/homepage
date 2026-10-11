@@ -355,7 +355,12 @@ async def plan(svc: Service | None, http, value: dict | None, manual: bool = Tru
                           after=failed, warnings=warnings, now=now)
     checks.append(proef.check("vrij ID", True, f"CT {vmid}, het eerste vrije vanaf {cfg['vmid_from']}"
                               + (" (na het opruimen hierboven)" if vmid in gone else "")))
-    checks.append(await _nextid(px, vmid))
+    if vmid in gone:
+        # Nu nog bezet door de oude test-CT; Proxmox zou "bestaat al" zeggen, maar die gaat eerst weg.
+        checks.append(proef.check(f"ID {vmid} vrij in de hele cluster", None,
+                                  "nu nog bezet door de oude test-CT, die eerst verwijderd wordt"))
+    else:
+        checks.append(await _nextid(px, vmid))
     checks.append(await _space(px, node, cfg, backup))
     checks.append(await _rights(svc, http))
 

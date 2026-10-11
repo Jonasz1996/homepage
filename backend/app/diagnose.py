@@ -32,7 +32,7 @@ from . import attention, logring, proef
 from .config import get_settings
 from .health import selfcheck as sc
 from .integrations import REGISTRY
-from .masking import basic, mask_tree, variants
+from .masking import MIN_KNOWN, basic, mask_tree, variants
 from .models import (ApiConnection, AppState, AuditLog, CronJob, Event, HealRule, Notification, PushMonitor,
                      PushSubscription, Service, ServiceState, SshHost, SshKey, UpdateRun, User, WebhookSource)
 from .monitoring import restoretest, upgrade, watchdog
@@ -71,6 +71,7 @@ NAMES = ("key", "name", "service", "service_id", "vmid", "node")
 
 # Sleutels in de geheimen van een tegel of API die geen geheim zijn: zo blijven token-ID's leesbaar.
 USER_KEYS = ("username", "user", "action_username")
+WITHHELD = "(weggelaten: kan een commando met een wachtwoord bevatten)"
 PAIRS = (("username", "password"), ("user", "password"), ("action_username", "action_password"))
 
 
@@ -458,9 +459,29 @@ async def build(db: AsyncSession, user: User, frontend_nr: int | None = None) ->
         "proef": await _proef(db, rules),
         "logs": await _logs(db),
     }
+    # Een cronregel kan een wachtwoord bevatten (mysqldump -p..., curl -u ...): de tijdlijn zet het commando van een
+    # nieuwe of verdwenen job in de tekst.
+    for e in export["tijdlijn"]:
+        if e["kind"] == "cron" and e["body"]:
+            e["body"] = WITHHELD
+    # Een mislukte login bewaart wat er als gebruikersnaam getypt werd: soms het wachtwoord, in het verkeerde vak.
+    names = set((await db.execute(select(User.username))).scalars())
+    for a in export["audit"]:
+        d = a["detail"]
+        if a["action"] == "login_failed" and isinstance(d, dict) and d.get("username") not in names:
+            a["detail"] = {**d, "username": "***"}
     counts: Counter = Counter()
-    known = variants(await known_secrets(db, counts))
+    raw = set(await known_secrets(db, counts))
+    # Een kort wachtwoord of een gewoon woord (homepage, proxmox, ...) overal vervangen, zou het net verraden
+    # ("***-worker"). Zulke waarden vangen alleen de patronen; de export zegt dat ze er zijn.
+    weak = {v for v in raw if len(v.strip()) < MIN_KNOWN or v.strip().isalpha() and len(v.strip()) <= 12}
+    known = variants(raw - weak)
     # Eerst alles tekst (tijdstippen ook), dan maskeren: zo ontsnapt er niets via de JSON-codering.
     out = mask_tree(_bounded(jsonable_encoder(export)), known, counts)
+    if weak:
+        counts["zwak"] = len(weak)
+        out["let_op"] = (f"{len(weak)} bewaarde wachtwoorden of geheimen zijn kort of een gewoon woord. Die zijn "
+                         "alleen gemaskeerd waar ze eruitzien als een wachtwoord (in een url, header of key=value). "
+                         "Kies sterkere wachtwoorden, of kijk het bestand extra na voor je het deelt.")
     out["gemaskeerd"] = dict(sorted(counts.items()))
     return out
