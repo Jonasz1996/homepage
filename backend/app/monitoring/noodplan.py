@@ -778,31 +778,39 @@ def _source_name(src: dict, entry: dict | None) -> str:
 
 
 def _merge(srcs: list[dict], fresh: dict[str, dict | None], failures: dict[str, str], prev: dict,
-           now: datetime) -> tuple[dict, list[dict]]:
+           now: datetime, dup: dict[str, set] | None = None) -> tuple[dict, list[dict]]:
     """De nieuwe delen, en voor elke bron die deze keer niet lukte het deel uit het vorige noodplan, met de datum van
     het laatste noodplan waarin die bron wel lukte (die blijft staan, hoeveel weken het ook mislukt). Een oud deel
-    van een cluster die er via een andere tegel al vers staat, valt weg."""
+    van een cluster die er via een andere tegel al vers staat, valt weg. dup: de nodes van een tweede tegel naar
+    dezelfde cluster (die staat er zelf nooit in); die onthoudt de bronrij, voor als die tegel later niet lukt."""
+    dup = dup or {}
     pd = prev.get("data") or {}
     old = {e.get("key"): e for e in (pd.get("clusters") or []) + (pd.get("pbs") or [])}
     old_src = {s.get("key"): s for s in prev.get("sources") or []}
     clusters = [c for c in fresh.values() if c and c["key"].startswith("pve:")]
     pbs = [p for p in fresh.values() if p and p["key"].startswith("pbs:")]
-    live_nodes = {key: {n["name"] for n in c["nodes"]} for key, c in fresh.items() if c and key.startswith("pve:")}
+    live = {c["key"] for c in clusters}
     by_key = {s["key"]: s for s in srcs}
     out = []
     for s in srcs:
         key = s["key"]
         if key not in failures:
-            out.append({"key": key, "name": _source_name(s, fresh.get(key)), "ok": True})
+            out.append({"key": key, "name": _source_name(s, fresh.get(key)), "ok": True}
+                       | ({"nodes": sorted(dup[key])} if key in dup else {}))
             continue
         pe, ps = old.get(key), old_src.get(key) or {}
         row = {"key": key, "name": _source_name(s, pe) if pe else ps.get("name") or _source_name(s, None),
                "ok": False, "error": failures[key]}
-        if pe and key.startswith("pve:"):
-            mine = {n.get("name") for n in pe.get("nodes") or []}
-            twin = next((k for k, ns in live_nodes.items() if ns & mine), None)
+        mine = {n.get("name") for n in pe.get("nodes") or []} if pe else set(ps.get("nodes") or [])
+        if key.startswith("pve:") and mine:
+            if not pe:
+                row["nodes"] = sorted(mine)
+            # Dezelfde cluster staat er via een andere tegel: vers, of (stond deze tegel er zelf nooit in) ook uit
+            # een vorig noodplan.
+            twin = next((c for c in clusters if (not pe or c["key"] in live)
+                         and mine & {n.get("name") for n in c.get("nodes") or []}), None)
             if twin:
-                row["covered"] = _source_name(by_key[twin], fresh[twin])
+                row["covered"] = _source_name(by_key[twin["key"]], twin)
                 out.append(row)
                 continue
         if pe:
@@ -1065,6 +1073,7 @@ async def run(maker, http, trigger: str = "week", user: str | None = None, now: 
             fresh: dict[str, dict | None] = {}
             failures: dict[str, str] = {}
             seen: list[set] = []
+            dup: dict[str, set] = {}
             for s in srcs:
                 if s["integ"] is None:
                     failures[s["key"]] = mask(s["error"], secrets)
@@ -1074,6 +1083,7 @@ async def run(maker, http, trigger: str = "week", user: str | None = None, now: 
                         c = await _pve(s, s["integ"], snap, prev)
                         mine = {n["name"] for n in c["nodes"]}
                         if any(mine & x for x in seen):
+                            dup[s["key"]] = mine
                             continue  # een tweede tegel naar dezelfde cluster
                         seen.append(mine)
                     else:
@@ -1081,7 +1091,7 @@ async def run(maker, http, trigger: str = "week", user: str | None = None, now: 
                     fresh[s["key"]] = c
                 except IntegrationError as e:
                     failures[s["key"]] = mask(str(e)[:300], secrets)
-            data, srcs_out = _merge(srcs, fresh, failures, prev, now)
+            data, srcs_out = _merge(srcs, fresh, failures, prev, now, dup)
             _place(snap, data, ips)
             data["dashboard"] = _dashboard(snap, data)
             data |= _rest(snap, data, ips)

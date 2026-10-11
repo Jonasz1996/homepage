@@ -476,8 +476,8 @@ async def test_nooit_gelukt_en_dubbele_tegel(authed, monkeypatch, tmp_path):
     pve, _ = await _setup(authed, monkeypatch, tmp_path)
     g = await _group(authed)
     # Een tweede tegel naar dezelfde cluster, en een die nog nooit lukte.
-    await _svc(authed, g, "proxmox", PVE_URL, {"insecure": True},
-               {"username": "homepage@pve!dash", "password": "Xq7-pve-9Zt"}, name="PVE 2")
+    two = await _svc(authed, g, "proxmox", "https://192.168.0.51:8006", {"insecure": True},
+                     {"username": "homepage@pve!dash", "password": "Xq7-pve-9Zt"}, name="PVE 2")
     bad = await _svc(authed, g, "proxmox", "https://192.168.0.99:8006", {"insecure": True},
                      {"username": "homepage@pve!dash", "password": "Xq7-pve-9Zt"}, name="Oud")
     assert (await _run(World()))["ok"]
@@ -490,6 +490,21 @@ async def test_nooit_gelukt_en_dubbele_tegel(authed, monkeypatch, tmp_path):
     assert nood.problems(v, T0 + timedelta(days=15))[0][0] == f"bron:pve:{bad}"
     st = nood.status(v, False, T0 + timedelta(days=15), False, "/x")
     assert st["problems"][0]["key"] == f"bron:pve:{bad}" and "Oud" in st["problems"][0]["text"]
+    # pve51 valt uit en daarmee de tweede tegel: die stond er nooit zelf in, maar de cluster staat er via de eerste.
+    world = World()
+
+    def down(req):
+        if req.url.host == "192.168.0.51":
+            raise httpx.ConnectError("geen route naar de host", request=req)
+        return world(req)
+    for days in (7, 14):
+        assert (await _run(down, T0 + timedelta(days=days)))["ok"]
+        v = await _plan(db)
+        src = next(s for s in v["sources"] if s["key"] == f"pve:{two}")
+        assert not src["ok"] and src["covered"] == "Proxmox pve50, pve51" and "failing_since" not in src, src
+    md = (await nood.render(db, v, "md"))[0]
+    assert "Proxmox-tegel PVE 2: " in md and "dezelfde cluster staat er via Proxmox pve50, pve51." in md
+    assert f"bron:pve:{two}" not in [k for k, _ in nood.problems(v, T0 + timedelta(days=30))]
     await agen.aclose()
 
 
