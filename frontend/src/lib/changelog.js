@@ -3,6 +3,25 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 38,
+    datum: '2026-10-11',
+    titel: 'Nieuwe service in één keer',
+    items: [
+      'Beheer → Nieuwe service: één formulier met naam, IP en poort maakt de proxy host in NPM (met het wildcardcertificaat of een eigen Let\'s Encrypt-certificaat), het record in Cloudflare of een regel in de tunnel, de naam in AdGuard, een tegel met check (en de koppeling met Zabbix), en zet de CT/VM in een back-upjob van PBS. Kies "alleen thuis" of publiek; "alleen thuis" vraagt een toegangslijst van NPM die alleen je LAN en VPN toelaat.',
+      'Eerst een proef: die zegt per systeem wat er zou gebeuren en wat ontbreekt, en voert niets uit. Pas je daarna iets aan, dan moet de proef opnieuw. Uitvoeren vraagt je 2FA en komt in de audit-log; je ziet stap per stap wat lukt.',
+      'Stopt een run halverwege (of herstart de homepage ondertussen), dan haalt "ongedaan maken" weg wat hij al maakte, ook weer na een proef. Zo\'n halve run staat onder ! tot je hem ongedaan maakt.',
+      'Het tabblad opruimen (of "opruimen…" bij een tegel op je domein) doet het omgekeerde: DNS eerst, dan AdGuard, NPM, eventueel de back-up en de tegel als laatste. Het raakt alleen records die naar NPM wijzen of die het dashboard zelf maakte; wat blijft staan, zegt de proef. Records van het dashboard waarvan de host in NPM weg is, staan eronder om op te ruimen.',
+      'Het tabblad geschiedenis toont elke run met zijn stappen. De Instellingen-checklist heeft een rij "Nieuwe service in één keer" die zegt wat er nog ontbreekt.',
+      'Van buitenaf hoort dit bij ⚿ → van buitenaf → acties.',
+    ],
+    instellen: [
+      'NPM: een tweede gebruiker "dashboard-acties" met een echt e-mailadres, geen Administrator, Item Visibility All Items en Proxy Hosts en Certificates op Manage. Vul die in als action_username en action_password bij de NPM-API (README → Nieuwe service in één keer).',
+      'Cloudflare: een token met Zone Read en DNS Edit op jbogaert.be (plus Cloudflare Tunnel Edit als je namen via de tunnel gaan), als nieuwe API van soort Cloudflare DNS met zone = jbogaert.be.',
+      'Proxmox, voor de back-up: liefst een back-upjob op een pool en Pool.Allocate op die pool voor homepage-acties@pve; of, voor een job met een lijst VMID\'s, Sys.Modify op / en Datastore.Allocate op de opslag van de job (README zegt wat die rechten nog meer toelaten).',
+      'Voor "alleen thuis": een toegangslijst in NPM met alleen je LAN en VPN (bv. allow 192.168.0.0/16), satisfy all, die ook het dashboard toelaat.',
+    ],
+  },
+  {
     nr: 35,
     datum: '2026-10-11',
     titel: 'Eenvoudiger',
