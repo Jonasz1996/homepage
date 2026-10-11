@@ -2,6 +2,7 @@ import copy
 from datetime import datetime, timedelta, timezone
 
 import httpx
+import pytest
 from sqlalchemy import select
 
 from app.models import AppState, AuditLog, CheckResult, Event, Notification
@@ -13,8 +14,9 @@ from app.monitoring.checks import Outcome
 from app.monitoring.report import build_report, weekly_notification
 from app.monitoring.watchers import watch_pbs
 from app.models import Service
+from app.routers.timeline import LEGACY_KEY
 
-from .conftest import PASSWORD
+from .conftest import MIGRATED, PASSWORD, alembic
 from .test_beveiliging import _reauth
 from .test_capacity import _db
 from .test_integrations import PVE, Fake, _group, _svc
@@ -189,6 +191,49 @@ async def test_timeline_one_entry_per_action(authed):
     actions = [a.action for a in (await db.execute(select(AuditLog).order_by(AuditLog.id))).scalars()]
     assert actions.count("maintenance") == 5 and actions.count("log_rule_deleted") == 2
     assert actions.count("password_changed") == 1
+    await agen.aclose()
+
+
+async def test_tijdlijn_houdt_oude_auditregels_van_voor_de_update(authed):
+    """Vóór de update stonden onderhoud, een logregel verwijderen en het wachtwoord wijzigen alleen in de auditlog, en
+    zo op de tijdlijn. Die oude regels blijven er (tot het moment dat migratie 0024 bewaarde); wat daarna kwam, staat er
+    via zijn melding of gebeurtenis en niet nog eens uit de auditlog. Zonder dat moment: geen oude regels."""
+    now = datetime.now(timezone.utc)
+    agen, db = await _db()
+    db.add_all([AuditLog(ts=now - timedelta(days=3), action="maintenance", detail={"service": "Wiki", "minutes": 60}),
+                AuditLog(ts=now - timedelta(days=3, minutes=-5), action="maintenance", detail={"group": "G"}),
+                AuditLog(ts=now - timedelta(days=2), action="log_rule_deleted", detail={"name": "ssh"}),
+                AuditLog(ts=now - timedelta(days=2, minutes=-5), action="password_changed", detail={}),
+                AuditLog(ts=now - timedelta(hours=1), action="maintenance", detail={"service": "Wiki", "minutes": 30}),
+                AuditLog(ts=now - timedelta(hours=1), action="password_changed", detail={})])
+    await db.commit()
+
+    async def titles() -> list[str]:
+        return [i["title"] for i in reversed((await authed.get("/api/timeline")).json()["items"])
+                if i["title"].startswith(("Onderhoud", "Logregel", "Wachtwoord"))]
+    assert await titles() == []
+    db.add(AppState(key="tijdlijn_audit_tot", value={"tot": (now - timedelta(days=1)).isoformat()}))
+    await db.commit()
+    assert await titles() == ["Onderhoud Wiki: 60 min", "Onderhoud G: gestopt", "Logregel ssh verwijderd",
+                              "Wachtwoord gewijzigd"]
+    await agen.aclose()
+
+
+@pytest.mark.skipif(not MIGRATED, reason="alleen met HOMEPAGE_TEST_SCHEMA=migraties op PostgreSQL")
+async def test_migratie_0024_bewaart_tot_wanneer_oude_auditregels_tellen(client):
+    """Migratie 0024 zet het moment waarop onderhoud en dergelijke niet meer alleen in de auditlog staan; terug naar
+    0023 haalt het weer weg."""
+    try:
+        alembic("downgrade", "0023")
+        agen, db = await _db()
+        assert await db.get(AppState, LEGACY_KEY) is None
+        await agen.aclose()
+        before = datetime.now(timezone.utc)
+    finally:
+        alembic("upgrade", "head")
+    agen, db = await _db()
+    st = await db.get(AppState, LEGACY_KEY)
+    assert before <= datetime.fromisoformat(st.value["tot"]) <= datetime.now(timezone.utc)
     await agen.aclose()
 
 
