@@ -144,7 +144,8 @@
           <input bind:value={form.name} placeholder={form.op === 'docker' ? 'containernaam' : 'dienst, bv. plexmediaserver'} />
         </div>
       {/if}
-      <label>hoogstens <input type="number" min="1" max="6" bind:value={form.max_per_hour} /> keer per uur, minstens 10 min ertussen</label>
+      <label>hoogstens <input type="number" min="1" max="5" bind:value={form.max_per_hour} /> keer per uur, minstens 10 min ertussen</label>
+      <small class="m">Elke poging staat in 🔔 en op de tijdlijn. Op je gsm per storing alleen de eerste poging, de eerste die mislukt (als een herstart eerst lukte), en de eerste keer dat de limiet de regel pauzeert (zoals "Melden" van de tegel het toelaat).</small>
       <label class="chk"><input type="checkbox" bind:checked={form.dry_run} /> alleen proef: niets uitvoeren, alleen op de tijdlijn zetten wat de regel zou doen</label>
       <div class="row">
         <button class="btn" disabled={!valid} onclick={save}>regel bewaren</button>
@@ -156,7 +157,7 @@
     </div>
   {:else}
     <button class="mini add" onclick={startAdd}>+ regel</button>
-    {#if !rules.length}<small class="m">bv. "als {service.name} 3× down is, herstart zijn container". Je krijgt altijd een melding van wat er gebeurde. Met "proef" zie je eerst wat een regel zou doen.</small>{/if}
+    {#if !rules.length}<small class="m">bv. "als {service.name} 3× down is, herstart zijn container". Wat de regel deed, staat altijd op de tijdlijn (en in 🔔, zoals "Melden" van de tegel het wil). Met "proef" zie je eerst wat een regel zou doen.</small>{/if}
   {/if}
   {#if msg}<p class="msg" class:e={msg.startsWith('✕')}>{msg}</p>{/if}
 </div>

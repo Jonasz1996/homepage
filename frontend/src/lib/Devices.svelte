@@ -26,13 +26,19 @@
     busy = d.mac
     try { await api(`/devices/${d.mac}/scan`, { method: 'POST' }); await load() } catch (e) { error = e.message } finally { busy = '' }
   }
+  // Onbekende apparaten en privé-adressen zonder naam verdwijnen na 30 dagen vanzelf; een gekend apparaat niet.
+  async function forget(d) {
+    if (!confirm(`${d.name || d.hostname || d.mac} vergeten? Komt het terug op je netwerk, dan krijg je opnieuw een melding.`)) return
+    try { await api(`/devices/${d.mac}`, { method: 'DELETE' }); edit = null; await load() } catch (e) { error = e.message }
+  }
+  const PRIVATE = 'Willekeurig MAC-adres (gsm of laptop met een privé-adres, of een VM/container): de fabrikant is niet te zien. Neemt een gekend toestel een nieuw adres met dezelfde hostnaam op dezelfde interface, dan houdt het zijn naam.'
 
   const ago = (ts) => {
     const m = Math.round((Date.now() - new Date(ts).getTime()) / 60000)
     return m < 60 ? `${Math.max(m, 0)} min` : m < 2880 ? `${Math.floor(m / 60)} u` : `${Math.floor(m / 1440)} d`
   }
   let rows = $derived((data?.items || []).filter((d) => {
-    const t = `${d.name || ''} ${d.hostname || ''} ${d.vendor || ''} ${d.ip || ''} ${d.mac} ${d.intf || ''}`.toLowerCase()
+    const t = `${d.name || ''} ${d.hostname || ''} ${d.vendor || ''} ${d.ip || ''} ${d.mac} ${d.intf || ''} ${d.private ? 'privé-adres' : ''}`.toLowerCase()
     return q.toLowerCase().split(/\s+/).filter(Boolean).every((w) => t.includes(w))
   }))
 </script>
@@ -61,7 +67,7 @@
           <small class="m block"><span class="mip">{d.ip || ''} ·{' '}</span>{d.intf || ''} · sinds {new Date(d.first_seen).toLocaleDateString('nl-BE')}</small>
         </td>
         <td class="mono">{d.ip || '—'}</td>
-        <td><span class="mono">{d.mac}</span><small class="m block">{d.vendor || 'onbekende fabrikant'}</small></td>
+        <td><span class="mono">{d.mac}</span><small class="m block">{#if d.private}<span class="pv" title={PRIVATE}>privé-adres</span>{#if d.vendor} · {d.vendor}{/if}{:else}{d.vendor || 'onbekende fabrikant'}{/if}</small></td>
         <td>
           {#if d.ports?.length}<span class="ports">{#each d.ports as p}<span title={d.port_names[p]}>{p}</span>{/each}</span>
           {:else if d.ports}<small class="m">geen open</small>{/if}
@@ -75,6 +81,7 @@
             <button class="mini" onclick={() => (edit = { mac: d.mac, name: d.name || d.hostname || '' })}>naam</button>
             {#if !d.known}<button class="mini" onclick={() => save(d, { known: true })}>ken ik</button>{/if}
             <button class="mini" disabled={busy === d.mac || !d.ip} onclick={() => scan(d)}>{busy === d.mac ? 'scannen…' : 'scan'}</button>
+            <button class="mini" onclick={() => forget(d)} title="Uit de lijst halen">vergeten</button>
           {/if}
         </td>
       </tr>
@@ -103,6 +110,7 @@
   .m { color: var(--muted); font-size: 11.5px }
   .block { display: block }
   .mono { font-size: 12px }
+  .pv { cursor: help; border-bottom: 1px dotted var(--line-2) }
   .ports { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 3px }
   .ports span { font-size: 11px; padding: 0 5px; border-radius: 5px; border: 1px solid var(--line-2); color: #a9c7ff }
   .chk { display: flex; gap: 4px; align-items: center; font-size: 11.5px; color: var(--muted) }

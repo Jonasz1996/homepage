@@ -494,6 +494,86 @@ async def _status() -> dict:
     return out
 
 
+async def _tidy(at: datetime) -> None:
+    """Zoals de worker bij het opruimen (elk uur)."""
+    agen, db = await _db()
+    await webpush.switch_off_failing(db, at)
+    await webpush.forget_gone(db, at)
+    await db.commit()
+    await agen.aclose()
+
+
+async def test_toestel_dat_een_maand_faalt_wordt_uitgezet(authed):
+    a, b = Phone(A), Phone(B)
+    await _subscribe(authed, a, "Pixel")
+    await _subscribe(authed, b, "iPhone")
+    svc = PushService([a, b])
+    svc.status[A] = 403
+    await _notify(*({"title": f"storing {i}", "level": "err"} for i in range(3)))
+    await _run(svc)
+    (pixel,) = await _rows(PushSubscription, PushSubscription.label == "Pixel")
+    assert pixel.fail_count == 3 and pixel.warned and pixel.last_ok_at is None
+    now = datetime.now(timezone.utc)
+
+    # Nog geen 30 dagen: blijft aan.
+    await _tidy(now + timedelta(days=29))
+    assert all(s.gone_at is None for s in await _rows(PushSubscription))
+    # 30 dagen niets afgeleverd en het blijft mislukken: uit, met één melding (ook een uur later niet nog eens). Het
+    # iPhone kreeg ook al een maand niets, maar faalt niet: dat blijft aan.
+    await _tidy(now + timedelta(days=31))
+    await _tidy(now + timedelta(days=31, hours=1))
+    subs = {s.label: s for s in await _rows(PushSubscription)}
+    assert subs["Pixel"].gone_at is not None and subs["iPhone"].gone_at is None
+    assert subs["Pixel"].last_error == "uitgezet: al 30 dagen niets afgeleverd (HTTP 403: nee)"
+    off = await _rows(Notification, Notification.title == "Meldingen naar Pixel uitgezet")
+    assert len(off) == 1 and off[0].level == "err" and off[0].pushed_at is None and "HTTP 403: nee" in off[0].body
+    # Er gaat niets meer heen; de melding komt op de andere.
+    await _notify({"title": "storing 4", "level": "err"})
+    await _run(svc)
+    assert not await _rows(PushQueue)
+    assert [m["title"] for m in svc.to(a)] == [f"storing {i}" for i in range(3)]
+    assert [m["title"] for m in svc.to(b)][-2:] == ["Meldingen naar Pixel uitgezet", "storing 4"]
+    assert (await _status())["failing"] == ["Pixel (afgemeld)"]
+    # Niet opnieuw aangezet: een maand later is de rij weg.
+    await _tidy(now + timedelta(days=62))
+    assert [s.label for s in await _rows(PushSubscription)] == ["iPhone"]
+
+
+async def test_toestel_uitgezet_kan_opnieuw_aan(authed, monkeypatch):
+    a = Phone(A)
+    await _subscribe(authed, a, "Pixel")
+    svc = PushService([a])
+    monkeypatch.setattr(webpush_router, "make_client", svc.client)
+    svc.status[A] = 403
+
+    async def fail_three_times():
+        await _notify(*({"title": f"storing {i}", "level": "err"} for i in range(3)))
+        await _run(svc)
+
+    await fail_three_times()
+    agen, db = await _db()
+    await db.execute(update(PushSubscription).values(created_at=datetime.now(timezone.utc) - timedelta(days=31)))
+    await db.commit()
+    await agen.aclose()
+    now = datetime.now(timezone.utc)
+    await _tidy(now)
+    (pixel,) = await _rows(PushSubscription)
+    assert pixel.gone_at is not None
+    # Opnieuw aanzetten (zelfde toestel, zelfde rij), met het testbericht dat de pagina meteen stuurt: dat lukt, dus
+    # de 30 dagen beginnen opnieuw, ook als het daarna weer misloopt.
+    svc.status[A] = 201
+    await _subscribe(authed, a, "Pixel")
+    assert (await authed.post(f"/api/webpush/subscriptions/{pixel.id}/test")).json()["ok"] is True
+    svc.status[A] = 403
+    await fail_three_times()
+    await _tidy(now)
+    (pixel,) = await _rows(PushSubscription)
+    assert pixel.gone_at is None and pixel.fail_count >= 3 and pixel.last_ok_at is not None
+    await _tidy(now + timedelta(days=31))
+    (pixel,) = await _rows(PushSubscription)
+    assert pixel.gone_at is not None
+
+
 async def test_at_most_ten_per_minute_with_summary(authed):
     a = Phone(A)
     await _subscribe(authed, a, "Pixel", "warn")

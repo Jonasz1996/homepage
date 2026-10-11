@@ -222,6 +222,54 @@ async def test_config_copy_and_heal_test_without_open_transaction(authed, monkey
     await agen.aclose()
 
 
+async def test_apparaten_zonder_open_transactie(authed, monkeypatch):
+    """OPNsense vragen en poorten scannen (ronde, scan om de 6 uur en de knop "scan"): geen transactie open."""
+    from app.integrations.opnsense import OPNsense
+    from app.models import Device
+    from app.monitoring import devices
+    agen, db = await _db()
+    seen, sessions = [], []
+
+    async def neighbours(self):
+        seen.append(("opnsense", db.in_transaction(), await _idle_in_transaction()))
+        return [{"mac": "aa:bb:cc:00:00:01", "ip": "127.0.0.1", "vendor": None, "hostname": "nas", "intf": "LAN"}]
+
+    async def scan_ports(ip, ports=None):
+        seen.append(("scan", sessions[-1].in_transaction(), await _idle_in_transaction()))
+        return [22]
+    real = devices.scan_device
+
+    async def scan_device(session, d, *a, **kw):
+        sessions.append(session)
+        return await real(session, d, *a, **kw)
+    monkeypatch.setattr(OPNsense, "neighbours", neighbours)
+    monkeypatch.setattr(devices, "scan_ports", scan_ports)
+    monkeypatch.setattr(devices, "scan_device", scan_device)
+    g = await _group(authed)
+    await _svc(authed, g, "opnsense", "https://192.168.0.1", secrets={"key": "k", "secret": "s"}, name="OPNsense")
+
+    # Een gewijzigde rij in de sessie (zoals de worker tussen twee stappen) maakt een transactie open.
+    db.add(AppState(key="proef", value={}))
+    await db.flush()
+    assert db.in_transaction()
+    v = await devices.refresh(db, HttpClients())
+    await db.commit()
+    assert v["seen"] == 1 and v["errors"] == []
+    d = await db.get(Device, "aa:bb:cc:00:00:01")
+    d.scan = True
+    await db.flush()
+    assert await devices.scan_due(db) == 1
+    await db.commit()
+    r = await authed.post("/api/devices/aa:bb:cc:00:00:01/scan")
+    assert r.status_code == 200, r.text
+    assert r.json()["ports"] == [22]
+    assert [w for w, *_ in seen] == ["opnsense", "scan", "scan"]
+    assert all(not in_tx and idle == 0 for _, in_tx, idle in seen), seen
+    # Wat er voor de calls in de sessie stond, is gewoon bewaard.
+    assert (await db.get(AppState, "proef")) is not None
+    await agen.aclose()
+
+
 # --- time-outs en pool ---------------------------------------------------------------------------------------
 
 def test_pool_sizes_leave_room():

@@ -3,11 +3,11 @@ from datetime import datetime, timedelta, timezone
 
 import asyncssh
 import httpx
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.db import get_db
 from app.main import app
-from app.models import ConfigVersion, Device, Notification, SshHost
+from app.models import AppState, ConfigVersion, Device, Notification, SshHost
 from app.monitoring import configs, devices
 from app.monitoring.checks import HttpClients
 from app.security import decrypt
@@ -33,13 +33,15 @@ class World:
         self.leases = [{"address": "192.168.0.50", "mac": "aa:bb:cc:00:00:02", "hostname": "gsm-jonas", "state": "active",
                         "if_descr": "LAN"},
                        {"address": "192.168.0.51", "mac": "aa:bb:cc:00:00:09", "hostname": "oud", "state": "expired"}]
+        # De ARP-tabel geeft een fout (bv. een verlopen API-sleutel).
+        self.broken = False
 
     def __call__(self, req: httpx.Request) -> httpx.Response:
         p = req.url.path
         if p == "/api/core/backup/download/this":
             return httpx.Response(200, text=XML.format(rules=self.rules), headers={"content-type": "application/xml"})
         if p == "/api/diagnostics/interface/getArp":
-            return httpx.Response(200, json=self.arp)
+            return httpx.Response(500, text="kapot") if self.broken else httpx.Response(200, json=self.arp)
         if p == "/api/dhcpv4/leases/searchLease":
             return httpx.Response(200, json={"rows": self.leases})
         if p == "/api/kea/leases4/search":
@@ -199,3 +201,215 @@ async def test_devices_new_device_and_ports(authed):
     # Niet meer gezien → offline, wordt niet gescand.
     stale = datetime.now(timezone.utc) + timedelta(hours=1)
     assert await devices.scan_due(db, stale) == 0
+
+
+# --- privé-adressen, samen melden, opruimen ------------------------------------------------------------------------
+
+async def _lan(authed) -> tuple[World, HttpClients, datetime]:
+    """Een OPNsense-tegel met de World erachter, en de eerste ronde (wat er al is, is gekend)."""
+    world = World()
+    http = HttpClients(httpx.MockTransport(world))
+    g = await _group(authed)
+    await _svc(authed, g, "opnsense", "https://192.168.0.1", secrets={"key": "k", "secret": "s"}, name="OPNsense")
+    t0 = datetime.now(timezone.utc).replace(microsecond=0)
+    v = await _refresh(http, t0)
+    assert v["seen"] == 2 and v["new"] == 0
+    return world, http, t0
+
+
+async def _refresh(http: HttpClients, now: datetime) -> dict:
+    agen, db = await _db()
+    v = await devices.refresh(db, http, now)
+    await db.commit()
+    await agen.aclose()
+    return v
+
+
+async def _devs() -> dict[str, Device]:
+    agen, db = await _db()
+    out = {d.mac: d for d in (await db.execute(select(Device))).scalars()}
+    await agen.aclose()
+    return out
+
+
+async def _notes() -> list[Notification]:
+    agen, db = await _db()
+    out = list((await db.execute(select(Notification).where(Notification.source == "apparaat")
+                                 .order_by(Notification.id))).scalars())
+    await agen.aclose()
+    return out
+
+
+def _lease(mac: str, hostname: str | None = "gsm-jonas", intf: str = "LAN", ip: str = "192.168.0.60") -> dict:
+    return {"address": ip, "mac": mac, "hostname": hostname, "state": "active", "if_descr": intf}
+
+
+def test_privé_adres_herkend():
+    assert devices.private_mac("aa:bb:cc:00:00:01") and devices.private_mac("02:42:ac:11:00:02")
+    assert devices.private_mac("de:ad:be:ef:00:01")
+    assert not devices.private_mac("00:11:22:33:44:55") and not devices.private_mac("b8:27:eb:00:00:01")
+
+
+async def test_privé_adres_houdt_zijn_naam(authed):
+    world, http, t0 = await _lan(authed)
+    r = await authed.patch("/api/devices/aa:bb:cc:00:00:02", json={"name": "gsm Jonas", "note": "van mij", "scan": True})
+    assert r.json()["private"] is True and r.json()["known"]
+    # De gsm neemt een nieuw privé-adres (de oude lease is nog even actief), met de hostnaam in andere hoofdletters.
+    world.leases.append(_lease("aa:bb:cc:00:00:03", "GSM-Jonas"))
+    v = await _refresh(http, t0 + timedelta(minutes=5))
+    assert v["new"] == 0 and v["moved"] == 1
+    d = await _devs()
+    new, old = d["aa:bb:cc:00:00:03"], d["aa:bb:cc:00:00:02"]
+    assert (new.known, new.name, new.note, new.scan, new.ports) == (True, "gsm Jonas", "van mij", True, None)
+    assert (old.known, old.name, old.note, old.scan) == (True, None, None, False)
+    # Alleen in 🔔 (meteen "verstuurd": niet naar de gsm), geen "Nieuw apparaat".
+    (moved,) = await _notes()
+    assert (moved.title, moved.level, moved.pushed_at is not None) == ("gsm Jonas: nieuw privé-adres", "info", True)
+    assert moved.body.startswith("192.168.0.60 · aa:bb:cc:00:00:03 · LAN (was aa:bb:cc:00:00:02)")
+
+    # Nog een nieuw adres: de oude adressen zonder naam staan niet in de weg.
+    world.leases[-1] = _lease("aa:bb:cc:00:00:04")
+    v = await _refresh(http, t0 + timedelta(minutes=10))
+    assert v["moved"] == 1 and (await _devs())["aa:bb:cc:00:00:04"].name == "gsm Jonas"
+
+    # Een vast adres met dezelfde hostnaam, en een privé-adres met die hostnaam op een andere interface: niet te
+    # zeggen, dus melden (samen, in één melding).
+    world.leases[-1] = _lease("00:11:22:33:44:55", ip="192.168.0.61")
+    world.leases.append(_lease("aa:bb:cc:00:00:05", intf="GAST", ip="192.168.1.62"))
+    v = await _refresh(http, t0 + timedelta(minutes=15))
+    assert v["new"] == 2 and v["moved"] == 0
+    d = await _devs()
+    assert not d["00:11:22:33:44:55"].known and not d["aa:bb:cc:00:00:05"].known and d["aa:bb:cc:00:00:05"].name is None
+    last = (await _notes())[-1]
+    assert (last.title, last.level, last.pushed_at) == ("2 nieuwe apparaten op je netwerk", "warn", None)
+    assert "gsm-jonas: 192.168.0.61 · 00:11:22:33:44:55" in last.body and "aa:bb:cc:00:00:05 · GAST" in last.body
+
+    # Nu staat er een onbekend toestel met die hostnaam op LAN: een volgend nieuw adres kan ook dat zijn.
+    world.leases.append(_lease("aa:bb:cc:00:00:06", ip="192.168.0.63"))
+    v = await _refresh(http, t0 + timedelta(minutes=20))
+    assert v["new"] == 1 and v["moved"] == 0
+    assert (await _notes())[-1].title == "Nieuw apparaat op je netwerk: gsm-jonas"
+    assert (await _devs())["aa:bb:cc:00:00:04"].name == "gsm Jonas"
+
+
+async def test_privé_adres_twijfel_dan_melden(authed):
+    world, http, t0 = await _lan(authed)
+    # Twee nieuwe adressen met dezelfde hostnaam in één ronde: welk is de gsm? Allebei melden.
+    world.leases += [_lease("aa:bb:cc:00:01:01"), _lease("aa:bb:cc:00:01:02", ip="192.168.0.64")]
+    v = await _refresh(http, t0 + timedelta(minutes=5))
+    assert v["new"] == 2 and v["moved"] == 0
+    assert (await _devs())["aa:bb:cc:00:00:02"].known
+    # Twee gekende toestellen met een naam en dezelfde hostnaam (twee keer "iPhone"): ook melden.
+    for mac, name in (("aa:bb:cc:00:01:01", "iPhone Jonas"), ("aa:bb:cc:00:01:02", "iPhone mama")):
+        await authed.patch(f"/api/devices/{mac}", json={"name": name})
+    world.leases.append(_lease("aa:bb:cc:00:01:03", ip="192.168.0.65"))
+    v = await _refresh(http, t0 + timedelta(minutes=10))
+    assert v["new"] == 1 and v["moved"] == 0
+    # Zonder hostnaam is er niets om te vergelijken; het label zegt wel dat het een privé-adres is.
+    world.leases.append(_lease("aa:bb:cc:00:01:04", hostname=None, ip="192.168.0.66"))
+    await _refresh(http, t0 + timedelta(minutes=15))
+    assert (await _notes())[-1].title == "Nieuw apparaat op je netwerk: onbekend toestel met privé-adres"
+    d = await _devs()
+    assert d["aa:bb:cc:00:01:01"].name == "iPhone Jonas" and d["aa:bb:cc:00:01:02"].name == "iPhone mama"
+    assert not d["aa:bb:cc:00:01:03"].known and not d["aa:bb:cc:00:01:04"].known
+
+
+async def test_nieuwe_apparaten_samen_in_een_melding(authed, monkeypatch):
+    world, http, t0 = await _lan(authed)
+    monkeypatch.setattr(devices, "LIST_MAX", 3)
+    world.arp += [{"mac": f"b8:27:eb:00:00:0{i}", "ip": f"192.168.0.7{i}", "manufacturer": "Raspberry Pi",
+                   "hostname": None, "intf_description": "IoT"} for i in range(4)]
+    world.arp.append({"mac": "02:42:ac:11:00:02", "ip": "192.168.0.80", "manufacturer": None, "hostname": None,
+                      "intf_description": "LAN"})
+    v = await _refresh(http, t0 + timedelta(minutes=5))
+    assert v["new"] == 5
+    (n,) = await _notes()
+    assert n.title == "5 nieuwe apparaten op je netwerk" and n.level == "warn" and n.push_key is None
+    assert n.body.splitlines() == ["Raspberry Pi: 192.168.0.70 · b8:27:eb:00:00:00 · IoT",
+                                   "Raspberry Pi: 192.168.0.71 · b8:27:eb:00:00:01 · IoT",
+                                   "Raspberry Pi: 192.168.0.72 · b8:27:eb:00:00:02 · IoT",
+                                   "… en nog 2", "Geef ze een naam onder net → apparaten."]
+    data = (await authed.get("/api/devices")).json()
+    by = {d["mac"]: d for d in data["items"]}
+    assert by["02:42:ac:11:00:02"]["private"] is True and by["b8:27:eb:00:00:00"]["private"] is False
+
+
+async def test_lege_tabel_aanvaardt_niet_alles(authed):
+    """Wie de tabel leegmaakt, krijgt bij de volgende ronde een melding over alles (niet stil alles als gekend)."""
+    world, http, t0 = await _lan(authed)
+    agen, db = await _db()
+    assert (await db.get(AppState, devices.STATE_KEY)).value["baseline"] == t0.isoformat()
+    await db.execute(delete(Device))
+    await db.commit()
+    await agen.aclose()
+    v = await _refresh(http, t0 + timedelta(minutes=5))
+    assert v["new"] == 2
+    assert not any(d.known for d in (await _devs()).values())
+    assert [n.title for n in await _notes()] == ["2 nieuwe apparaten op je netwerk"]
+
+
+async def test_aandacht_komt_alleen_terug_voor_een_echt_nieuw_apparaat(authed):
+    world, http, t0 = await _lan(authed)
+    world.arp += [{"mac": f"b8:27:eb:00:00:0{i}", "ip": f"192.168.0.7{i}", "manufacturer": "Raspberry Pi",
+                   "hostname": f"pi{i}", "intf_description": "IoT"} for i in range(3)]
+    await _refresh(http, t0 + timedelta(minutes=5))
+
+    async def item(r=None):
+        r = r or (await authed.get("/api/attention")).json()
+        return (next((i for i in r["items"] if i["key"] == "devices"), None),
+                next((i for i in r["ignored"] if i["key"] == "devices"), None))
+
+    shown, _ = await item()
+    assert shown["title"] == "3 nieuwe apparaten op je netwerk"
+    r = (await authed.put("/api/attention/ignore", json={"key": "devices", "sig": shown["sig"]})).json()
+    shown, ignored = await item(r)
+    assert shown is None and ignored is not None
+    # "ken ik" voor één ervan, en een ronde zonder iets nieuws: blijft genegeerd.
+    await authed.patch("/api/devices/b8:27:eb:00:00:00", json={"known": True})
+    await _refresh(http, t0 + timedelta(minutes=10))
+    shown, ignored = await item()
+    assert shown is None and ignored["title"] == "2 nieuwe apparaten op je netwerk"
+    # Een echt nieuw apparaat: weer zichtbaar.
+    world.arp.append({"mac": "b8:27:eb:00:00:09", "ip": "192.168.0.79", "manufacturer": "Raspberry Pi",
+                      "hostname": "pi9", "intf_description": "IoT"})
+    await _refresh(http, t0 + timedelta(minutes=15))
+    shown, ignored = await item()
+    assert shown["title"] == "3 nieuwe apparaten op je netwerk" and ignored is None
+
+
+async def test_oude_apparaten_opgeruimd(authed):
+    world, http, t0 = await _lan(authed)
+    old = t0 - timedelta(days=31)
+    agen, db = await _db()
+    db.add_all([
+        Device(mac="aa:00:00:00:00:01", known=False, first_seen=old, last_seen=old),  # onbekend: weg
+        Device(mac="aa:00:00:00:00:02", known=False, first_seen=old, last_seen=t0 - timedelta(days=29)),  # te kort
+        Device(mac="00:11:22:33:44:55", known=True, first_seen=old, last_seen=t0 - timedelta(days=365)),  # vast adres
+        Device(mac="aa:00:00:00:00:03", known=True, name="laptop", first_seen=old, last_seen=old),  # met naam
+        Device(mac="aa:00:00:00:00:04", known=True, first_seen=old, last_seen=old),  # privé-adres zonder naam: weg
+        Device(mac="00:11:22:33:44:66", known=False, first_seen=old, last_seen=old),  # onbekend vast adres: weg
+    ])
+    await db.commit()
+    await agen.aclose()
+    # Een ronde met een fout: "niet gezien" is dan niets waard, er verdwijnt niets.
+    world.broken = True
+    v = await _refresh(http, t0 + timedelta(minutes=5))
+    assert v["errors"] and v["pruned"] == 0 and len(await _devs()) == 8
+    world.broken = False
+    v = await _refresh(http, t0 + timedelta(minutes=10))
+    assert v["pruned"] == 3
+    assert sorted(await _devs()) == ["00:11:22:33:44:55", "aa:00:00:00:00:02", "aa:00:00:00:00:03",
+                                     "aa:bb:cc:00:00:01", "aa:bb:cc:00:00:02"]
+    assert not await _notes()
+
+    # Vergeten: een gekend apparaat met een vast adres gaat alleen zo weg (met een rij in de auditlog).
+    r = await authed.delete("/api/devices/00:11:22:33:44:55")
+    assert r.status_code == 204
+    assert (await authed.delete("/api/devices/00:11:22:33:44:55")).status_code == 404
+    audit = (await authed.get("/api/auth/audit?action=device_forgotten")).json()["items"]
+    assert len(audit) == 1 and audit[0]["detail"]["mac"] == "00:11:22:33:44:55"
+    # Komt het terug, dan is het een nieuw apparaat.
+    world.arp.append({"mac": "00:11:22:33:44:55", "ip": "192.168.0.90", "manufacturer": "NAS-bouwer",
+                      "hostname": "nas", "intf_description": "LAN"})
+    v = await _refresh(http, t0 + timedelta(minutes=15))
+    assert v["new"] == 1 and [n.title for n in await _notes()] == ["Nieuw apparaat op je netwerk: nas"]
