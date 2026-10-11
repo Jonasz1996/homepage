@@ -12,8 +12,9 @@ voorwaarden uit dezelfde gates() die check() gebruikt. Een regel op "alleen proe
 
 Meldingen volgen "Melden" van de tegel, zoals de storing zelf (engine.alert): hier en op de gsm, alleen hier, of alleen
 de tijdlijn. Elke poging staat in 🔔 en op de tijdlijn, maar naar de gsm gaat per regel en per storing alleen de eerste
-poging, en de eerste keer dat de limiet de regel pauzeert. Een lange storing met een herstart om de 10 min gaf anders
-de hele nacht door pushberichten.
+poging, nog één keer als het erger wordt (de herstart lukte eerst, nu mislukt ze: zo krijgt ook een gsm die alleen
+storingen krijgt het te zien), en de eerste keer dat de limiet de regel pauzeert. Een lange storing met een herstart om
+de 10 min gaf anders de hele nacht door pushberichten.
 """
 
 import logging
@@ -55,6 +56,8 @@ PROBE_TIMEOUT = 30
 LIMIT = "limiet"
 # Fouten bij het voorbereiden of uitvoeren die we als "mislukt" tonen.
 ERRORS = (IntegrationError, SshFail, OSError, ValueError)
+# Hoe erg een melding is: wat erger is dan wat al naar de gsm ging, gaat er nog eens heen (zie _to_phone).
+RANK = {"info": 0, "warn": 1, "err": 2}
 
 
 def describe(action: dict) -> str:
@@ -340,7 +343,7 @@ def rule_plan(rule: HealRule, name: str, g: Gates, prep: Prepared | Exception, n
         warnings.append("Alleen proef: ook automatisch voert deze regel niets uit, ze zet alleen op de tijdlijn wat ze "
                         "zou doen.")
     after = [_lands(mode, f"melding \"Zelfherstel: {name} was …× down\" of \"Zelfherstel voor {name} mislukt\"",
-                    "de eerste poging"),
+                    "de eerste poging (en de eerste die mislukt, als een herstart eerst lukte)"),
              f"telt mee voor hoogstens {per_hour(rule)}× per uur, met minstens "
              f"{int(COOLDOWN.total_seconds() // 60)} min ertussen"]
     return proef.plan(f"Zelfherstel voor {name}: {describe(rule.action)}", steps, checks=checks, after=after,
@@ -382,30 +385,33 @@ def push_key(rule_id: int, what: str = "poging") -> str:
     return f"heal{rule_id}" if what == "poging" else f"heal{rule_id}:{what}"
 
 
-async def _first_in_outage(db: AsyncSession, key: str, service_id: int) -> bool:
-    """Ging er in deze storing nog niets met deze sleutel naar de gsm? Ja als er nooit iets ging, of als de service
-    sindsdien een geslaagde check had (buiten onderhoud): dan was die vorige storing voorbij.
+async def _to_phone(db: AsyncSession, key: str, service_id: int, level: str) -> bool:
+    """Naar de gsm? Ja als er in deze storing nog niets met deze sleutel heen ging, of als dit erger is dan wat er
+    heen ging: eerst "herstart gelukt" (warn), nu "mislukt" (err). Een gsm die alleen storingen krijgt, kreeg het
+    eerste niet en ziet zo toch dat zelfherstel niet meer lukt.
+    Een nieuwe storing: de service had sinds de vorige melding een geslaagde check (buiten onderhoud). Binnen een
+    storing gaat er alleen iets ergers naar de gsm, dus de laatste met deze sleutel is ook de ergste.
     Twee kleine opzoekingen: push_key heeft een index, en check_results begint met (service_id, ts)."""
-    last = (await db.execute(select(Notification.ts).where(Notification.push_key == key)
-                             .order_by(Notification.id.desc()).limit(1))).scalar()
-    if last is None:
+    last = (await db.execute(select(Notification.ts, Notification.level).where(Notification.push_key == key)
+                             .order_by(Notification.id.desc()).limit(1))).first()
+    if last is None or RANK.get(level, 0) > RANK.get(last.level, 0):
         return True
     up = (await db.execute(select(CheckResult.ts).where(
         CheckResult.service_id == service_id, CheckResult.ok.is_(True), CheckResult.maintenance.isnot(True),
-        CheckResult.ts > last).limit(1))).first()
+        CheckResult.ts > last.ts).limit(1))).first()
     return up is not None
 
 
 async def _say(db: AsyncSession, mode: str, key: str, title: str, body: str, level: str, service_id: int,
                data: dict | None = None) -> None:
-    """Een melding over zelfherstel, zoals "Melden" van de tegel het wil (zie engine.alert). Naar de gsm alleen als
-    er in deze storing nog niets met deze sleutel heen ging; de rest staat in 🔔 en op de tijdlijn.
-    Alleen wat naar de gsm gaat, krijgt de sleutel: daar kijkt _first_in_outage naar. Pushberichten met dezelfde
-    sleutel vervangen elkaar op de gsm. Wis je die melding in 🔔, dan kan de volgende poging nog één keer pushen."""
+    """Een melding over zelfherstel, zoals "Melden" van de tegel het wil (zie engine.alert). Naar de gsm alleen de
+    eerste met deze sleutel in deze storing, of iets ergers (_to_phone); de rest staat in 🔔 en op de tijdlijn.
+    Alleen wat naar de gsm gaat, krijgt de sleutel: daar kijkt _to_phone naar. Pushberichten met dezelfde sleutel
+    vervangen elkaar op de gsm. Wis je die melding in 🔔, dan kan de volgende poging nog één keer pushen."""
     if mode == "uit":
         event(db, "actie", title, body, level, service_id, data)
         return
-    push = mode != "centrum" and await _first_in_outage(db, key, service_id)
+    push = mode != "centrum" and await _to_phone(db, key, service_id, level)
     notify(db, title, body, level=level, source="herstel", service_id=service_id, data=data, push=push,
            key=key if push else None)
 
@@ -484,7 +490,8 @@ async def check(maker: async_sessionmaker, service_id: int, http: HttpClients,
             rule = await db.get(HealRule, rule_id)
             if rule is not None:
                 rule.last_result = res
-            # Elke poging in 🔔 (of alleen op de tijdlijn), naar de gsm alleen de eerste van deze storing.
+            # Elke poging in 🔔 (of alleen op de tijdlijn), naar de gsm alleen de eerste van deze storing (en de
+            # eerste die mislukt na een die lukte).
             if err is None:
                 await _say(db, mode, push_key(rule_id), f"Zelfherstel: {name} was {fails}× down",
                            f"{describe(action)} — {res[4:]}", "warn", service_id,

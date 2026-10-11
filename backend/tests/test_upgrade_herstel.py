@@ -373,13 +373,43 @@ async def test_zelfherstel_een_push_per_storing(authed):
 
 
 class BrokenPve(PveFake):
-    """Proxmox die elke actie weigert: de herstart mislukt."""
+    """Proxmox die elke actie weigert (zolang broken): de herstart mislukt."""
+
+    def __init__(self):
+        super().__init__()
+        self.broken = True
 
     def __call__(self, req: httpx.Request) -> httpx.Response:
-        if req.method == "POST":
+        if req.method == "POST" and self.broken:
             self.calls.append(req)
             return httpx.Response(500, text="kapot")
         return super().__call__(req)
+
+
+async def test_zelfherstel_erger_gaat_nog_een_keer_naar_de_gsm(authed):
+    """Eerst lukt de herstart (warn: niet op een gsm die alleen storingen krijgt), daarna mislukt ze (err): die eerste
+    mislukte poging gaat nog naar de gsm, de volgende (en een herstart die weer lukt) niet meer."""
+    webpush._sent.clear()
+    pve = BrokenPve()
+    pve.broken = False
+    plex, rid, agen, db, http, maker = await _heal_setup(authed, pve, max_per_hour=5)
+    await _run(PushService([]))  # wat er al was, zoals door de worker
+    phone = Phone(A)
+    await _subscribe(authed, phone, "Pixel")  # standaard: alleen storingen (err)
+    t0 = datetime.now(timezone.utc)
+    assert (await healing.check(maker, plex, http, t0)).startswith("ok")
+    pve.broken = True
+    for m in (11, 22):
+        assert (await healing.check(maker, plex, http, t0 + timedelta(minutes=m))).startswith("mislukt")
+    pve.broken = False
+    assert (await healing.check(maker, plex, http, t0 + timedelta(minutes=33))).startswith("ok")
+    attempt, failed = "Zelfherstel: Plex was 3× down", "Zelfherstel voor Plex mislukt"
+    assert [(n.title, n.push_key, n.pushed_at is None) for n in await _heal_notes(db)] == [
+        (attempt, f"heal{rid}", True), (failed, f"heal{rid}", True), (failed, None, False), (attempt, None, False)]
+    svc = PushService([phone])
+    await _run(svc)
+    assert [m["title"] for m in svc.to(phone)] == [failed]
+    await agen.aclose()
 
 
 async def test_zelfherstel_mislukt_en_melden_van_de_tegel(authed):
@@ -420,7 +450,8 @@ async def test_zelfherstel_mislukt_en_melden_van_de_tegel(authed):
 
     # De proef zegt hetzelfde.
     g = healing.gates(rule, 3, False, False, t0)
-    for mode, end in (("push", "in 🔔; op je gsm alleen de eerste poging van deze storing"),
+    for mode, end in (("push", "in 🔔; op je gsm alleen de eerste poging (en de eerste die mislukt, als een "
+                               "herstart eerst lukte) van deze storing"),
                       ("centrum", "in 🔔, niet op je gsm (Melden staat op alleen hier)"),
                       ("uit", "alleen op de tijdlijn (Melden staat op niet)")):
         assert healing.rule_plan(rule, "Plex", g, ValueError("x"), t0, mode=mode)["after"][0].endswith(end)
