@@ -378,9 +378,16 @@ def _swap(url: str, scheme: str | None, ip: str, port: int | None) -> str:
     return f"{scheme or p.scheme}://{host}" + (f":{port}" if port else "") + (p.path if p.path not in ("", "/") else "")
 
 
+def _lan(ip: str) -> bool:
+    """Een LAN-adres: een publiek adres uit DNS (bv. van Cloudflare) of loopback is niet het IP van het systeem."""
+    a = ipaddress.ip_address(ip)
+    return a.is_private and not (a.is_loopback or a.is_link_local or a.is_unspecified)
+
+
 async def ip_from_url(url: str | None, routes: dict | None, npm_ip: str | None) -> tuple[str | None, str, str | None]:
     """(IP, hoe, adres op IP) voor een adres: staat er al een IP in → "ip"; kent NPM de naam met een IP als doel → dat
-    doel, "npm"; anders DNS (3 s), tenzij dat het IP van NPM zelf geeft → "dns"; anders (None, "onbekend", None)."""
+    doel, "npm"; anders DNS (3 s), als dat een LAN-adres geeft en niet het IP van NPM zelf → "dns"; anders (None,
+    "onbekend", None)."""
     host = urlsplit(url or "").hostname
     if not host:
         return None, "onbekend", None
@@ -390,7 +397,7 @@ async def ip_from_url(url: str | None, routes: dict | None, npm_ip: str | None) 
     if e and _is_ip(e.get("host")):
         return e["host"], "npm", _swap(url, e.get("scheme"), e["host"], e.get("port"))
     ip = await _resolve(host)
-    if ip and ip != npm_ip and not (e and ip == e.get("via")):
+    if ip and _lan(ip) and ip != npm_ip and not (e and ip == e.get("via")):
         return ip, "dns", _swap(url, None, ip, None)
     return None, "onbekend", None
 

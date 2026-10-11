@@ -412,6 +412,22 @@ async def test_live_ip():
     assert (await nood._live_ip(agent, "pve50", "qemu", 104))[2] == "geen QEMU guest agent"
 
 
+async def test_dns_alleen_lan(monkeypatch):
+    # Een naam die niet in NPM staat: alleen een LAN-adres uit DNS is het IP van het systeem zelf (niet Cloudflare).
+    answer = {}
+
+    async def resolve(name):
+        return answer.get(name)
+    monkeypatch.setattr(nood, "_resolve", resolve)
+    answer.update({"ha.jbogaert.be": "104.21.3.4", "pbs.jbogaert.be": "192.168.0.60", "lo.jbogaert.be": "127.0.0.1",
+                   "npm.jbogaert.be": "192.168.0.245"})
+    assert await nood.ip_from_url("https://ha.jbogaert.be", {}, "192.168.0.245") == (None, "onbekend", None)
+    assert await nood.ip_from_url("https://lo.jbogaert.be", {}, None) == (None, "onbekend", None)
+    assert await nood.ip_from_url("https://npm.jbogaert.be", {}, "192.168.0.245") == (None, "onbekend", None)
+    assert await nood.ip_from_url("https://pbs.jbogaert.be:8007", {}, "192.168.0.245") == \
+        ("192.168.0.60", "dns", "https://192.168.0.60:8007")
+
+
 async def test_masker_vangnet(authed, monkeypatch, tmp_path):
     # (a) Een tegel met het geheim van het Proxmox-token als naam, op CT 101: in "diensten".
     await _setup(authed, monkeypatch, tmp_path, extra_tile="Xq7-pve-9Zt")
