@@ -223,6 +223,8 @@ async def run_all(db: AsyncSession, hosts: list[SshHost], fn) -> dict[int, dict]
     """fn(h, login) voor elke host, een paar tegelijk. Een fout bij één host stopt de rest niet.
     De logins eerst ophalen: de databasesessie mag niet door meerdere taken tegelijk gebruikt worden."""
     logins = [(h, await login_for(db, h)) for h in hosts]
+    # Geen transactie open tijdens SSH naar alle hosts: de verbinding gaat terug naar de pool.
+    await db.commit()
     sem = asyncio.Semaphore(PARALLEL)
 
     async def one(h: SshHost, login: Login) -> tuple[int, dict]:

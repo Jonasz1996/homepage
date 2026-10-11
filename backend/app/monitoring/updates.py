@@ -232,6 +232,9 @@ async def collect(db: AsyncSession, clients: HttpClients) -> list[dict]:
     hosts = (await db.execute(select(SshHost).where(SshHost.updates.in_(("host", "cts"))))).scalars().all()
     d = await defaults(db)
     logins = {h.id: await login_for(db, h, d) for h in hosts}
+    # Alles gelezen: geen transactie open tijdens de API-vragen en SSH (tot SSH_TIMEOUT per machine). De verbinding
+    # gaat terug naar de pool; tegels en hosts blijven bruikbaar (expire_on_commit=False).
+    await db.commit()
     fetch = {"proxmox": from_proxmox, "proxmoxbackupserver": from_pbs, "portainer": from_portainer,
              "opnsense": from_opnsense}
     jobs = [fetch[s.type](s, clients) for s in services] + [from_ssh(h, logins[h.id]) for h in hosts]
@@ -270,10 +273,18 @@ def record_changes(db: AsyncSession, old: dict[str, dict], new: list[dict]) -> N
 
 
 async def run_updates(db: AsyncSession, clients: HttpClients) -> dict:
-    if not await job_lock(db, KEY):
-        # Loopt al (worker, knop of na een installatie): de vorige stand teruggeven.
-        state = await db.get(AppState, KEY)
-        return state.value if state else {}
+    async with job_lock(db, KEY) as ok:
+        if not ok:
+            # Loopt al (worker, knop of na een installatie): de vorige stand teruggeven.
+            state = await db.get(AppState, KEY)
+            return state.value if state else {}
+        value = await _check(db, clients)
+        # Bewaren voor het slot vrijkomt: een volgende ronde vergelijkt dan met deze stand (geen dubbele regels).
+        await db.commit()
+        return value
+
+
+async def _check(db: AsyncSession, clients: HttpClients) -> dict:
     state = await db.get(AppState, KEY)
     old = {t["key"]: t for t in (state.value.get("targets", []) if state else [])}
     new = await collect(db, clients)

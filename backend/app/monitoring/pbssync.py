@@ -194,6 +194,8 @@ async def ssh_host(db: AsyncSession, p: dict) -> SshHost | None:
 
 async def _run(db: AsyncSession, h: SshHost, script: str, stdin: str | None = None) -> tuple[int, str]:
     login = await login_for(db, h)
+    # Geen transactie open tijdens SSH (tot twee minuten): de verbinding gaat terug naar de pool.
+    await db.commit()
     async with ssh_exec.connect(h, login) as conn:
         try:
             # Zonder invoer: stdin meteen dicht, zodat niets blijft wachten op een toetsenbord.

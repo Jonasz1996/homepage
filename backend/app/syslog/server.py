@@ -10,11 +10,11 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, insert, select, text
+from sqlalchemy import insert, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from ..config import get_settings
-from ..db import get_engine
+from ..db import delete_before, get_engine
 from ..models import LogEntry, LogRule, Notification
 from .parse import SEVERITIES, Parsed, parse
 
@@ -137,8 +137,8 @@ class Receiver:
             try:
                 async with self.maker() as db:
                     keep = timedelta(days=get_settings().syslog_keep_days)
-                    await db.execute(delete(LogEntry).where(LogEntry.ts < datetime.now(timezone.utc) - keep))
-                    await db.commit()
+                    # Per uur met een commit ertussen: ook na een lange stilstand blijft elke DELETE kort.
+                    await delete_before(db, LogEntry.ts, datetime.now(timezone.utc) - keep, timedelta(hours=1))
             except Exception:
                 log.exception("Opruimen mislukt")
 
@@ -187,7 +187,7 @@ async def handle_tcp(rx: Receiver, reader: asyncio.StreamReader, writer: asyncio
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     s = get_settings()
-    maker = async_sessionmaker(get_engine(), expire_on_commit=False)
+    maker = async_sessionmaker(get_engine("syslog"), expire_on_commit=False)
     rx = Receiver(maker)
     await rx.detect_timescale()
     await rx.reload_rules()

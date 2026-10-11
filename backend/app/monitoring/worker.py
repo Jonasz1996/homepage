@@ -392,7 +392,7 @@ class Worker:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    maker = async_sessionmaker(get_engine(), expire_on_commit=False)
+    maker = async_sessionmaker(get_engine("worker"), expire_on_commit=False)
     asyncio.run(Worker(maker).run())
 
 

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import ensure_state
+from ..db import delete_before, ensure_state
 from ..deps import event, notify
 from ..models import (AppState, AuditLog, CheckResult, Event, Metric, Notification, Service, ServiceState, Session,
                       UpdateRun)
@@ -338,8 +338,9 @@ async def record(db: AsyncSession, service: Service, outcome: Outcome, now: date
 
 async def cleanup(db: AsyncSession) -> None:
     now = datetime.now(timezone.utc)
-    await db.execute(delete(CheckResult).where(CheckResult.ts < now - timedelta(days=KEEP_CHECKS_DAYS)))
-    await db.execute(delete(Metric).where(Metric.ts < now - timedelta(days=KEEP_METRICS_DAYS)))
+    # In stukjes met een commit ertussen: na een lange stilstand blijft elke DELETE onder de statement_timeout.
+    await delete_before(db, CheckResult.ts, now - timedelta(days=KEEP_CHECKS_DAYS), timedelta(hours=6))
+    await delete_before(db, Metric.ts, now - timedelta(days=KEEP_METRICS_DAYS), timedelta(days=1))
 
 
 async def housekeeping(db: AsyncSession) -> None:

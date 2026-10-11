@@ -259,6 +259,9 @@ async def run_selfcheck(db: AsyncSession, offsite_on: bool) -> dict:
     now = datetime.now(timezone.utc).replace(microsecond=0)
     state = await db.get(AppState, STATE_KEY)
     prev = state.value if state else {}
+    ks = await db.get(AppState, KEY_STATE) if offsite_on else None
+    # Alles gelezen: geen transactie open tijdens het nakijken en kopiëren van de dumps (kan minuten duren).
+    await db.commit()
     dumps = list_dumps(s.backup_dir)
     latest = dumps[0] if dumps else None
     verified = prev.get("verified") or {}
@@ -294,7 +297,6 @@ async def run_selfcheck(db: AsyncSession, offsite_on: bool) -> dict:
 
     offsite = {"enabled": offsite_on, "dir": str(s.offsite_dir), "error": None}
     if offsite_on:
-        ks = await db.get(AppState, KEY_STATE)
         blob = ks.value.get("blob") if ks else None
         try:
             offsite.update(await asyncio.to_thread(offsite_copy, s.backup_dir, s.offsite_dir, blob, now))

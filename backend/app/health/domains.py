@@ -90,6 +90,8 @@ async def run_domains(db: AsyncSession, http, domains: list[dict]) -> dict:
     now = datetime.now(timezone.utc).replace(microsecond=0)
     state = await db.get(AppState, STATE_KEY)
     prev = {d["name"]: d for d in (state.value.get("items", []) if state else [])}
+    # Geen transactie open tijdens de RDAP-vragen (tot 20 s per domein, na elkaar).
+    await db.commit()
     client = http.get(False)
     items = []
     for cfg in domains:
