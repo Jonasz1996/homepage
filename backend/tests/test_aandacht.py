@@ -282,6 +282,35 @@ async def test_checklist_proef_staat_op_half(authed):
     await agen.aclose()
 
 
+async def test_checklist_dashboard_alleen_via_npm(authed, monkeypatch, tmp_path):
+    """Wat nginx rechtstreeks toelaat (install.sh schrijft het in /etc/homepage/nginx): alleen NPM is in orde, het
+    hele LAN (HOMEPAGE_LAN_OPEN=1, of het IP van NPM was niet opgegeven) is half, zonder bestand onbekend."""
+    from app.config import get_settings
+    f = tmp_path / "nginx"
+    monkeypatch.setattr(get_settings(), "nginx_file", f)
+
+    async def lan() -> dict:
+        r = (await authed.get("/api/attention/setup")).json()
+        return next(x for g in r["groups"] if g["key"] == "beveiliging" for x in g["rows"] if x["key"] == "lan")
+
+    row = await lan()
+    assert row["state"] == "none" and "install.sh" in row["todo"][0]
+
+    f.write_text("lan=dicht\nreden=\nnpm=192.168.0.245\ndatum=2026-10-11T10:00:00+02:00\n")
+    row = await lan()
+    assert row["state"] == "ok" and "NPM (192.168.0.245)" in row["text"] and not row["todo"], row
+
+    f.write_text("lan=open\nreden=lan-open\nnpm=192.168.0.245\n")
+    row = await lan()
+    assert row["state"] == "half" and "onversleuteld" in row["text"]
+    assert "HOMEPAGE_LAN_OPEN=1 staat in /etc/homepage/homepage.env" in row["todo"][0]
+
+    f.write_text("lan=open\nreden=npm-onbekend\nnpm=192.168.0.245\n")
+    row = await lan()
+    assert row["state"] == "half" and "HOMEPAGE_NPM_IP=192.168.0.245" in row["todo"][0]
+    assert "HOMEPAGE_LAN_OPEN=0" in row["todo"][0]
+
+
 async def _group(c, sid: int) -> int:
     agen, db = await _db()
     gid = (await db.get(Service, sid)).group_id

@@ -19,7 +19,9 @@ CONF_DIR=/etc/homepage
 BK=/var/backups/homepage
 # NPM_IP: het IP van Nginx Proxy Manager. Wordt bij de eerste keer bewaard in homepage.env en daarna daar gelezen.
 NPM_IP="${NPM_IP:-$(sed -n 's/^HOMEPAGE_NPM_IP=//p' "$CONF_DIR/homepage.env" 2>/dev/null | tail -1 || true)}"
-NPM_IP="${NPM_IP:-192.168.0.245}"
+# Niet opgegeven en nog niet bewaard: dan is de standaard een gok, en blijft het LAN open (zie nginx hieronder).
+NPM_GOK=""
+[ -n "$NPM_IP" ] || { NPM_IP=192.168.0.245; NPM_GOK=1; }
 
 say() { printf '\n\033[1;37m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m!! %s\033[0m\n' "$*"; }
@@ -212,6 +214,15 @@ if grep -q '^HOMEPAGE_NPM_IP=' "$CONF_DIR/homepage.env"; then
 else
   echo "HOMEPAGE_NPM_IP=$NPM_IP" >> "$CONF_DIR/homepage.env"
 fi
+# Was het IP van NPM een gok, dan blijft het LAN open, ook na volgende updates: anders sloot een verkeerd IP je bij
+# de volgende update buiten. Dichtzetten (HOMEPAGE_LAN_OPEN=0) doe je zelf, als het dashboard via NPM werkt.
+if [ -n "$NPM_GOK" ]; then
+  if grep -q '^HOMEPAGE_LAN_OPEN=' "$CONF_DIR/homepage.env"; then
+    sed -i "s/^HOMEPAGE_LAN_OPEN=.*/HOMEPAGE_LAN_OPEN=1/" "$CONF_DIR/homepage.env"
+  else
+    echo "HOMEPAGE_LAN_OPEN=1" >> "$CONF_DIR/homepage.env"
+  fi
+fi
 
 # Map voor de dagelijkse back-up: postgres schrijft, de worker (groep homepage) leest om ze te controleren.
 install -d -m 750 -o postgres -g homepage /var/backups/homepage
@@ -313,8 +324,16 @@ for d in "$APP_DIR"/.venv-*; do
 done
 
 say "nginx"
+# Alleen NPM en de container zelf, van het LAN alleen push-monitors, webhooks en /api/healthz (deploy/nginx-map.conf).
+# HOMEPAGE_LAN_OPEN=1 in homepage.env (hierboven ingelezen): het hele LAN mag alles, om op http://IP te testen.
+# Was het IP van NPM een gok: altijd open.
+LAN_OPEN="" LAN_DICHT=1
+case "${HOMEPAGE_LAN_OPEN:-0}" in 1|true|yes|ja|aan) LAN_OPEN=1 ;; esac
+[ -z "$NPM_GOK" ] || LAN_OPEN=1
+[ -z "$LAN_OPEN" ] || LAN_DICHT=0
 NPM_IP_RE="${NPM_IP//./\\\\.}"
-sed "s/__NPM_IP_RE__/$NPM_IP_RE/" "$APP_DIR/deploy/nginx-map.conf" > /etc/nginx/conf.d/homepage-map.conf
+sed "s/__NPM_IP_RE__/$NPM_IP_RE/; s/__LAN_DICHT__/$LAN_DICHT/" "$APP_DIR/deploy/nginx-map.conf" \
+  > /etc/nginx/conf.d/homepage-map.conf
 install -D -m 644 "$APP_DIR/deploy/nginx-headers.conf" /etc/nginx/snippets/homepage-headers.conf
 sed "s/__NPM_IP__/$NPM_IP/" "$APP_DIR/deploy/nginx.conf" > /etc/nginx/sites-available/homepage
 # Zonder IPv6 in de container kan nginx niet op [::] luisteren.
@@ -324,6 +343,13 @@ rm -f /etc/nginx/sites-enabled/default
 nginx -t
 systemctl enable nginx
 systemctl reload nginx || systemctl restart nginx
+# Wat nginx nu toelaat, voor de instellingen in het dashboard (rij "Dashboard alleen via NPM").
+LAN_STAAT=dicht LAN_REDEN=""
+if [ -n "$NPM_GOK" ]; then LAN_STAAT=open LAN_REDEN=npm-onbekend
+elif [ -n "$LAN_OPEN" ]; then LAN_STAAT=open LAN_REDEN=lan-open
+fi
+printf 'lan=%s\nreden=%s\nnpm=%s\ndatum=%s\n' "$LAN_STAAT" "$LAN_REDEN" "$NPM_IP" "$(date -Iseconds)" > "$CONF_DIR/nginx"
+chgrp homepage "$CONF_DIR/nginx" && chmod 640 "$CONF_DIR/nginx"
 
 say "Services"
 # Een update terugdraaien: vorige versie plus de kopie van de database van vlak voor die update.
@@ -350,9 +376,28 @@ fi
 IP=$(hostname -I | awk '{print $1}')
 say "Klaar (versie $VERSIE, ${KANAAL:-nieuwste})"
 cat <<EOF
-Dashboard: http://$IP
-Testen kan meteen op dat adres. Voor gebruik van buitenaf: in Nginx Proxy Manager een HTTPS-host
-(bv. home.jbogaert.be) naar http://$IP:80 met "Websockets Support" aan.
+Dashboard: open het via zijn naam in Nginx Proxy Manager (bv. https://home.jbogaert.be): een HTTPS-host naar
+http://$IP:80 met "Websockets Support" aan.
+EOF
+if [ -n "$LAN_OPEN" ]; then
+  cat <<EOF
+Rechtstreeks op http://$IP kan nu ook vanaf het hele LAN (HOMEPAGE_LAN_OPEN=1): je wachtwoord en sessiecookie
+gaan dan onversleuteld over het netwerk, dus alleen om te testen. Werkt het via NPM, zet dan HOMEPAGE_LAN_OPEN=0 in
+$CONF_DIR/homepage.env en voer dit script opnieuw uit: bash $APP_DIR/deploy/install.sh
+EOF
+else
+  cat <<EOF
+Rechtstreeks op http://$IP werkt alleen vanuit de container zelf: nginx laat alleen NPM ($NPM_IP) binnen, en van
+het LAN alleen push-monitors, webhooks en /api/healthz (Zabbix). Eerst testen zonder NPM: zet HOMEPAGE_LAN_OPEN=1
+in $CONF_DIR/homepage.env en voer dit script opnieuw uit: bash $APP_DIR/deploy/install.sh
+EOF
+fi
+if [ -n "$NPM_GOK" ]; then
+  warn "Het IP van Nginx Proxy Manager was niet opgegeven: de standaard $NPM_IP staat nu in $CONF_DIR/homepage.env\
+ (HOMEPAGE_NPM_IP). Daarom blijft het LAN open (HOMEPAGE_LAN_OPEN=1), zodat een verkeerd IP je niet buitensluit.\
+ Kijk HOMEPAGE_NPM_IP na en zet HOMEPAGE_LAN_OPEN=0 zodra het dashboard via NPM werkt."
+fi
+cat <<EOF
 Bijwerken: hetzelfde bootstrap-commando opnieuw uitvoeren.
 Werkt iets niet meer na een update: homepage-terugzetten (vorige versie plus de database van daarvoor).
 EOF
