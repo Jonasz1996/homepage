@@ -44,6 +44,7 @@ def nep(monkeypatch):
     integrations_router._cache.clear()
     monkeypatch.setattr(overzicht, "_tegels_taak", None)
     monkeypatch.setattr(overzicht, "_tegels_vorige", None)
+    monkeypatch.setattr(overzicht, "_tegels_begin", float("-inf"))
     return f
 
 
@@ -317,6 +318,45 @@ async def test_trage_tegels(authed, nep, monkeypatch):
     assert started == [1]  # uit de cache: de API niet opnieuw gevraagd
     assert w == (await authed.get("/api/widgets")).json() and started == [1]
     assert overzicht._tegels_taak.done()
+
+
+async def test_vers_na_een_wijziging(authed, nep, monkeypatch):
+    """Na een gewijzigde tegel vraagt het scherm de tegels met vers=1: dan niet aansluiten bij een berekening die nog
+    loopt (die las de tegel van vóór de wijziging), maar opnieuw rekenen. De oude berekening die pas daarna afloopt,
+    overschrijft de nieuwe vorige stand niet."""
+    g = await _group(authed)
+    sid = await _svc(authed, g, "adguard", "https://oud.jbogaert.be", secrets={"username": "a", "password": "b"})
+    los = asyncio.Event()
+    echt = integrations_router._fields
+
+    async def velden(i):
+        if "oud" in i.base:
+            await los.wait()
+            raise IntegrationError("Time-out")
+        return await echt(i)
+
+    monkeypatch.setattr(integrations_router, "_fields", velden)
+    monkeypatch.setattr(overzicht, "WIDGETS_BUDGET", 0.2)
+    r = (await authed.get("/api/overzicht", params={"delen": "widgets"})).json()
+    assert r["fouten"] == {"widgets": overzicht.TRAAG}
+    oud = overzicht._tegels_taak
+    assert not oud.done()
+
+    r = await authed.patch(f"/api/services/{sid}", json={"group_id": g, "name": "X", "url": "https://adguard.jbogaert.be", "type": "adguard", "config": {}})
+    assert r.status_code == 200, r.text
+    monkeypatch.setattr(overzicht, "WIDGETS_BUDGET", 2)
+    # Zonder vers: dezelfde (oude) berekening, die nog loopt.
+    await authed.get("/api/overzicht", params={"delen": "widgets", "vers": "0"})
+    assert overzicht._tegels_taak is oud
+    # Met vers: een nieuwe, met het nieuwe adres.
+    r = (await authed.get("/api/overzicht", params={"delen": "widgets", "vers": "1"})).json()
+    assert overzicht._tegels_taak is not oud and r["fouten"] == {}
+    assert {f["label"]: f["value"] for f in r["delen"]["widgets"][str(sid)]["fields"]}["geblokkeerd"] == "12.5%"
+    nieuw = overzicht._tegels_vorige
+
+    los.set()
+    await asyncio.wait_for(asyncio.shield(oud), 5)
+    assert overzicht._tegels_vorige is nieuw
 
 
 async def test_trage_kapotte_tegel_geeft_de_vorige_stand(authed, nep, monkeypatch):

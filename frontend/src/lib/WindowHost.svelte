@@ -56,9 +56,12 @@
 </script>
 
 {#if dash.modal && byId[dash.modal.id]?.load}
-  {#key dash.modal}
-    <Lazy load={byId[dash.modal.id].load} {...propsOf(dash.modal)} />
-  {/key}
+  <!-- Boven de grote vensters (60-64), ook als het venster zelf Window gebruikt (API-beheer). -->
+  <div class="mw">
+    {#key dash.modal}
+      <Lazy load={byId[dash.modal.id].load} {...propsOf(dash.modal)} />
+    {/key}
+  </div>
 {/if}
 
 {#if dash.big.terminal?.used}
@@ -89,4 +92,5 @@
 <style>
   /* Elk groot venster in een eigen laag, zodat het laatst geopende bovenaan ligt (onder de gewone vensters). */
   .bw { position: relative }
+  .mw { position: relative; z-index: 65 }
 </style>

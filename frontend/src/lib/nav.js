@@ -27,6 +27,12 @@ function sync() {
 }
 
 if (typeof window !== 'undefined') {
+  // Herladen terwijl er een venster open was: de pagina staat dan nog op de extra stap, zonder venster. Weg ermee,
+  // anders doet de eerste keer terug niets.
+  if (onStep()) {
+    ignore++
+    history.back()
+  }
   addEventListener('popstate', () => {
     if (ignore) {
       // Onze eigen stap terug: alleen opnieuw kijken of er intussen een venster openging.
@@ -40,17 +46,22 @@ if (typeof window !== 'undefined') {
   })
 }
 
-/** Registreert een open venster of menu. close() wordt opgeroepen bij terug; geeft een functie die de laag weghaalt. */
+/**
+ * Registreert een open venster of menu. close() wordt opgeroepen bij terug; geeft een functie die de laag weghaalt,
+ * met release.top(): of deze laag nu bovenaan ligt (Escape mag dan alleen dit venster sluiten).
+ */
 export function layer(close) {
   const me = { close }
   layers.push(me)
   sync()
   let done = false
-  return () => {
+  const release = () => {
     if (done) return
     done = true
     const i = layers.indexOf(me)
     if (i >= 0) layers.splice(i, 1)
     sync()
   }
+  release.top = () => layers.at(-1) === me
+  return release
 }

@@ -66,12 +66,18 @@
     return () => { release(); removeEventListener('keydown', key); removeEventListener('pointerdown', away, true) }
   })
 
-  function go(id) {
+  // De focus eerst terug op de menuknop (het menu-item verdwijnt): een venster dat nu opent, geeft ze bij het sluiten
+  // daaraan terug.
+  function shut() {
+    document.querySelector('.mbtn.on')?.focus({ preventScroll: true })
     open = null
+  }
+  function go(id) {
+    shut()
     dash.open(id, startOf(id))
   }
   function toggleEdit() {
-    open = null
+    shut()
     dash.editing = !dash.editing
   }
   function toggleFx() {
@@ -79,7 +85,7 @@
     if (dash.fx) storm()
   }
   function logout() {
-    open = null
+    shut()
     onlogout()
   }
 </script>
@@ -163,11 +169,11 @@
     padding: 6px; display: flex; flex-direction: column; gap: 2px; white-space: normal; text-align: left;
     background: rgba(18, 18, 18, .97); border: 1px solid var(--line-2); box-shadow: 0 12px 40px rgba(0, 0, 0, .6)
   }
-  .sec { font-size: 11.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); padding: 10px 10px 2px }
+  .sec { flex: none; font-size: 11.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); padding: 10px 10px 2px }
   .sec:first-child { padding-top: 4px }
   .it {
     all: unset; box-sizing: border-box; cursor: pointer; display: grid; grid-template-columns: 1fr auto; column-gap: 10px;
-    padding: 8px 10px; border-radius: 9px; min-height: 44px
+    padding: 8px 10px; border-radius: 9px; min-height: 44px; flex: none
   }
   .it:hover, .it:focus-visible { background: var(--fill-h) }
   .it:focus-visible { outline: 2px solid #fff; outline-offset: -2px }

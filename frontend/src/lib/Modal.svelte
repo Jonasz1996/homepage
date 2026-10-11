@@ -12,11 +12,12 @@
   let { title, onclose, children, wide = false, small = false } = $props()
   const me = {}
   let box = $state()
+  let navLayer = null
 
   onMount(() => {
     stack.push(me)
     // De terugknop van de gsm sluit dit venster.
-    const release = layer(() => onclose())
+    const release = (navLayer = layer(() => onclose()))
     const before = document.activeElement
     tick().then(() => {
       if (box && !box.contains(document.activeElement)) box.querySelector('input, select, textarea, button:not(.x)')?.focus({ preventScroll: true })
@@ -29,7 +30,8 @@
   })
 
   function key(e) {
-    if (e.key === 'Escape' && stack.at(-1) === me) onclose()
+    // Ook niet als er een groot venster boven dit venster ligt (bv. de terminal, geopend vanuit een cronjob).
+    if (e.key === 'Escape' && stack.at(-1) === me && navLayer?.top() !== false) onclose()
   }
 </script>
 

@@ -166,6 +166,22 @@ test('terugknop sluit het bovenste venster, niet de pagina', async () => {
   expect(page.url()).toBe(url)
 })
 
+test('een groot venster houdt zijn tab als een ander groot venster opent en sluit', async () => {
+  await page.getByRole('searchbox', { name: 'Zoeken' }).fill('cluster: quorum')
+  await page.getByRole('searchbox', { name: 'Zoeken' }).press('Enter')
+  const health = page.getByRole('dialog', { name: 'Gezondheid' })
+  await expect(health.getByRole('tab', { name: /^cluster/ })).toHaveAttribute('aria-selected', 'true')
+  await health.getByRole('tab', { name: /^temperatuur/ }).click()
+  // Gezondheid bedekt de titelbalk: Logs via Ctrl+K.
+  await page.keyboard.press('Control+k')
+  await page.keyboard.type('syslog van je machines')
+  await page.keyboard.press('Enter')
+  await page.getByRole('button', { name: 'Logs sluiten' }).click()
+  await expect(health.getByRole('tab', { name: /^temperatuur/ })).toHaveAttribute('aria-selected', 'true')
+  await page.getByRole('button', { name: 'Gezondheid sluiten' }).click()
+  await expect(closeButtons()).toHaveCount(0)
+})
+
 test('verbinding weg: balk met opnieuw proberen, daarna weer bijgewerkt', async () => {
   // Het dashboard ververst elke 30 seconden: binnen die tijd komt de balk.
   await page.route('**/api/overzicht**', (r) => r.abort())

@@ -13,6 +13,9 @@ export const PARTS = {
   // op de server als een nieuw bezoek.
   buiten: Infinity,
 }
+// In hun eigen verzoek (zie #lanes).
+const SLOW = new Set(['widgets', 'aandacht'])
+const newLanes = () => ({ snel: { busy: false, again: null }, traag: { busy: false, again: null } })
 const TICK = 30000
 const RETRY = 15000
 
@@ -63,8 +66,12 @@ class Dash {
 
   #last = {}
   #timer = null
-  #busy = false
-  #again = null
+  // Per start(): een antwoord dat binnenkomt na een stop (uitloggen), telt niet meer.
+  #gen = 0
+  // Twee rijen, elk met hoogstens één verzoek tegelijk: de tegels (en Aandacht, dat op de tegels wacht) apart, zodat
+  // een integratie die niet antwoordt de status, de meldingen en de rest niet tot 8 s ophoudt.
+  #lanes = newLanes()
+  #failedAt = 0
 
   async loadLayout() {
     try {
@@ -78,39 +85,58 @@ class Dash {
   }
 
   /** Haalt de delen op die aan de beurt zijn (of precies deze, met force). */
-  async refresh(force = null) {
-    if (this.#busy) {
-      // Er loopt al een verzoek: daarna meteen de gevraagde delen.
-      if (force) this.#again = [...new Set([...(this.#again || []), ...force])]
-      return
-    }
+  refresh(force = null) {
+    if (!this.#gen) return Promise.resolve()
     const now = Date.now()
     const due = force || Object.keys(PARTS).filter((p) => !this.#last[p] || now - this.#last[p] >= PARTS[p] - 2000)
-    if (!due.length) return
-    this.#busy = true
+    return Promise.all([
+      this.#fetch(this.#lanes.snel, due.filter((p) => !SLOW.has(p)), !!force),
+      this.#fetch(this.#lanes.traag, due.filter((p) => SLOW.has(p)), !!force),
+    ])
+  }
+
+  async #fetch(lane, parts, forced) {
+    if (!parts.length) return
+    if (lane.busy) {
+      // Er loopt al een verzoek in deze rij: daarna meteen de gevraagde delen.
+      if (forced) lane.again = [...new Set([...(lane.again || []), ...parts])]
+      return
+    }
+    const gen = this.#gen
+    const now = Date.now()
+    lane.busy = true
     try {
-      const r = await api(`/overzicht?delen=${due.join(',')}`)
+      // Tegels met de hand ververst (na een wijziging aan een tegel of API): niet aansluiten bij een berekening die
+      // nog loopt, die las misschien de tegel van ervoor.
+      const vers = forced && parts.includes('widgets') ? '&vers=1' : ''
+      const r = await api(`/overzicht?delen=${parts.join(',')}${vers}`)
+      if (gen !== this.#gen) return
       this.#apply(r.delen || {})
       const failed = r.fouten || {}
-      for (const p of due) {
+      for (const p of parts) {
         // Een deel dat mislukte: bij de volgende tik opnieuw, niet pas na zijn eigen termijn.
         this.#last[p] = !failed[p] ? now : Number.isFinite(PARTS[p]) ? now - PARTS[p] + TICK : 0
       }
       this.lastOk = new Date()
-      this.offline = null
-      this.offlineWhy = ''
+      // Alleen als dit verzoek begon na de laatste mislukte: een traag antwoord van ervoor zegt niets over nu.
+      if (now >= this.#failedAt) {
+        this.offline = null
+        this.offlineWhy = ''
+      }
     } catch (e) {
+      if (gen !== this.#gen) return
       // Uitgelogd: App.svelte toont het loginscherm. Anders is de homepage zelf (of de weg ernaartoe) weg.
       if (!(e instanceof ApiError && (e.status === 401 || e.status === 403))) {
+        this.#failedAt = Date.now()
         this.offline ??= new Date()
         this.offlineWhy = e instanceof ApiError ? e.message : 'geen antwoord'
         this.#schedule(RETRY)
       }
     } finally {
-      this.#busy = false
-      const again = this.#again
-      this.#again = null
-      if (again) this.refresh(again)
+      lane.busy = false
+      const again = lane.again
+      lane.again = null
+      if (again && gen === this.#gen) this.refresh(again)
     }
   }
 
@@ -144,12 +170,16 @@ class Dash {
 
   /** Start het verversen; geeft een stopfunctie. */
   start() {
+    const gen = ++this.#gen
     this.#last = {}
+    this.#lanes = newLanes()
+    this.#failedAt = 0
     this.loadLayout()
     this.#tick()
     const vis = () => { if (!document.hidden) this.refresh() }
     document.addEventListener('visibilitychange', vis)
     return () => {
+      if (this.#gen === gen) this.#gen = gen + 1
       clearTimeout(this.#timer)
       document.removeEventListener('visibilitychange', vis)
     }
@@ -174,7 +204,16 @@ class Dash {
     if (w.big) {
       // Een groot venster komt bovenop; een gewoon venster dat openstond, zou het bedekken: dat sluit.
       this.modal = null
-      this.big = { ...this.big, [o.id]: { used: true, open: true, initial: bigStart(o, this.big[o.id]) } }
+      // Alleen dit venster bijwerken: met een nieuw big-object zouden de andere grote vensters hun startpunt opnieuw
+      // krijgen (hun tab, filter of open vraag), ook als ze dicht zijn.
+      const cur = this.big[o.id]
+      const initial = bigStart(o, cur)
+      if (cur) {
+        cur.open = true
+        cur.initial = initial
+      } else {
+        this.big[o.id] = { used: true, open: true, initial }
+      }
       this.order = [...this.order.filter((x) => x !== o.id), o.id]
     } else {
       this.modal = o
@@ -184,7 +223,7 @@ class Dash {
 
   close(id) {
     if (byId[id]?.big) {
-      if (this.big[id]) this.big = { ...this.big, [id]: { ...this.big[id], open: false } }
+      if (this.big[id]) this.big[id].open = false
       this.order = this.order.filter((x) => x !== id)
     } else if (!id || this.modal?.id === id) {
       this.modal = null

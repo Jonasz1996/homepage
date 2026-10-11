@@ -52,14 +52,19 @@
   })
 
   const clickable = (n) => NOTIFICATION_SOURCES.includes(n.source) || !!n.service_id
+  // Eerst de focus terug op de bel: een venster dat nu opent, geeft ze bij het sluiten daaraan terug.
+  function closePanel() {
+    bell?.focus({ preventScroll: true })
+    dash.notifOpen = false
+  }
   function pick(n) {
     if (!clickable(n)) return
-    dash.notifOpen = false
+    closePanel()
     if (!n.read) api(`/notifications/${n.id}/read`, { method: 'POST' }).then(() => dash.refresh(['meldingen'])).catch(() => {})
     dash.openNotification(n)
   }
   function go(id) {
-    dash.notifOpen = false
+    closePanel()
     dash.open(id)
   }
 
@@ -67,12 +72,15 @@
     sparkle()
     try { await api('/notifications/read-all', { method: 'POST' }) } catch { /* volgende poging */ }
     await load()
+    // Een overzicht dat al onderweg was, telt nog de oude stand: daarna meteen opnieuw.
+    dash.refresh(['meldingen'])
   }
 
   async function clearRead() {
     boom(undefined, 0.8)
     try { kept = (await api('/notifications', { method: 'DELETE' })).kept || 0 } catch { /* volgende poging */ }
     await load()
+    dash.refresh(['meldingen'])
   }
 </script>
 

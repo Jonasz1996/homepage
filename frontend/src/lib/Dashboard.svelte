@@ -71,7 +71,10 @@
     }
   }
   function searchKey(e) {
-    if (e.key === 'Enter') search?.first()
+    if (e.key !== 'Enter') return
+    // Zonder preventDefault drukt dezelfde Enter ook op de knop van een vraag die first() opent (een snelle actie).
+    e.preventDefault()
+    search?.first()
   }
 
   // Snelkoppelingen van de app (manifest), pushberichten en de Android-app: /?open=history, updates, network, ...

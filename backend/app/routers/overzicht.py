@@ -1,6 +1,7 @@
 """Overzicht: wat het hoofdscherm geregeld opvraagt, in één verzoek in plaats van negen endpoints op negen timers.
 
 GET /api/overzicht?delen=status,widgets,zabbix,updates,net,cron,health,aandacht,meldingen,buiten (zonder delen: alles)
+(&vers=1: de tegels opnieuw berekenen, ook als er een berekening loopt; na een wijziging aan een tegel of API)
 geeft {"tijd": nu in UTC, "delen": {deel: antwoord}, "fouten": {deel: korte reden}}. Elk deel is precies wat zijn eigen
 endpoint geeft: dezelfde functie, met dezelfde neveneffecten (gezondheid bewaart de workercheck, aandacht vergeet wat
 genegeerd was en opgelost is, buiten onthoudt een bezoek van buitenaf). Die endpoints blijven bestaan: andere vensters
@@ -75,6 +76,8 @@ assert set(_OP_SESSIE) | {"widgets"} == set(DELEN)
 _tegels_taak: asyncio.Task | None = None
 # Wat de laatste berekening die afliep gaf: (wanneer, tegels). Dezelfde voor iedereen, zoals /api/widgets.
 _tegels_vorige: tuple[float, dict] | None = None
+# Wanneer de berekening van _tegels_vorige begon.
+_tegels_begin = float("-inf")
 
 
 def _gevraagd(delen: str | None) -> set[str]:
@@ -130,11 +133,15 @@ async def _eigen_sessie(factory):
 
 
 async def _tegels_berekenen(factory, user: User) -> dict:
-    global _tegels_vorige
+    global _tegels_vorige, _tegels_begin
+    begin = time.monotonic()
     async with _eigen_sessie(factory) as db:
         # Sluit de sessie zelf vóór de (soms trage) API's van de integraties.
         tegels = await integrations.widgets(user=user, db=db)
-    _tegels_vorige = (time.monotonic(), tegels)
+    # Een oudere berekening die pas na een nieuwere afloopt (vers, zie _tegels), overschrijft die niet.
+    if begin >= _tegels_begin:
+        _tegels_vorige = (time.monotonic(), tegels)
+        _tegels_begin = begin
     return tegels
 
 
@@ -144,12 +151,13 @@ def _tegels_klaar(t: asyncio.Task) -> None:
         log.error("overzicht: tegels laden mislukt", exc_info=e)
 
 
-def _tegels(request: Request, user: User) -> asyncio.Task:
-    """De berekening van de tegels: die nog loopt (van een vorige vraag), anders een nieuwe."""
+def _tegels(request: Request, user: User, vers: bool = False) -> asyncio.Task:
+    """De berekening van de tegels: die nog loopt (van een vorige vraag), anders een nieuwe. Met vers altijd een nieuwe:
+    na een gewijzigde tegel of API las de berekening die nog loopt, de tegels misschien van ervoor."""
     global _tegels_taak
     t = _tegels_taak
     # get_loop: een taak van een andere event loop (in de tests: een vorige test) kan nooit meer klaar raken.
-    if t is None or t.done() or t.get_loop() is not asyncio.get_running_loop():
+    if vers or t is None or t.done() or t.get_loop() is not asyncio.get_running_loop():
         t = asyncio.create_task(_tegels_berekenen(request.app.dependency_overrides.get(get_db), user))
         t.add_done_callback(_tegels_klaar)
         _tegels_taak = t
@@ -194,7 +202,7 @@ async def _verbinding_teruggeven(db: AsyncSession) -> None:
 
 
 @router.get("/overzicht")
-async def overzicht(request: Request, delen: str | None = None, user: User = Depends(current_user),
+async def overzicht(request: Request, delen: str | None = None, vers: bool = False, user: User = Depends(current_user),
                     db: AsyncSession = Depends(get_db)):
     gevraagd = _gevraagd(delen)
     tijd = datetime.now(timezone.utc)
@@ -202,7 +210,7 @@ async def overzicht(request: Request, delen: str | None = None, user: User = Dep
     fouten: dict[str, str] = {}
     tot = asyncio.get_running_loop().time() + WIDGETS_BUDGET
     # Eerst de tegels starten: die lopen in hun eigen sessie naast de rest.
-    taak = _tegels(request, user) if "widgets" in gevraagd else None
+    taak = _tegels(request, user, vers) if "widgets" in gevraagd else None
     for naam in _OP_SESSIE:
         if naam in gevraagd and naam != "aandacht":
             await _deel(naam, request, user, db, uit, fouten)
