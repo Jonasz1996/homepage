@@ -419,6 +419,8 @@ async def terminal(ws: WebSocket, host_id: int, cols: int = 100, rows: int = 30,
     try:
         # Eerste keer: hostsleutel tonen en laten bevestigen (zoals ssh het zelf vraagt).
         if not h.host_key:
+            # Op het antwoord wachten duurt tot twee minuten: zonder open transactie.
+            await db.commit()
             await _send(ws, t="status", m=f"Hostsleutel ophalen van {h.host}:{h.port}…")
             server_key = await asyncio.wait_for(asyncssh.get_server_host_key(h.host, h.port), CONNECT_TIMEOUT)
             await _send(ws, t="hostkey", fp=server_key.get_fingerprint("sha256"), alg=server_key.get_algorithm())

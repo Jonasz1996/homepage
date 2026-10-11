@@ -142,8 +142,9 @@ async def api_loop(maker: async_sessionmaker) -> None:
 
 
 def is_outside(conn: HTTPConnection) -> bool:
-    """Zonder database: via Cloudflare of vanaf een publiek IP. (healthz moet ook antwoorden als de database weg is.)"""
-    if conn.headers.get("x-homepage-via-cf") == "1":
+    """Zonder database: via Cloudflare (of een vervalste header van Cloudflare, zie outside.py) of vanaf een publiek IP.
+    (healthz moet ook antwoorden als de database weg is.)"""
+    if conn.headers.get("x-homepage-via-cf") == "1" or conn.headers.get("x-homepage-cf-forged") == "1":
         return True
     try:
         return bool(conn.client) and ipaddress.ip_address(conn.client.host).is_global

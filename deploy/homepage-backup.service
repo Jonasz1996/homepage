@@ -7,8 +7,8 @@ User=postgres
 # Groep homepage: de worker mag de dumps lezen om te controleren of ze bruikbaar zijn.
 Group=homepage
 UMask=0027
-# Eerst naar een tijdelijk bestand: een mislukte tweede run op dezelfde dag overschrijft de goede dump niet.
-ExecStart=/bin/sh -c 'f=/var/backups/homepage/homepage-$(date +%%F).dump; pg_dump -Fc homepage > "$f.tmp" && mv "$f.tmp" "$f" && find /var/backups/homepage -name "homepage-*.dump" -mtime +14 -delete'
+# Zonder de logregels, de 5 nieuwste blijven (deploy/homepage-backup.sh).
+ExecStart=/usr/local/sbin/homepage-backup
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

@@ -19,8 +19,19 @@ def client_ip(request: Request) -> str | None:
     return request.client.host if request.client else None
 
 
+def cf_forged(conn: HTTPConnection) -> bool:
+    """Had het verzoek een header van Cloudflare die niet van Cloudflare kwam? nginx zet dit (zie outside.py)."""
+    return conn.headers.get("x-homepage-cf-forged") == "1"
+
+
+def limit_ip(request: HTTPConnection) -> str:
+    """Het IP voor de limieten op mislukte pogingen. Bij een vervalste header van Cloudflare één gedeelde sleutel: dan
+    kan het IP gekozen zijn (NPM gelooft X-Real-IP van het LAN), en levert een ander IP geen extra pogingen op."""
+    return "cf-vervalst" if cf_forged(request) else client_ip(request) or "?"
+
+
 def client_country(request: HTTPConnection) -> str | None:
-    """Landcode die nginx meegeeft (CF-IPCountry, alleen als het verzoek via NPM kwam)."""
+    """Landcode die nginx meegeeft (CF-IPCountry, alleen als NPM het verzoek van Cloudflare of een tunnel kreeg)."""
     cc = (request.headers.get("x-country") or "").strip().upper()
     return cc if len(cc) == 2 and cc.isalpha() and cc not in ("XX", "T1") else None
 

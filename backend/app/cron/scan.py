@@ -116,6 +116,9 @@ async def collect(db: AsyncSession) -> tuple[list[dict], list[dict]]:
             logins[h.id] = await login_for(db, h, d)
         except Exception as e:
             logins[h.id] = e
+    # Alles gelezen: de transactie afsluiten, zodat de verbinding terug naar de pool gaat tijdens de SSH-ronde (tot
+    # SCAN_TIMEOUT). De hosts blijven bruikbaar (expire_on_commit=False); opslaan gebeurt in een nieuwe transactie.
+    await db.commit()
 
     async def one(h: SshHost):
         login = logins[h.id]
@@ -438,9 +441,13 @@ def _alert(db: AsyncSession, job: CronJob, old: str | None, new: str | None) -> 
 
 
 async def run_scan(db: AsyncSession) -> dict:
-    if not await job_lock(db, STATE_KEY):
-        # De worker of de knop is al bezig: niet twee keer tegelijk alle machines aflopen.
-        state = await db.get(AppState, STATE_KEY)
-        return state.value if state else {}
-    machines, pending = await collect(db)
-    return await store(db, machines, pending)
+    async with job_lock(db, STATE_KEY) as ok:
+        if not ok:
+            # De worker of de knop is al bezig: niet twee keer tegelijk alle machines aflopen.
+            state = await db.get(AppState, STATE_KEY)
+            return state.value if state else {}
+        machines, pending = await collect(db)
+        value = await store(db, machines, pending)
+        # Bewaren voor het slot vrijkomt: een volgende ronde vergelijkt dan met deze stand (geen dubbele meldingen).
+        await db.commit()
+        return value

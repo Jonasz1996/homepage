@@ -17,6 +17,7 @@ from .integrations import IntegrationError, build
 from .models import AppState, CronJob, LogEntry, PushMonitor, Service, ServiceState, SshHost, WebhookSource
 from .monitoring import (cluster, configs, coverage, devices, pbssync, restoretest, routes, upgrade, watchdog, webpush,
                          zabbix as zbx)
+from .monitoring.containerlogs import logs_on
 from .monitoring.engine import active
 from .ssh_login import defaults as ssh_defaults
 from .ssh_pin import STATE_KEY as PIN_KEY
@@ -568,7 +569,10 @@ async def run(db: AsyncSession, clients, results: dict[int, dict]) -> dict:
         _integration("portainer", "monitoring", "Portainer", of("portainer"), results,
                      "Nog geen Portainer-tegel: geen containerlogs of image-updates.",
                      ["Tegel of API van type portainer met een access token (My account → Access tokens)."],
-                     "Containers, logs en image-updates werken.", optional=True),
+                     "Containers, logs en image-updates werken." if any(map(logs_on, of("portainer"))) else
+                     "Containers en image-updates werken. Containerlogs staan uit: zet logs = true op de tegel "
+                     "of in de API.",
+                     optional=True),
         *await ssh_rows(db, bool(of("proxmox"))),
         *await safety(db, cfg),
     ]

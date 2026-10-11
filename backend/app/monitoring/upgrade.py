@@ -233,6 +233,8 @@ async def _snapshot(rn: Runner, db: AsyncSession, plan: Plan, conn, login, name:
         snap["node"] = plan.host.name
     else:
         px = await _px_guest(db, rn.http, snap)
+        # Op de Proxmox-taak wachten duurt tot tien minuten: geen transactie open, de verbinding terug naar de pool.
+        await db.commit()
         rn.say(f"Proxmox: snapshot {name} van {snap['type']} {snap['vmid']} op {snap['node']}")
         try:
             upid = await _px_call(px, "POST", f"/nodes/{snap['node']}/{snap['type']}/{snap['vmid']}/snapshot",

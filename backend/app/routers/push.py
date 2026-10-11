@@ -23,7 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..deps import audit, client_ip, current_user, recent_auth
+from ..deps import audit, current_user, limit_ip, recent_auth
 from ..models import PushMonitor, Service, User
 from ..outside import where
 from ..security import LoginLimiter, decrypt, encrypt
@@ -84,7 +84,7 @@ async def _body(request: Request) -> dict:
 async def beat(token: str, request: Request, db: AsyncSession = Depends(get_db)):
     if len(token) < 20 or len(token) > 100:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Onbekend adres")
-    ip = client_ip(request) or "?"
+    ip = limit_ip(request)
     if _misses.blocked(ip, limit=MAX_MISSES):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Te veel onbekende adressen")
     mon = (await db.execute(select(PushMonitor).where(PushMonitor.token_hash == _hash(token)))).scalar_one_or_none()

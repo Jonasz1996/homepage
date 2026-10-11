@@ -27,7 +27,7 @@ from ..integrations import IntegrationError, build
 from ..models import AppState, ConfigVersion, Service, SshHost
 from ..security import decrypt, encrypt
 from ..ssh_exec import SshFail, connect, run
-from ..ssh_login import defaults, login_for
+from ..ssh_login import Login, defaults, login_for
 from .checks import HttpClients
 
 log = logging.getLogger("homepage.configs")
@@ -139,8 +139,7 @@ def parse_files(text: str) -> tuple[dict[str, str], list[str]]:
     return {k: "\n".join(v[:-1] if v and v[-1] == "" else v) for k, v in files.items()}, missing
 
 
-async def from_files(db: AsyncSession, h: SshHost, paths: list[str]) -> list[tuple]:
-    login = await login_for(db, h, await defaults(db))
+async def from_files(h: SshHost, login: Login, paths: list[str]) -> list[tuple]:
     script = READ_FILES.replace("{MAX}", str(MAX_FILES)) + "\n"
     args = " ".join(shlex.quote(p) for p in paths)
     async with connect(h, login) as conn:
@@ -155,8 +154,21 @@ async def from_files(db: AsyncSession, h: SshHost, paths: list[str]) -> list[tup
 async def gather(db: AsyncSession, http: HttpClients, cfg: dict) -> tuple[list[tuple], list[dict]]:
     items, errors = [], []
     types = [t for t, on in (("opnsense", cfg["opnsense"]), ("npm", cfg["npm"]), ("proxmox", cfg["pve"])) if on]
+    services = (await db.execute(select(Service).where(Service.type.in_(types)).order_by(Service.id))).scalars().all()
+    by_host: dict[int, list[str]] = {}
+    for f in cfg["files"]:
+        by_host.setdefault(int(f["host_id"]), []).append(f["path"])
+    d = await defaults(db)
+    hosts = []
+    for hid, paths in by_host.items():
+        h = await db.get(SshHost, hid)
+        if h is not None:
+            hosts.append((h, await login_for(db, h, d), paths))
+    # Alles gelezen: geen transactie open tijdens de API-vragen en SSH (tot vijf minuten per host). De verbinding gaat
+    # terug naar de pool; tegels en hosts blijven bruikbaar (expire_on_commit=False).
+    await db.commit()
     seen: set = set()
-    for svc in (await db.execute(select(Service).where(Service.type.in_(types)).order_by(Service.id))).scalars():
+    for svc in services:
         try:
             if svc.type == "opnsense":
                 items += await from_opnsense(svc, http)
@@ -166,15 +178,9 @@ async def gather(db: AsyncSession, http: HttpClients, cfg: dict) -> tuple[list[t
                 items += await from_proxmox(svc, http, seen)
         except IntegrationError as e:
             errors.append({"source": svc.name, "error": str(e)})
-    by_host: dict[int, list[str]] = {}
-    for f in cfg["files"]:
-        by_host.setdefault(int(f["host_id"]), []).append(f["path"])
-    for hid, paths in by_host.items():
-        h = await db.get(SshHost, hid)
-        if h is None:
-            continue
+    for h, login, paths in hosts:
         try:
-            items += await from_files(db, h, paths)
+            items += await from_files(h, login, paths)
         except SshFail as e:
             errors.append({"source": h.name, "error": str(e)})
     return items, errors

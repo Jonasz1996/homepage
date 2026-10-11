@@ -190,6 +190,8 @@ async def monitor(job_id: int, body: MonitorIn, request: Request, user: User = D
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Alleen cronregels kunnen bewaakt worden")
     h = await _host(db, job)
     login = await login_for(db, h)
+    # Geen transactie open tijdens SSH (drie stappen tot een minuut): de verbinding gaat terug naar de pool.
+    await db.commit()
     rawline = (job.extra or {}).get("rawline") or ""
     wid = job.wid or wid_for(job.key)
     try:

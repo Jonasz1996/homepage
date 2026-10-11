@@ -74,6 +74,8 @@ async def collect(db: AsyncSession) -> list[dict]:
             logins[h.id] = await login_for(db, h, d)
         except Exception as e:
             logins[h.id] = e
+    # Geen transactie open tijdens SSH: de verbinding gaat terug naar de pool (de hosts blijven bruikbaar).
+    await db.commit()
 
     async def one(h):
         login = logins[h.id]
@@ -160,11 +162,19 @@ def readings(m: dict, now: datetime) -> list[Reading]:
 
 
 async def run_health(db: AsyncSession) -> dict:
+    async with job_lock(db, STATE_KEY) as ok:
+        if not ok:
+            # Loopt al (worker of knop): de vorige stand teruggeven.
+            state = await db.get(AppState, STATE_KEY)
+            return state.value if state else {}
+        value = await _scan(db)
+        # Bewaren voor het slot vrijkomt: een volgende ronde vergelijkt dan met deze stand (geen dubbele meldingen).
+        await db.commit()
+        return value
+
+
+async def _scan(db: AsyncSession) -> dict:
     now = datetime.now(timezone.utc).replace(microsecond=0)
-    if not await job_lock(db, STATE_KEY):
-        # Loopt al (worker of knop): de vorige stand teruggeven.
-        state = await db.get(AppState, STATE_KEY)
-        return state.value if state else {}
     cfg = await settings(db)
     state = await db.get(AppState, STATE_KEY)
     old = {h["key"]: h for h in (state.value.get("hosts", []) if state else [])}

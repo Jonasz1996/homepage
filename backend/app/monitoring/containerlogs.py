@@ -2,7 +2,8 @@
 en als logregel opslaan (host = containernaam, app = "docker"). Zo werken zoeken, filters, live meekijken en de
 meldingsregels er net zoals bij syslog.
 
-Uit te zetten per Portainer-tegel met de instelling logs = false.
+Staat uit tot je op de Portainer-tegel logs = true zet: alle regels van elke container nemen snel veel plaats in op
+de kleine schijf van de container.
 """
 
 import logging
@@ -26,6 +27,7 @@ EVERY = 30
 TAIL = 500
 FIRST_SPAN = 300
 APP = "docker"
+ON = ("true", "1", "ja", "aan", "yes")
 _rules = Rules()
 
 # Ernst uit de regel zelf halen: de meeste containers loggen "ERROR", "level=warn", "[WRN]" en dergelijke.
@@ -35,6 +37,14 @@ _LEVELS = (
     (4, re.compile(r"\b(warn|warning)\b|\[(WRN|WARN)\]|level=warn", re.I)),
     (7, re.compile(r"\b(debug|trace)\b|\[(DBG|TRC)\]|level=debug", re.I)),
 )
+
+
+def logs_on(svc: Service) -> bool:
+    # Zoals de integratie zelf (integrations.from_api): de instellingen van de API uit API-beheer, aangevuld met die
+    # van de tegel. Service.api laadt altijd mee, dus geen query.
+    api = svc.__dict__.get("api") if getattr(svc, "api_id", None) else None
+    cfg = {**((api.config or {}) if api is not None else {}), **(svc.config or {})}
+    return str(cfg.get("logs", "")).strip().lower() in ON
 
 
 def severity(msg: str, stderr: bool) -> int:
@@ -110,7 +120,7 @@ async def run_containerlogs(db: AsyncSession, http: HttpClients) -> dict:
     now = time.time()
     seen = set()
     for svc in services:
-        if str((svc.config or {}).get("logs", "")).strip().lower() in ("false", "0", "nee", "uit", "no"):
+        if not logs_on(svc):
             continue
         try:
             px = build(svc, http)

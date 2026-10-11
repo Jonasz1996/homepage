@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 MAX_MSG = 8192
+CLOCK_SLACK = 3600
 SEVERITIES = ["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"]
 
 _PRI = re.compile(r"^<(\d{1,3})>")
@@ -64,8 +65,10 @@ def parse(raw: bytes, source_ip: str | None, now: datetime | None = None) -> Par
             app, _pid, msg = mt.groups()
         else:
             msg = text
-    # Te ver in de toekomst (verkeerde klok op de bron)? Dan de ontvangsttijd.
-    if abs((ts - now).total_seconds()) > 86400:
+    # Klok van de bron meer dan een uur verkeerd? Dan de ontvangsttijd. Een regel van dagen geleden moet anders in
+    # een chunk die al gecomprimeerd is (na 1 dag; kan, maar traag), en een regel in de toekomst staat dagenlang
+    # bovenaan.
+    if abs((ts - now).total_seconds()) > CLOCK_SLACK:
         ts = now
     return Parsed(ts=ts, host=_clean(host)[:255] or "onbekend", facility=facility, severity=severity,
                   app=_clean(app)[:64] if app else None, msg=_clean(msg) or "(leeg)")

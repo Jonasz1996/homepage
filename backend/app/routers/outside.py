@@ -18,7 +18,8 @@ ACCESS = {"cloudflare-access": "Cloudflare Access", "authentik": "Authentik (for
 
 
 def access_of(request: Request) -> str | None:
-    """Welk slot er voor het dashboard stond (nginx zet dit alleen voor verzoeken via NPM)."""
+    """Welk slot er voor het dashboard stond. nginx zet dit alleen voor verzoeken via NPM, Cloudflare Access alleen als
+    NPM het van Cloudflare of een tunnel kreeg, en nooit samen met een vervalste header van Cloudflare."""
     a = (request.headers.get("x-homepage-access") or "").strip()
     return a if a in ACCESS else None
 
