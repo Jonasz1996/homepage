@@ -33,7 +33,9 @@ Fase 3, monitoring:
   verstoringen en de laatste checks, over 1 u, 24 u, 7 d, 30 d of 1 jaar
 - melding in het meldingencentrum (en op je gsm) als een service down gaat (standaard na 3 mislukte checks) en weer
   terugkomt
-- historiek: 1 jaar (met TimescaleDB gecomprimeerd na 7 dagen)
+- historiek: elke check 90 dagen, per uur opgeteld 400 dagen (genoeg voor de grafiek en de uptime over een jaar);
+  met TimescaleDB gecomprimeerd na 7 dagen. Zonder TimescaleDB blijft alles even lang bewaard en ruimt het dashboard
+  zelf op, maar wordt niets gecomprimeerd
 
 Fase 4, integraties (type van de service kiezen onder **bewerken → Integratie en API**):
 
@@ -117,11 +119,23 @@ Fase 6, logs (knop `logs` in de titelbalk):
 - alle regels in PostgreSQL; met TimescaleDB gecomprimeerd na 1 dag en 30 dagen bewaard. Zit de schijf van de
   container boven 75%, dan gaan de oudste logregels eerder weg (de laatste 3 dagen blijven altijd). De dagelijkse
   back-up neemt de logregels niet mee
-- logviewer: per machine, zoeken, filter op ernst, 1 u tot 30 dagen, histogram, live meekijken
+- logviewer: per machine, zoeken, filter op ernst, 1 u tot 30 dagen, histogram, live meekijken (nieuwe regels van
+  het laatste uur; een regel die rsyslog langer vasthield, staat er na een nieuwe zoekopdracht bij). Een zoekopdracht
+  stopt na 20 seconden (live meekijken en de lijst met machines na 5) en gebruikt maar één processorkern; is het te
+  traag, kies dan een kortere periode of één machine
+- valt de database even weg, dan houdt de ontvanger tot 50.000 regels in het geheugen en schrijft ze weg zodra ze
+  terug is, ook bij een herstart (dan schrijft hij tot 10 seconden zijn wachtrij weg). Over tcp wacht de afzender
+  (rsyslog houdt de regels dan zelf vast), over udp vallen de nieuwe regels weg (wat al in de wachtrij staat, blijft)
+  en worden ze geteld. Raken er regels verloren of draait de ontvanger niet, dan staat dat in **!** en in hw →
+  homepage zelf. Stopt de ontvanger terwijl de database weg is, dan bewaart hij het verlies in
+  `/var/lib/homepage-syslog` tot de volgende start
 - meldingsregels (regex, machine, ernst, max. één melding per x minuten) naar het meldingencentrum;
   standaard staat "alles vanaf crit" aan
 - **machines toevoegen**: kies een SSH-host en het dashboard installeert en configureert rsyslog. Op een
-  Proxmox-node kan dat meteen voor alle draaiende containers (via `pct`). Of plak het getoonde script zelf
+  Proxmox-node kan dat meteen voor alle draaiende containers (via `pct`). Of plak het getoonde script zelf. rsyslog
+  stuurt in RFC 5424 (tijd met jaar en tijdzone), zodat regels die het vasthield hun eigen tijd houden (tot een dag
+  oud, als de ontvanger herstartte of zijn wachtrij vol zat; wijkt de klok van een machine meer dan een uur af, dan
+  krijgt de regel de ontvangsttijd). Machines die vóór deze versie ingesteld werden, rol je daarvoor opnieuw uit
 
 Extra's, deel 1 (checks en meldingen):
 
@@ -195,9 +209,12 @@ Later, deel 1 (tijdlijn, weekrapport en updates):
   installaties verdwijnen na 7 dagen (instelbaar)
 - **zelfherstel** (in het mini dashboard van een service): "als Plex 3 checks na elkaar down is, herstart CT 105".
   Acties: de knoppen van de integraties (Proxmox herstart of start een VM/CT, Portainer herstart een container) of
-  via SSH `systemctl restart` / `docker restart`. Hoogstens 2 keer per uur (instelbaar), minstens 10 minuten
-  ertussen, niet als iets waar de service van afhangt plat ligt. Elke poging komt in het meldingencentrum; bij de
-  limiet pauzeert de regel met een melding. *Nu testen* voert de actie één keer uit
+  via SSH `systemctl restart` / `docker restart`. Hoogstens 2 keer per uur (instelbaar tot 5), minstens 10 minuten
+  ertussen, niet als iets waar de service van afhangt plat ligt. Elke poging komt op de tijdlijn en, tenzij *Melden*
+  van de tegel op *niet* staat, in het meldingencentrum; naar je gsm gaat per storing alleen de eerste poging, een
+  herstart die eerst lukte en daarna mislukt, en de eerste keer dat de limiet de regel pauzeert (ook als je de
+  meldingen in 🔔 tussendoor wist). *Nu testen* voert de
+  actie één keer uit
 
 Later, deel 2 (internet, Wake-on-LAN en stroom):
 
@@ -279,8 +296,17 @@ Later, deel 3 (Authentik en gsm):
     voorhand, en als de nameservers veranderen. DNS Belgium geeft voor .be geen vervaldatum: vul die zelf in
   - **homepage zelf**: leeft de worker (zo niet, dan meldt de API het), is er een back-up van vannacht en is die
     leesbaar (`pg_restore --list`), hoe groot is de database per tabel, hoe vol de schijf (oranje vanaf 75%, rood
-    vanaf 90%). De back-up van elke nacht (03:30, `homepage-backup`) laat de logregels weg: de tabel is er na het
-    terugzetten wel, maar leeg. De 5 nieuwste blijven staan
+    vanaf 90%), en telt de worker de checks nog per uur op (anders een waarschuwing in **!** na een dag). De back-up
+    van elke nacht (03:30, `homepage-backup`) laat de logregels weg: de tabel is er na het terugzetten wel, maar
+    leeg. De 5 nieuwste blijven staan
+  - **test van de back-up**: elke 1e van de maand om 04:15 (`homepage-backuptest.timer`) zet de container de
+    nieuwste dump echt terug in een tijdelijke database `homepage_backuptest`, kijkt of `alembic_version` en je
+    account erin zitten, telt de rijen per tabel en gooit de database daarna altijd weg. Hij slaat over als de schijf
+    daardoor boven 70% zou komen, en stopt na een uur. Het resultaat staat in hw → homepage zelf (met de tabellen),
+    in `/var/backups/homepage/backuptest` en, als pg_restore liep, `backuptest.log`; mislukt het, dan een melding
+    en een rood punt in **!**, en een oranje punt als er 40 dagen geen geslaagde test was. Viel de container uit
+    tijdens de test, dan gooit de back-up van de nacht erna de achtergebleven testdatabase weg. Meteen testen:
+    `systemctl start homepage-backuptest`
   - **schijfbewaker**: elke 10 minuten kijkt de worker hoe vol de schijf van de container is. Vanaf 75% gooit hij de
     oudste logregels weg, dag per dag, tot de schijf weer onder 75% zit of alleen de laatste 3 dagen nog over zijn.
     Daarover één melding; helpt het niet, dan zegt een melding wat de schijf wel vult (de grootste tabellen en de
@@ -292,7 +318,10 @@ Later, deel 3 (Authentik en gsm):
     versleuteld met een wachtzin die nergens bewaard wordt (scrypt + AES-GCM). Koppel er een NAS-share, PBS-opslag of
     USB-schijf aan, bv. `pct set <id> -mp0 /mnt/nas/homepage,mp=/mnt/homepage-backup` en
     `chown homepage: /mnt/homepage-backup` in de container, daarna `systemctl restart homepage-worker`. Terugzetten
-    staat in `LEESMIJ.txt` in die map
+    staat in `LEESMIJ.txt` in die map, met de versies van PostgreSQL en TimescaleDB van de laatste kopie. Verandert
+    `secret.key` (bv. na een herinstallatie), stel dan de wachtzin opnieuw in: tot dan meldt de zelfcontrole dat de
+    sleutel in de kopie verouderd is. Staat de kopie uit, dan stelt **!** ze voor; zit de CT al in een back-up van
+    PBS, dan zitten de dumps en `secret.key` daar ook in en mag je dat punt negeren
 - **diff** (knop in de titelbalk): configuratiewijzigingen. Elke nacht (standaard om 2:00) een kopie van de
   config.xml van OPNsense, de proxy hosts, redirections en streams van Nginx Proxy Manager, de `.conf` van elke VM en
   container in Proxmox, en de bestanden of mappen die je zelf kiest op een SSH-host (bv. `/etc/nginx`, als root gelezen,
@@ -347,8 +376,16 @@ Later, deel 3 (Authentik en gsm):
   hostnaam en interface. Wat er bij de eerste keer al is, geldt als gekend; een nieuw MAC-adres daarna geeft een
   melding. Geef apparaten een naam of zet ze op "ken ik". Met **volgen** wordt een apparaat elke 6 uur gescand op
   ongeveer 60 gebruikelijke poorten (ssh, http, smb, rdp, docker, databanken, ...) en komt er een melding als er een
-  nieuwe poort openstaat. Rechten voor de API-key: *Diagnostics: ARP Table* en *Services: DHCP: Leases* (of
-  *Services: Kea DHCP*)
+  nieuwe poort openstaat. Een privé-adres (willekeurig MAC van een gsm of laptop) heet zo; neemt een toestel met een
+  naam een nieuw privé-adres met dezelfde hostnaam op dezelfde interface, en verdwijnt het oude adres binnen een
+  halfuur uit de ARP-tabel (OPNsense houdt het er tot 20 minuten na het laatste antwoord in; een verlopen rij telt
+  niet), dan houdt het zijn naam (melding alleen in 🔔). Zolang het wacht, staat het nieuwe adres als onbekend in de
+  lijst, zonder melding; staan ze er na dat halfuur allebei nog, dan is het een nieuw apparaat, met die naam als hint.
+  Geef je het intussen zelf een naam, dan blijft het daarbij.
+  Meerdere nieuwe apparaten in één ronde geven één melding. Onbekende apparaten en de oude adressen van zo'n toestel
+  die 30 dagen niet gezien zijn, verdwijnen, tenzij ze een naam, notitie of *volgen* hebben; met **vergeten** haal je
+  er zelf een weg. Rechten voor de API-key:
+  *Diagnostics: ARP Table* en *Services: DHCP: Leases* (of *Services: Kea DHCP*)
 - **net → kaart**: een netwerkkaart van internet → OPNsense → NPM en de Proxmox-nodes met hun CT's en VM's, met de
   services erop, in live kleuren. Klik op een node, CT/VM, OPNsense of NPM en je ziet meteen wat er mee uitvalt (ook
   wat erop "draait"). Een service komt bij een CT/VM via "draait op", het IP in de url of het checkdoel (IP's uit
@@ -555,7 +592,9 @@ naar je gsm. Op een iPhone moet het dashboard eerst als app op je beginscherm st
 https. De berichten zijn end-to-end versleuteld (RFC 8291). De server moet uitgaand 443 kunnen naar
 `fcm.googleapis.com`, `*.push.apple.com` en `*.push.services.mozilla.com` (zie de firewall-weergave). Een tik op een bericht
 opent het dashboard op de juiste plek. Meldt de pushdienst een toestel af, of lukt het afleveren drie keer niet, dan
-zie je dat in het meldingencentrum en op je andere toestellen. Valt de worker uit, dan stuurt de API de meldingen.
+zie je dat in het meldingencentrum en op je andere toestellen. Komt er 30 dagen niets aan op een toestel dat blijft
+mislukken, dan zet het dashboard het uit, met een melding; zet het opnieuw aan in 🔔 → gsm. Valt de worker uit, dan
+stuurt de API de meldingen.
 
 **Het dashboard zelf bewaken.** De worker en de API houden elkaar in het oog: valt de worker uit, dan meldt de API
 dat (en stuurt hij de meldingen naar je gsm); antwoordt de API niet meer, dan meldt de worker dat. Een check die
@@ -737,7 +776,9 @@ van vlak voor die update en met de bibliotheken die die versie had (de venv van 
 sinds die update in het dashboard veranderde, gaat verloren; de database van daarvoor wordt eerst nog bewaard als
 `voor-terugzetten-*.dump` (alleen de laatste blijft staan). `homepage-terugzetten --lijst` toont welke kopieën er
 zijn. Stopt het terugzetten halverwege, bijvoorbeeld omdat de frontend niet gebouwd kon worden, los de fout op en
-voer het opnieuw uit. Het werkt vanaf de tweede update met deze versie van het script.
+voer het opnieuw uit. Het werkt vanaf de tweede update met deze versie van het script. Het keurt een teruggezette
+database af bij elke fout van `pg_restore` behalve de onschuldige over de extensie timescaledb
+(`homepage-herstelfouten`), en toont die fouten.
 
 Een release maken (voor `stabiel`): een tag `vX.Y.Z` op `main`, bv. `git tag v1.1.0 && git push origin v1.1.0`.
 
@@ -749,7 +790,8 @@ Een release maken (voor `stabiel`): een tag `vX.Y.Z` op `main`, bv. `git tag v1.
 | `frontend/` | Svelte 5 + Vite. Kleuren en stijl staan in `src/app.css` |
 | `deploy/` | Installatiescript, nginx-config, systemd-units |
 
-De database is PostgreSQL. TimescaleDB wordt al geïnstalleerd voor de ping- en uptime-historiek van fase 3.
+De database is PostgreSQL (15 op Debian 12, 17 op Debian 13; de CI test beide). TimescaleDB wordt al geïnstalleerd
+voor de ping- en uptime-historiek van fase 3.
 
 ## Ontwikkelen
 
@@ -772,6 +814,10 @@ oude metingen in gecomprimeerde chunks.
 ```bash
 HOMEPAGE_TEST_SCHEMA=migraties HOMEPAGE_TEST_DATABASE_URL=postgresql+asyncpg://... ../.venv/bin/pytest
 ```
+
+Op PostgreSQL test `tests/test_migraties_met_gegevens.py` ook een update van een oude versie (migratie 0018) met
+gegevens in elke tabel. De tests van de back-upscripts slaan over zonder `pg_dump`/`pg_restore` van dezelfde of een
+nieuwere versie dan de server; met `HOMEPAGE_TEST_PG_CLIENT=verplicht` (zoals in de CI) falen ze dan.
 
 Browsertests (Playwright) tegen een lege database, met de API op 127.0.0.1:8000 en de setup-code in
 `HOMEPAGE_SETUP_TOKEN`: inloggen met 2FA, bewerkmodus, elk venster in de titelbalk en de gsm-weergave.

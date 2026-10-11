@@ -15,7 +15,7 @@ from .. import outside
 from ..integrations import IntegrationError, build, from_api
 from ..models import ApiConnection, AppState, AuditLog, Service, Session, SshHost, User
 from ..ssh_pin import STATE_KEY as PIN_KEY
-from .selfcheck import STATE_KEY as SELF_KEY
+from .selfcheck import KEY_STALE, STATE_KEY as SELF_KEY
 
 SECRET_SAVED = "secret_key_saved"
 # Rechten waarmee een Proxmox-token iets kan veranderen. Een leestoken hoort er geen te hebben.
@@ -66,6 +66,8 @@ async def check_2fa(db: AsyncSession) -> dict:
 async def check_secret_key(db: AsyncSession) -> dict:
     off = (await _state(db, SELF_KEY)).get("offsite") or {}
     saved = await _state(db, SECRET_SAVED)
+    if off.get("enabled") and off.get("key") and off.get("key_stale"):
+        return item("secret", "Kopie van secret.key", "warn", KEY_STALE, fix={"window": "health", "tab": "homepage"})
     if off.get("enabled") and off.get("key"):
         return item("secret", "Kopie van secret.key", "ok", f"Versleuteld mee in de kopie buiten de container ({off.get('dir')}).")
     if saved.get("at"):

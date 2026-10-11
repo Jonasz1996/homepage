@@ -52,6 +52,10 @@ PUSH_HOSTS = ("fcm.googleapis.com",)
 PUSH_SUFFIXES = (".push.apple.com", ".push.services.mozilla.com", ".notify.windows.com")
 # Een toestel dat de pushdienst niet meer kent, blijft zo lang staan (zie PushSubscription.gone_at).
 GONE_KEEP = timedelta(days=30)
+# Zoveel keer na elkaar mislukt (zonder 404/410): één waarschuwing, tot het weer lukt.
+WARN_AFTER = 3
+# Zo lang niets afgeleverd en het blijft mislukken: het toestel uitzetten (zie switch_off_failing).
+FAILING_OFF = timedelta(days=30)
 
 # Verstuurd per toestel (tijdstippen), voor het maximum per minuut. Per proces: genoeg, want de API doet dit
 # alleen als de worker niet draait.
@@ -290,7 +294,7 @@ def _mark_ok(sub: PushSubscription, now: datetime) -> None:
 def _mark_failed(db: AsyncSession, sub: PushSubscription, error: str) -> None:
     sub.last_error = error[:300]
     sub.fail_count = (sub.fail_count or 0) + 1
-    if sub.fail_count >= 3 and not sub.warned:
+    if sub.fail_count >= WARN_AFTER and not sub.warned:
         sub.warned = True
         notify(db, f"Meldingen naar {sub.label} mislukken: {sub.last_error}"[:200],
                "Ze komen niet aan. Test het toestel in 'Meldingen op je gsm', of zet het daar opnieuw aan.",
@@ -541,8 +545,8 @@ async def status(db: AsyncSession) -> dict:
     live = [s for s in subs if s.gone_at is None]
     oks = [_aware(s.last_ok_at) for s in live if s.last_ok_at]
     return {"devices": len(live),
-            "failing": [s.label for s in live if (s.fail_count or 0) >= 3] + [f"{s.label} (afgemeld)" for s in subs
-                                                                              if s.gone_at is not None],
+            "failing": [s.label for s in live if (s.fail_count or 0) >= WARN_AFTER]
+            + [f"{s.label} (afgemeld)" for s in subs if s.gone_at is not None],
             "last_ok": max(oks) if oks else None}
 
 
@@ -553,6 +557,30 @@ async def forget_renew(db: AsyncSession, user_id: int) -> None:
     await db.execute(update(PushSubscription).where(PushSubscription.user_id == user_id)
                      .values(renew_hash=hashlib.sha256(os.urandom(32)).hexdigest(), prev_renew_hash=None)
                      .execution_options(synchronize_session=False))
+
+
+async def switch_off_failing(db: AsyncSession, now: datetime) -> None:
+    """Toestellen waar al 30 dagen niets aankwam en die blijven mislukken (minstens WARN_AFTER keer na elkaar, dus al
+    gewaarschuwd), uitzetten zoals een toestel dat de pushdienst niet meer kent: anders gaat elke melding er nog
+    een verzoek heen dat toch niet aankomt. Eén melding op de andere toestellen. Opnieuw aanzetten in 'Meldingen op
+    je gsm' kan (daarna volgt een testbericht: lukt dat, dan begint het tellen opnieuw); na GONE_KEEP is de rij weg.
+    Een toestel dat gewoon niets kreeg (een rustige maand), faalt niet en blijft staan. De worker, bij het opruimen."""
+    subs = (await db.execute(select(PushSubscription).where(PushSubscription.gone_at.is_(None),
+                                                            PushSubscription.fail_count >= WARN_AFTER))).scalars().all()
+    for s in subs:
+        since = max((t for t in (_aware(s.last_ok_at), _aware(s.created_at)) if t is not None), default=now)
+        if now - since < FAILING_OFF:
+            continue
+        # Voorwaardelijk: lukte er intussen toch iets (fail_count weer 0), dan blijft het aan.
+        res = await db.execute(update(PushSubscription).where(
+            PushSubscription.id == s.id, PushSubscription.gone_at.is_(None), PushSubscription.fail_count >= WARN_AFTER)
+            .values(gone_at=now, last_error=f"uitgezet: al 30 dagen niets afgeleverd ({s.last_error or '?'})"[:300])
+            .execution_options(synchronize_session=False))
+        if res.rowcount == 1:
+            await db.execute(delete(PushQueue).where(PushQueue.subscription_id == s.id))
+            notify(db, f"Meldingen naar {s.label} uitgezet"[:200],
+                   f"Al 30 dagen kwam er niets aan: {s.last_error or 'onbekende fout'}. Zet het opnieuw aan in "
+                   "'Meldingen op je gsm'.", level="err", source="homepage")
 
 
 async def forget_gone(db: AsyncSession, now: datetime) -> None:

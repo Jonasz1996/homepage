@@ -180,6 +180,18 @@ async def device_patch(mac: str, body: DeviceIn, request: Request, user: User = 
     return devices.device_out(d, datetime.now(timezone.utc))
 
 
+@router.delete("/devices/{mac}", status_code=status.HTTP_204_NO_CONTENT)
+async def device_forget(mac: str, request: Request, user: User = Depends(current_user),
+                        db: AsyncSession = Depends(get_db)):
+    """Vergeten: weg uit de lijst. Komt het terug op het netwerk, dan is het een nieuw apparaat (met een melding).
+    Wat gekend is of een naam, notitie of "volgen" heeft, verdwijnt alleen zo (behalve het verlaten oude adres van een
+    toestel met een privé-adres); de rest ruimt refresh() na 30 dagen zelf op."""
+    d = await _device(db, mac)
+    await audit(db, request, user, "device_forgotten", mac=d.mac, name=d.name, hostname=d.hostname)
+    await db.delete(d)
+    await db.commit()
+
+
 @router.post("/devices/{mac}/scan", dependencies=[outside.guard("acties")])
 async def device_scan(mac: str, request: Request, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     d = await _device(db, mac)

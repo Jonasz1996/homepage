@@ -5,7 +5,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 MAX_MSG = 8192
+# Zo ver mag de eigen tijd van een regel voor of achter de ontvangsttijd liggen (klok van de bron). Tot PAST_SLACK
+# erachter alleen als rsyslog de regel vastgehouden kan hebben (held; wanneer dat kan, staat in server.py).
 CLOCK_SLACK = 3600
+PAST_SLACK = 24 * 3600
 SEVERITIES = ["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"]
 
 _PRI = re.compile(r"^<(\d{1,3})>")
@@ -30,7 +33,9 @@ def _clean(s: str) -> str:
     return "".join(c for c in s if c == "\t" or c >= " " or c == "\n").strip()[:MAX_MSG]
 
 
-def parse(raw: bytes, source_ip: str | None, now: datetime | None = None) -> Parsed:
+def parse(raw: bytes, source_ip: str | None, now: datetime | None = None, held: bool = False) -> Parsed:
+    """now: de ontvangsttijd. held: rsyslog kan deze regel vastgehouden hebben; dan mag zijn eigen tijd tot PAST_SLACK
+    in het verleden liggen in plaats van tot CLOCK_SLACK."""
     now = now or datetime.now(timezone.utc)
     text = raw.decode("utf-8", errors="replace").rstrip("\r\n\x00")
     facility, severity = 1, 5
@@ -47,16 +52,17 @@ def parse(raw: bytes, source_ip: str | None, now: datetime | None = None) -> Par
         if stamp != "-":
             try:
                 ts = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-            except ValueError:
+                # In UTC, zoals de ontvangsttijd: rsyslog stuurt de tijdzone van de machine mee (+02:00).
+                ts = ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts.astimezone(timezone.utc)
+            except (ValueError, OverflowError):  # ook een onmogelijke tijd als 0001-01-01T00:00:00+05:00
                 ts = now
         host = h if h != "-" else host
         app = a if a != "-" else None
     else:
         m3 = _3164.match(text)
         if m3:
-            # Klassieke tijdstempel heeft geen jaar en geen tijdzone: ontvangsttijd is betrouwbaarder.
+            # Klassieke tijdstempel heeft geen jaar en geen tijdzone: ontvangsttijd is betrouwbaarder. Daarom stuurt
+            # rsyslog zoals het dashboard het uitrolt RFC 5424 (zie rollout.py).
             _stamp, h, rest = m3.groups()
             host = h
             text = rest
@@ -65,10 +71,13 @@ def parse(raw: bytes, source_ip: str | None, now: datetime | None = None) -> Par
             app, _pid, msg = mt.groups()
         else:
             msg = text
-    # Klok van de bron meer dan een uur verkeerd? Dan de ontvangsttijd. Een regel van dagen geleden moet anders in
-    # een chunk die al gecomprimeerd is (na 1 dag; kan, maar traag), en een regel in de toekomst staat dagenlang
-    # bovenaan.
-    if abs((ts - now).total_seconds()) > CLOCK_SLACK:
+    # Meer dan een uur in de toekomst of in het verleden (klok van de bron verkeerd)? Dan de ontvangsttijd: anders staat
+    # de regel dagenlang bovenaan, of ontbreekt hij bij live meekijken en in het laatste uur. Tot een dag in het
+    # verleden alleen als rsyslog de regel vastgehouden kan hebben terwijl de ontvanger niet las (held): die hoort bij
+    # zijn eigen tijd, niet bij het moment dat hij eindelijk gelezen werd. Nog ouder: altijd de ontvangsttijd, anders
+    # moet de regel in een chunk die al gecomprimeerd is (na 1 dag; kan, maar traag).
+    late = (now - ts).total_seconds()
+    if late > (PAST_SLACK if held else CLOCK_SLACK) or late < -CLOCK_SLACK:
         ts = now
     return Parsed(ts=ts, host=_clean(host)[:255] or "onbekend", facility=facility, severity=severity,
                   app=_clean(app)[:64] if app else None, msg=_clean(msg) or "(leeg)")

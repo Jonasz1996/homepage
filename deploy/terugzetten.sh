@@ -92,11 +92,15 @@ if runuser -u postgres -- pg_restore -l "$DUMP" | grep -q 'EXTENSION.*timescaled
   TS=1
   runuser -u postgres -- psql -d homepage -qc "CREATE EXTENSION IF NOT EXISTS timescaledb" -c "SELECT timescaledb_pre_restore()" >/dev/null
 fi
-# Meldingen over de extensie zelf ("bestaat al") zijn normaal; of het gelukt is, blijkt uit alembic_version.
+# pg_restore gaat door na een fout. Welke fouten tellen, zegt homepage-herstelfouten, zoals bij de maandelijkse test
+# van de back-up: alleen meldingen over de extensie timescaledb zelf ("bestaat al") zijn normaal. Een tabel waarvan de
+# gegevens niet teruggezet konden worden, is wel een fout: dan ontbreekt er iets, ook al is alembic_version er.
 runuser -u postgres -- pg_restore -d homepage "$DUMP" 2> /tmp/homepage-terugzetten.log || true
 [ -z "$TS" ] || runuser -u postgres -- psql -d homepage -qc "SELECT timescaledb_post_restore()" >/dev/null
-if ! runuser -u postgres -- psql -d homepage -tAc "SELECT 1 FROM alembic_version" | grep -q 1; then
-  warn "De database kon niet teruggezet worden (zie /tmp/homepage-terugzetten.log)."
+if ! FOUTEN=$(/usr/local/sbin/homepage-herstelfouten /tmp/homepage-terugzetten.log) \
+   || ! runuser -u postgres -- psql -d homepage -tAc "SELECT 1 FROM alembic_version" | grep -q 1; then
+  warn "De database kon niet (volledig) teruggezet worden (alles in /tmp/homepage-terugzetten.log)."
+  [ -z "$FOUTEN" ] || printf '%s\n' "$FOUTEN"
   warn "De database van voor het terugzetten staat nog in $SAFE (terugzetten met pg_restore, zoals in de README)."
   exit 1
 fi

@@ -15,7 +15,7 @@ from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..integrations import IntegrationError, build
-from ..models import AppState, LogEntry, LogRule, Service
+from ..models import AppState, LogEntry, LogRule, Notification, Service
 from ..syslog.parse import Parsed, _clean
 from ..syslog.server import Rules
 from .checks import HttpClients
@@ -149,7 +149,7 @@ async def run_containerlogs(db: AsyncSession, http: HttpClients) -> dict:
     cursors = {k: v for k, v in cursors.items() if k in seen}
     if rows:
         await db.execute(insert(LogEntry), rows)
-    db.add_all(notes)
+    db.add_all([Notification(**n) for n in notes])
     st = await db.get(AppState, STATE_KEY)
     value = {"at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(), "cursors": cursors,
              "errors": errors, "lines": len(rows)}

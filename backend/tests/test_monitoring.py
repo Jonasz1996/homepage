@@ -100,6 +100,10 @@ async def test_history_buckets_and_outages(authed):
     h24 = (await authed.get(f"/api/services/{sid}/history?range=24h")).json()
     assert sum(1 for p in h24["points"]) <= 12
     assert (await authed.get(f"/api/services/{sid}/history?range=2d")).status_code == 422
+    # live: alleen de status van nu en de laatste checks (het mini dashboard ververst die elke 30 s).
+    live = (await authed.get(f"/api/services/{sid}/history?range=1y&live=true")).json()
+    assert set(live) == {"state", "recent"}
+    assert live["state"] == h["state"] and live["recent"] == h["recent"]
 
 
 async def test_restore_keeps_history(authed):
@@ -113,7 +117,7 @@ async def test_restore_keeps_history(authed):
 
 
 async def test_housekeeping_removes_old_rows(authed):
-    from sqlalchemy import func, select
+    from sqlalchemy import select
 
     from app.models import Notification
     from app.monitoring.engine import housekeeping

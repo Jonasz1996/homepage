@@ -1,5 +1,6 @@
-"""De homepage bewaakt zichzelf: leeft de worker, is er een recente en leesbare back-up van de database, hoe groot
-is de database, hoe vol de schijf, en staat er een kopie van back-up én sleutel buiten de container.
+"""De homepage bewaakt zichzelf: leeft de worker, is er een recente en leesbare back-up van de database, lukt het
+terugzetten ervan (de maandelijkse test, deploy/homepage-backuptest.sh), hoe groot is de database, hoe vol de schijf,
+telt de worker de checks nog per uur op, en staat er een kopie van back-up én sleutel buiten de container.
 
 De kopie van secret.key wordt versleuteld met een wachtzin die alleen jij kent (scrypt + AES-GCM); de wachtzin
 zelf wordt nergens bewaard. Terugzetten: python -m app.health.selfcheck decrypt secret.key.enc > secret.key
@@ -7,6 +8,7 @@ zelf wordt nergens bewaard. Terugzetten: python -m app.health.selfcheck decrypt 
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -24,7 +26,9 @@ from ..config import get_settings
 from ..db import ensure_state
 from ..deps import event, notify
 from ..models import AppState
+from ..monitoring import rollup
 from ..monitoring.checks import kill
+from ..syslog import server as rxs
 
 log = logging.getLogger("homepage.health")
 
@@ -45,6 +49,15 @@ DISK_FULL = ("Raakt de vrije ruimte op, dan stopt PostgreSQL (op ext4 al rond 95
              "Ruim op of maak de schijf van de CT groter.")
 OFFSITE_KEEP_DAYS = 30
 MIN_PASSPHRASE = 12
+# Het resultaat van de maandelijkse test van de back-up (deploy/homepage-backuptest.sh schrijft het in de map met
+# back-ups). Is de laatste geslaagde test ouder dan RESTORE_STALE, dan loopt de timer niet (of is er nog geen).
+RESTORE_FILE = "backuptest"
+RESTORE_LOG = "backuptest.log"
+RESTORE_STALE = timedelta(days=40)
+RESTORE_RUN = "systemctl start homepage-backuptest"
+RESTORE_STATUS = {"1": "ok", "0": "fout", "overgeslagen": "overgeslagen"}
+KEY_STALE = ("secret.key veranderde nadat je de wachtzin instelde: met de sleutel in de kopie buiten de container zijn "
+             "de nieuwe back-ups onleesbaar. Stel de wachtzin opnieuw in (hw → homepage zelf).")
 README = """Kopie van de homepage-database, gemaakt door de homepage zelf.
 
 homepage-JJJJ-MM-DD.dump  pg_dump -Fc van de database (dagelijks, {keep} dagen bewaard), zonder de logregels:
@@ -52,14 +65,16 @@ homepage-JJJJ-MM-DD.dump  pg_dump -Fc van de database (dagelijks, {keep} dagen b
 secret.key.enc            de sleutel waarmee wachtwoorden en API-sleutels in de database versleuteld zijn,
                           zelf versleuteld met jouw wachtzin
 
+Bij de laatste kopie: {versions}.
+
 Terugzetten op een nieuwe container (na install.sh):
   cd /opt/homepage/backend
   ../.venv/bin/python -m app.health.selfcheck decrypt /pad/naar/secret.key.enc > /etc/homepage/secret.key
   chown root:homepage /etc/homepage/secret.key && chmod 640 /etc/homepage/secret.key
   systemctl stop homepage-api homepage-worker homepage-syslog
   sudo -u postgres dropdb homepage && sudo -u postgres createdb -O homepage homepage
-  # Met TimescaleDB (staat standaard aan; dezelfde versie als bij de back-up):
-  sudo -u postgres psql -d homepage -c "CREATE EXTENSION timescaledb" -c "SELECT timescaledb_pre_restore()"
+  # Met TimescaleDB (staat standaard aan): {ts_hint}
+  sudo -u postgres psql -d homepage -c "CREATE EXTENSION timescaledb{ts_version}" -c "SELECT timescaledb_pre_restore()"
   sudo -u postgres pg_restore -d homepage /pad/naar/homepage-JJJJ-MM-DD.dump
   sudo -u postgres psql -d homepage -c "SELECT timescaledb_post_restore()"
   # Zonder TimescaleDB: alleen de pg_restore-regel.
@@ -85,6 +100,20 @@ def worker_status(value: dict | None, now: datetime) -> dict:
     at = datetime.fromisoformat(value["at"])
     ok = now - at < WORKER_STALE
     return {"ok": ok, "at": value["at"], "started": value.get("started"),
+            "why": None if ok else f"laatste teken van leven {int((now - at).total_seconds() // 60)} min geleden"}
+
+
+def syslog_status(value: dict | None, now: datetime) -> dict | None:
+    """De syslog-ontvanger, uit wat hij elke minuut bewaart (AppState "syslog"): draait hij nog, en wat raakte er
+    het laatste etmaal niet in de database (loss, anders None). None als hij zich nog nooit meldde (bv. nog niet
+    herstart na de update): dan ook geen alarm."""
+    if not value or not value.get("at"):
+        return None
+    at = datetime.fromisoformat(value["at"])
+    ok = now - at < WORKER_STALE
+    loss = value.get("loss") or None
+    recent = bool(loss and now - datetime.fromisoformat(loss["at"]) < timedelta(hours=rxs.LOSS_HOURS))
+    return {**value, "ok": ok, "loss": loss if recent else None,
             "why": None if ok else f"laatste teken van leven {int((now - at).total_seconds() // 60)} min geleden"}
 
 
@@ -151,7 +180,61 @@ async def verify_dump(path: Path) -> tuple[bool | None, str | None]:
     return (tables > 0), f"{tables} tabellen"
 
 
+def read_restore(folder: Path) -> dict | None:
+    """Het resultaat van de laatste test van de back-up: regels key=value (deploy/homepage-backuptest.sh). None als de
+    test er nog nooit was (of het bestand onleesbaar is)."""
+    try:
+        raw = (folder / RESTORE_FILE).read_text(errors="replace")
+    except OSError:
+        return None
+    v = {}
+    for line in raw.splitlines():
+        k, _, x = line.partition("=")
+        v[k.strip()] = x.strip()
+    try:
+        at = datetime.fromisoformat(v.get("at", "")).isoformat()
+    except ValueError:
+        return None
+    tables = {}
+    for part in v.get("tabellen", "").split(","):
+        name, _, n = part.rpartition(":")
+        if name and n.isdigit():
+            tables[name[:63]] = int(n)
+    secs = v.get("seconden", "")
+    return {"at": at, "dump": v.get("dump", "")[:100] or None, "status": RESTORE_STATUS.get(v.get("ok", ""), "fout"),
+            "why": v.get("why", "")[:300] or None, "seconds": int(secs) if secs.isdigit() else None,
+            "alembic": v.get("alembic", "")[:32] or None, "tables": tables,
+            "timescaledb": v.get("timescaledb", "")[:20] or None, "postgresql": v.get("postgresql", "")[:20] or None,
+            # pg_restore liep deze keer: dan staat wat het schreef in backuptest.log.
+            "log": v.get("log") == "1"}
+
+
+def restore_state(found: dict | None, prev: dict, now: datetime) -> dict:
+    """Wat de zelfcontrole van de test bijhoudt: het laatste resultaat, wanneer de test laatst lukte, en sinds wanneer
+    er nog geen is (voor de waarschuwing na RESTORE_STALE)."""
+    if found is None:
+        return {"status": None, "last_ok": prev.get("last_ok"),
+                "missing_since": prev.get("missing_since") or now.isoformat()}
+    return {**found, "last_ok": found["at"] if found["status"] == "ok" else prev.get("last_ok")}
+
+
+def key_sha256(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
 # --- database en schijf ---------------------------------------------------------------------------------------
+
+async def db_versions(db: AsyncSession) -> dict:
+    """Versies van PostgreSQL en TimescaleDB (die van de extensie in deze database), voor LEESMIJ.txt."""
+    if db.bind.dialect.name != "postgresql":
+        return {}
+    pg = (await db.execute(text("SELECT current_setting('server_version')"))).scalar() or ""
+    ts = (await db.execute(text("SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'"))).scalar()
+    return {"postgresql": pg.split(" ")[0] or None, "timescaledb": ts}
+
 
 async def db_size(db: AsyncSession) -> dict:
     if db.bind.dialect.name != "postgresql":
@@ -219,7 +302,24 @@ def decrypt_key(blob: dict, passphrase: str) -> bytes:
 
 # --- kopie buiten de container --------------------------------------------------------------------------------
 
-def offsite_copy(src: Path, dst: Path, key_blob: dict | None, now: datetime) -> dict:
+def readme(versions: dict) -> str:
+    """LEESMIJ.txt bij de kopie buiten de container, met de versies van PostgreSQL en TimescaleDB erin: een dump met
+    TimescaleDB zet je terug met dezelfde versie van de extensie, en net die weet je niet meer als de container weg is."""
+    pg, ts = versions.get("postgresql"), versions.get("timescaledb")
+    if not pg:
+        return README.format(keep=OFFSITE_KEEP_DAYS, versions="versies van PostgreSQL en TimescaleDB onbekend",
+                             ts_hint="dezelfde versie als bij de back-up.", ts_version="")
+    if not ts:
+        return README.format(keep=OFFSITE_KEEP_DAYS, versions=f"PostgreSQL {pg}, zonder TimescaleDB",
+                             ts_hint="niet bij deze back-up.", ts_version="")
+    return README.format(
+        keep=OFFSITE_KEEP_DAYS, versions=f"PostgreSQL {pg} met TimescaleDB {ts}",
+        ts_hint=f"dezelfde versie als bij de back-up, {ts}. Elke versie van TimescaleDB\n  # werkt maar met "
+                f"een paar versies van PostgreSQL: neem bij voorkeur ook PostgreSQL {pg.split('.')[0]}.",
+        ts_version=f" VERSION '{ts}'")
+
+
+def offsite_copy(src: Path, dst: Path, key_blob: dict | None, now: datetime, versions: dict | None = None) -> dict:
     """Nieuwste dumps en de versleutelde sleutel naar dst kopiëren. Gooit OSError als het niet lukt."""
     if not dst.is_dir():
         raise OSError(f"map {dst} bestaat niet (koppel er een NAS-share, PBS-opslag of USB-schijf aan)")
@@ -241,15 +341,31 @@ def offsite_copy(src: Path, dst: Path, key_blob: dict | None, now: datetime) -> 
             kp.write_text(enc)
             copied.append(kp.name)
     rp = dst / "LEESMIJ.txt"
-    readme = README.format(keep=OFFSITE_KEEP_DAYS)
-    if not rp.exists() or rp.read_text() != readme:
-        rp.write_text(readme)
+    content = readme(versions or {})
+    if not rp.exists() or rp.read_text() != content:
+        rp.write_text(content)
     for d in list_dumps(dst)[1:]:
         if now - datetime.fromisoformat(d["at"]) > timedelta(days=OFFSITE_KEEP_DAYS):
             (dst / d["name"]).unlink(missing_ok=True)
     there = list_dumps(dst)
     return {"copied": copied, "latest": there[0] if there else None, "count": len(there),
             "key": (dst / "secret.key.enc").exists()}
+
+
+async def _key_stale(db: AsyncSession, key: dict, path: Path) -> bool:
+    """Hoort de versleutelde sleutel nog bij secret.key? Bij het instellen van de wachtzin komt de sha256 van
+    secret.key ernaast (routers/health.py); verandert secret.key daarna, dan is de kopie buiten de container oud."""
+    now_sha = key_sha256(path)
+    if now_sha is None:
+        return False
+    if key.get("sha256"):
+        return key["sha256"] != now_sha
+    # Ingesteld voor deze controle bestond: de sleutel van nu aannemen (secret.key verandert zo goed als nooit). Met een
+    # slot op de rij, en alleen als de wachtzin intussen niet opnieuw ingesteld werd: die nieuwe blijft dan staan.
+    row = await db.get(AppState, KEY_STATE, with_for_update=True, populate_existing=True)
+    if row and (row.value or {}).get("at") == key.get("at") and not (row.value or {}).get("sha256"):
+        row.value = {**row.value, "sha256": now_sha}
+    return False
 
 
 # --- alles samen ----------------------------------------------------------------------------------------------
@@ -260,7 +376,10 @@ async def run_selfcheck(db: AsyncSession, offsite_on: bool) -> dict:
     state = await db.get(AppState, STATE_KEY)
     prev = state.value if state else {}
     ks = await db.get(AppState, KEY_STATE) if offsite_on else None
+    key = dict(ks.value or {}) if ks else {}
     guard = await db.get(AppState, GUARD_KEY)
+    hourly = await rollup.lag(db, now)
+    versions = await db_versions(db) if offsite_on else {}
     # Alles gelezen: geen transactie open tijdens het nakijken en kopiëren van de dumps (kan minuten duren). Tot de
     # kopie hieronder dus niets meer lezen: dat opent een nieuwe transactie die tijdens de kopie blijft openstaan.
     await db.commit()
@@ -282,6 +401,19 @@ async def run_selfcheck(db: AsyncSession, offsite_on: bool) -> dict:
                source="homepage")
     alerts["stale"] = stale
 
+    # De maandelijkse test van de back-up: één melding per mislukte test.
+    restore = restore_state(read_restore(s.backup_dir), prev.get("restore") or {}, now)
+    if restore["status"] == "fout" and alerts.get("restore") != restore["at"]:
+        notify(db, "Back-up van de homepage lukt niet terug te zetten",
+               f"{restore['dump'] or 'De nieuwste dump'}: {restore['why'] or 'onbekende fout'}\n" +
+               (f"Wat pg_restore schreef: {s.backup_dir / RESTORE_LOG}. " if restore.get("log") else "") +
+               f"Opnieuw proberen: {RESTORE_RUN}",
+               level="err", source="homepage")
+        alerts["restore"] = restore["at"]
+    elif restore["status"] == "ok" and alerts.get("restore"):
+        event(db, "gezondheid", "Terugzetten van de back-up van de homepage lukt weer", level="ok")
+        alerts["restore"] = None
+
     disks = measure_disks(s.backup_dir)
     d = max(disks, key=lambda d: d["pct"], default=None)
     level = disk_level(d["pct"]) if d else None
@@ -298,9 +430,9 @@ async def run_selfcheck(db: AsyncSession, offsite_on: bool) -> dict:
 
     offsite = {"enabled": offsite_on, "dir": str(s.offsite_dir), "error": None}
     if offsite_on:
-        blob = ks.value.get("blob") if ks else None
+        blob = key.get("blob")
         try:
-            offsite.update(await asyncio.to_thread(offsite_copy, s.backup_dir, s.offsite_dir, blob, now))
+            offsite.update(await asyncio.to_thread(offsite_copy, s.backup_dir, s.offsite_dir, blob, now, versions))
             offsite["at"] = now.isoformat()
             if not blob:
                 offsite["error"] = "sleutel nog niet meegekopieerd: stel een wachtzin in"
@@ -313,10 +445,15 @@ async def run_selfcheck(db: AsyncSession, offsite_on: bool) -> dict:
         elif not err and alerts.get("offsite"):
             event(db, "gezondheid", "Kopie van de back-up buiten de container lukt weer", level="ok")
         alerts["offsite"] = err
+        offsite["key_stale"] = bool(blob) and await _key_stale(db, key, s.secret_key_file)
+        if offsite["key_stale"] and not alerts.get("offsite_key"):
+            notify(db, "Sleutel in de kopie buiten de container is verouderd", KEY_STALE, level="warn",
+                   source="homepage")
+        alerts["offsite_key"] = offsite["key_stale"]
 
     value = {"checked_at": now.isoformat(), "backups": dumps[:14], "backup_dir": str(s.backup_dir),
-             "verified": verified, "stale": stale, "db": await db_size(db), "disks": disks, "offsite": offsite,
-             "alerts": alerts}
+             "verified": verified, "stale": stale, "restore": restore, "db": await db_size(db), "disks": disks,
+             "offsite": offsite, "rollup": hourly, "alerts": alerts}
     if state:
         state.value = value
     else:

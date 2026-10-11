@@ -3,6 +3,29 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 34,
+    datum: '2026-10-11',
+    titel: 'Betrouwbaarheid',
+    items: [
+      'De grafiek en de uptime over 7 dagen, 30 dagen en een jaar laden veel sneller: de worker telt de checks per uur op. Losse checks blijven 90 dagen, de uurtotalen 400 dagen, dus de jaargrafiek blijft volledig en de database en elke back-up worden veel kleiner. Het weekrapport rekent ook zo, en het mini dashboard laadt die grafieken niet meer elke 30 seconden opnieuw (de status van nu wel).',
+      'Telt de worker de checks een dag lang niet meer per uur op, dan zegt ! dat (met hoelang nog voor er checks voor goed verdwijnen), en staat het in Gezondheid › homepage.',
+      'Zoeken in de logs stopt na 20 seconden met een duidelijke melding in plaats van een time-out, en houdt een processorkern vrij voor de checks. Opent de logviewer vanuit de zoekbalk, ! of een melding, dan begint hij bij de laatste 24 uur, en de gevonden regels blijven staan als alleen de grafiek te traag is. Bij een nieuwe filter verdwijnt de grafiek van de vorige meteen, en is de lijst met machines te traag, dan zegt hij dat in plaats van "Nog geen logs ontvangen". Live meekijken toont elke regel één keer en werkt ook als de lijst nog leeg is.',
+      'De syslog-ontvanger gooit geen logregels meer weg als de database even weg is: hij houdt er tot 50.000 vast en schrijft ze weg zodra ze terug is, ook bij een herstart of update. Raken er toch regels verloren of draait hij niet, dan staat dat onder ! en in Gezondheid › homepage, ook als hij herstartte terwijl de database weg was. Zit zijn wachtrij vol, dan vallen alleen nieuwe regels via UDP weg; wat machines al via TCP afleverden, blijft. Regels die rsyslog vasthield (de ontvanger herstartte of zijn wachtrij zat vol), staan op hun eigen tijd in plaats van op het moment dat ze eindelijk binnenkwamen; een machine waarvan de klok meer dan een uur achterloopt, krijgt nog altijd de ontvangsttijd.',
+      'Zelfherstel stuurt per storing nog maar één bericht naar je gsm (plus één als een herstart eerst lukte en daarna mislukt, en één als de regel pauzeert), ook als je tussendoor de meldingen in 🔔 wist, en volgt "Melden" van de tegel. Elke poging staat op de tijdlijn, en in 🔔 tenzij Melden op "niet" staat. Een regel gaat hoogstens 5 keer per uur af.',
+      'Net → apparaten herkent privé-adressen van gsm\'s en laptops: neemt een toestel met een naam een nieuw adres met dezelfde hostnaam op dezelfde interface, dan houdt het zijn naam. Staat het oude adres nog in de ARP-tabel (OPNsense houdt het daar tot 20 minuten na het laatste antwoord), dan wacht het nieuwe een halfuur: verdwijnt het oude in die tijd, dan krijgt het de naam alsnog; staan ze er dan allebei nog, dan is het een ander toestel en krijg je een gewone melding met die naam als hint. Meerdere nieuwe apparaten komen in één melding. Onbekende apparaten en de oude adressen van zo\'n toestel verdwijnen na 30 dagen; wat een naam, notitie of "volgen" heeft, of wat je op "ken ik" zette, blijft staan. Met "vergeten" haal je er zelf een weg.',
+      'Een gsm of browser waar 30 dagen geen melding meer aankwam en die blijft mislukken, krijgt geen meldingen meer, met één melding; zet hem opnieuw aan in 🔔 → gsm.',
+      'Elke 1e van de maand zet de homepage de nieuwste nachtelijke back-up echt terug in een testdatabase en toont het resultaat met de tabellen onder Gezondheid › homepage. Mislukt het, dan staat het onder ! en krijg je een melding. Blijft de testdatabase staan omdat de container uitviel, dan ruimt de back-up van de nacht erna hem op.',
+      'Staat de back-up van het dashboard alleen in de container, dan stelt ! een kopie erbuiten voor. Verandert secret.key nadat je de wachtzin instelde, dan zegt de zelfcontrole dat de sleutel in die kopie verouderd is. LEESMIJ.txt bij de kopie noemt de versies van PostgreSQL en TimescaleDB om terug te zetten.',
+      'homepage-terugzetten keurt een terugzetting af als de gegevens van een tabel niet terug konden, en "De laatste back-up is onleesbaar" onder ! zegt nu waarom.',
+      'Met TimescaleDB 2.29 of nieuwer liet de nachtelijke back-up de gecomprimeerde logregels niet weg (TimescaleDB noemt die delen sinds 2.29 anders). Nu zoekt hij ze op hun exacte naam op, ook de delen met een oude naam van voor een update van TimescaleDB, dus de back-up wordt weer klein.',
+      'Een fout van een proxy zonder uitleg toont nu bv. "Mislukt (fout 504)" in plaats van niets. Alle acties in het auditlog hebben nu een leesbare naam.',
+    ],
+    instellen: [
+      'Niets verplicht. Wil je de test van de back-up meteen zien in plaats van op de 1e: voer in de container één keer systemctl start homepage-backuptest uit.',
+      'Optioneel: rol rsyslog opnieuw uit op de machines die je eerder instelde (logs → machines toevoegen, dezelfde SSH-host). Dan houden regels die rsyslog vasthield hun eigen tijd.',
+    ],
+  },
+  {
     nr: 33,
     datum: '2026-10-11',
     titel: 'Veiligheid',

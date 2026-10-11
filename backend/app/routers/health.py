@@ -1,6 +1,7 @@
 """Gezondheid: schijven en temperaturen, vergeten snapshots, domeinen en de homepage zelf."""
 
 import asyncio
+import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -14,9 +15,10 @@ from ..config import get_settings
 from ..db import get_db
 from ..deps import audit, current_user, recent_auth
 from ..health import domains as dom, scan as hw, selfcheck as sc, snapshots as snap
-from ..monitoring import cluster, coverage
+from ..monitoring import cluster, coverage, rollup
 from ..integrations import IntegrationError
 from ..models import AppState, Reading, Service, User
+from ..syslog import server as rxs
 from .integrations import clients
 
 router = APIRouter(prefix="/api/health", tags=["health"])
@@ -48,8 +50,13 @@ def _summary(hardware: dict, snaps: dict, domains: dict, selfc: dict, worker: di
         problems.append("geen recente back-up")
     if (selfc.get("verified") or {}).get("ok") is False:
         problems.append("back-up onleesbaar")
-    if (selfc.get("offsite") or {}).get("enabled") and (selfc.get("offsite") or {}).get("error"):
+    if (selfc.get("restore") or {}).get("status") == "fout":
+        problems.append("terugzetten mislukt")
+    off = selfc.get("offsite") or {}
+    if off.get("enabled") and off.get("error"):
         problems.append("kopie buiten de container")
+    if off.get("enabled") and off.get("key_stale"):
+        problems.append("sleutel buiten de container verouderd")
     disk = sc.disk_alert(selfc)
     if disk == "err":
         problems.append("schijf bijna vol")
@@ -57,6 +64,7 @@ def _summary(hardware: dict, snaps: dict, domains: dict, selfc: dict, worker: di
     warn = sum(1 for d in disks if d.get("level") == "warn") + sum(
         1 for h in hosts for p in h.get("pools", []) if p.get("level") in ("warn", "err"))
     warn += sum(1 for h in hosts if (h.get("throttle") or {}).get("now")) + (disk == "warn")
+    warn += bool((selfc.get("rollup") or {}).get("late"))
     hot = [h["name"] for h in hosts if h.get("cpu_temp") is not None and h["cpu_temp"] >= cfg["cpu_warn"]]
     return {"err": err + len(problems) + sum(1 for d in soon if d["days_left"] <= 7),
             "warn": warn + len(old) + len(hot) + sum(1 for d in soon if d["days_left"] > 7),
@@ -73,20 +81,30 @@ async def _with_cluster(db: AsyncSession, summ: dict) -> dict:
             "backups": b}
 
 
+async def _selfcheck(db: AsyncSession) -> dict:
+    """De laatste zelfcontrole, met de stand van de uurtotalen van nu: de zelfcontrole loopt maar elk uur, en na een
+    lange stilstand haalt de worker de uurtotalen binnen een paar minuten in (anders bleef "achter" een uur staan)."""
+    selfc = await _value(db, sc.STATE_KEY)
+    if "rollup" in selfc:
+        selfc["rollup"] = await rollup.lag(db, datetime.now(timezone.utc))
+    return selfc
+
+
 @router.get("")
 async def overview(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     cfg = await hw.settings(db)
     worker = await sc.check_worker(db)
     await db.commit()
     hardware, snaps = await _value(db, hw.STATE_KEY), await _value(db, snap.STATE_KEY)
-    domains, selfc = await _value(db, dom.STATE_KEY), await _value(db, sc.STATE_KEY)
+    domains, selfc = await _value(db, dom.STATE_KEY), await _selfcheck(db)
     key = await _value(db, sc.KEY_STATE)
     snaps.pop("warned", None)
     # Eerst de samenvatting: die kijkt in alerts of de schijf vol is.
     summ = await _with_cluster(db, _summary(hardware, snaps, domains, selfc, worker, cfg))
     selfc.pop("alerts", None)
+    syslog = sc.syslog_status(await _value(db, rxs.STATE_KEY), datetime.now(timezone.utc))
     return {"settings": cfg, "hardware": hardware, "snapshots": snaps, "domains": domains, "selfcheck": selfc,
-            "worker": worker, "offsite_key": {"set": bool(key.get("blob")), "at": key.get("at")},
+            "worker": worker, "syslog": syslog, "offsite_key": {"set": bool(key.get("blob")), "at": key.get("at")},
             "offsite_dir": str(get_settings().offsite_dir),
             "running": [k for k in _tasks if _running(k)],
             "summary": summ}
@@ -99,7 +117,7 @@ async def summary(user: User = Depends(current_user), db: AsyncSession = Depends
     worker = await sc.check_worker(db)
     await db.commit()
     return await _with_cluster(db, _summary(await _value(db, hw.STATE_KEY), await _value(db, snap.STATE_KEY),
-                                            await _value(db, dom.STATE_KEY), await _value(db, sc.STATE_KEY), worker, cfg))
+                                            await _value(db, dom.STATE_KEY), await _selfcheck(db), worker, cfg))
 
 
 @router.get("/temps")
@@ -208,13 +226,15 @@ class Passphrase(BaseModel):
 @router.put("/offsite-key")
 async def offsite_key(body: Passphrase, request: Request, user: User = Depends(recent_auth),
                       db: AsyncSession = Depends(get_db)):
-    """secret.key versleutelen met een wachtzin, voor de kopie buiten de container. De wachtzin bewaren we niet."""
+    """secret.key versleutelen met een wachtzin, voor de kopie buiten de container. De wachtzin bewaren we niet. De
+    sha256 van secret.key komt ernaast: verandert secret.key later, dan merkt de zelfcontrole dat de kopie oud is."""
     try:
         secret = get_settings().secret_key_file.read_bytes()
     except OSError as e:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "secret.key niet leesbaar") from e
     blob = await asyncio.to_thread(sc.encrypt_key, secret, body.passphrase)
-    value = {"blob": blob, "at": datetime.now(timezone.utc).replace(microsecond=0).isoformat()}
+    value = {"blob": blob, "at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+             "sha256": hashlib.sha256(secret).hexdigest()}
     st = await db.get(AppState, sc.KEY_STATE)
     if st:
         st.value = value

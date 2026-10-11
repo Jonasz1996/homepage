@@ -1,6 +1,7 @@
 <script>
   import { onMount, untrack } from 'svelte'
   import { api, poll } from './api.js'
+  import { advance, append, cursorOf, prepend } from './logtail.js'
   import LogRules from './LogRules.svelte'
   import LogSetup from './LogSetup.svelte'
 
@@ -11,7 +12,8 @@
   const RANGES = ['1h', '24h', '7d', '30d']
 
   let hosts = $state([])
-  let host = $state(untrack(() => initial?.host || null))
+  let hostsError = $state('')
+  let host = $state(null)
   let q = $state('')
   let qLive = $state('')
   let sev = $state('')
@@ -20,6 +22,7 @@
   let items = $state([])
   let more = $state(false)
   let hist = $state(null)
+  let histError = $state('')
   let error = $state('')
   let modal = $state(null)
   let busy = $state(false)
@@ -32,27 +35,64 @@
     return p
   }
 
-  // Elke nieuwe lading krijgt een nummer: antwoorden voor een oude filter worden genegeerd.
+  // Elke nieuwe lading krijgt een nummer: antwoorden voor een oude filter worden genegeerd. Er loopt er één tegelijk:
+  // verandert de filter terwijl er een bezig is, dan daarna nog één keer met de nieuwste. Een verlaten zoekopdracht
+  // loopt op de server toch door (tot 20 s), dus niet stapelen.
   let gen = 0
+  let running = false
+  // Live meekijken gaat verder na deze id (zie logtail.js). Null zolang er gezocht wordt: dan geen nieuwe regels van de
+  // nieuwe filter boven de lijst van de vorige.
+  let cursor = null
   async function load() {
-    const my = ++gen
+    gen++
+    if (running) return
+    running = true
     busy = true
     try {
-      const [r, h, hs] = await Promise.all([
-        api('/logs?' + params({ limit: 300 })), api('/logs/histogram?' + params()), api('/logs/hosts'),
-      ])
-      if (my !== gen) return
-      items = r.items
-      more = r.more
-      hist = h
-      hosts = hs
-      error = ''
-    } catch (e) {
-      error = e.message
+      let my
+      do {
+        my = gen
+        await search(my)
+      } while (my !== gen && open)
     } finally {
+      running = false
       busy = false
     }
   }
+
+  // Eerst de regels, dan de grafiek: die is het duurst. Mislukt de grafiek, dan blijven de regels staan; mislukt het
+  // zoeken, dan geen regels van de vorige filter onder de nieuwe. Zo ook de grafiek: die van de vorige filter gaat weg
+  // zodra de nieuwe regels er zijn, niet pas als de nieuwe grafiek er is (tot 20 s later).
+  async function search(my) {
+    const p = params()
+    cursor = null
+    let r
+    try {
+      r = await api('/logs?' + params({ limit: 300 }))
+    } catch (e) {
+      if (my === gen) { items = []; more = false; hist = null; histError = ''; error = e.message }
+      return
+    }
+    if (my !== gen) return
+    items = r.items
+    cursor = cursorOf(r)
+    more = r.more
+    error = ''
+    hist = null
+    histError = ''
+    try {
+      const h = await api('/logs/histogram?' + p)
+      if (my === gen) { hist = h; histError = '' }
+    } catch (e) {
+      if (my === gen) { hist = null; histError = e.status === 503 ? 'grafiek te traag voor deze periode' : `geen grafiek: ${e.message}` }
+    }
+  }
+
+  // De lijst met machines links: bij het openen en elke 30 s (onMount), niet bij elke filter. Mislukt het (de server
+  // stopt na 5 s), dan blijft de vorige lijst staan, maar niet stil: zonder lijst stond er anders "nog geen logs".
+  const loadHosts = () => api('/logs/hosts')
+    .then((h) => { hosts = h; hostsError = '' })
+    .catch((e) => { hostsError = e.status === 503 ? 'te traag' : `niet geladen: ${e.message}` })
 
   async function loadMore() {
     const my = gen
@@ -60,17 +100,21 @@
     try {
       const r = await api('/logs?' + params({ limit: 300, before_ts: last.ts, before_id: last.id }))
       if (my !== gen) return
-      items = [...items, ...r.items]
+      items = append(items, r.items)
       more = r.more
     } catch (e) { error = e.message }
   }
 
   async function tail() {
-    if (!open || !live || !items.length) return
+    if (!open || !live || cursor === null) return
     const my = gen
+    const from = cursor
     try {
-      const r = await api('/logs?' + params({ after_id: Math.max(...items.slice(0, 50).map((i) => i.id)) }))
-      if (my === gen && r.items.length) items = [...r.items, ...items].slice(0, 3000)
+      const r = await api('/logs?' + params({ after_id: from }))
+      // Intussen opnieuw gezocht, of een andere poging was al verder: die geldt.
+      if (my !== gen || from !== cursor) return
+      items = prepend(items, r.items)
+      cursor = advance(from, r.items)
     } catch { /* volgende poging */ }
   }
 
@@ -82,24 +126,38 @@
     timer = setTimeout(() => (qLive = v), 300)
   })
 
+  // Hoe het venster geopend werd. $effect.pre loopt vóór het laden hieronder: zo vertrekt er geen zoekopdracht met
+  // de filters van de vorige keer (die liep op de server toch door, desnoods over 30 dagen).
+  $effect.pre(() => {
+    const init = initial
+    if (!init) return
+    untrack(() => {
+      // Met de knop bovenaan: zoals je het venster achterliet. Van elders (zoekbalk, aandacht, checklist, een
+      // melding) opnieuw de laatste 24 uur: 7 of 30 dagen over alle machines is traag.
+      if (!init.keep) range = '24h'
+      // Een logregel uit de zoekbalk: die machine en die zoekterm, alle niveaus, zodat de regel er zeker bij staat.
+      if (init.host || init.q) {
+        host = init.host || null
+        q = qLive = init.q || ''
+        sev = ''
+      }
+      // Vanuit de instellingen-checklist: meteen rsyslog uitrollen.
+      if (init.setup) modal = 'setup'
+    })
+  })
+
   $effect(() => {
     host; qLive; sev; range
     if (open) untrack(load)
   })
 
-  // Geopend vanuit een tegel of de zoekbalk: meteen op die machine en/of die zoekterm.
   $effect(() => {
-    if (initial?.host || initial?.q) untrack(() => {
-      if (initial.host) host = initial.host
-      if (initial.q) q = qLive = initial.q
-    })
-    // Vanuit de instellingen-checklist: meteen rsyslog uitrollen.
-    if (initial?.setup) untrack(() => (modal = 'setup'))
+    if (open) untrack(loadHosts)
   })
 
   onMount(() => {
     const stopTail = poll(tail, 3000)
-    const stopHosts = poll(() => open && api('/logs/hosts').then((h) => (hosts = h)).catch(() => {}), 30000)
+    const stopHosts = poll(() => open && loadHosts(), 30000)
     return () => { stopTail(); stopHosts() }
   })
 
@@ -127,7 +185,7 @@
     <div class="cols">
       <aside>
         <button class="hb" class:on={!host} onclick={() => (host = null)}>
-          <b>alle machines</b><small>{hosts.reduce((a, h) => a + h.count, 0).toLocaleString('nl-BE')} regels / 24 u</small>
+          <b>alle machines</b><small>{hostsError && !hosts.length ? 'aantal onbekend' : `${hosts.reduce((a, h) => a + h.count, 0).toLocaleString('nl-BE')} regels / 24 u`}</small>
         </button>
         {#each hosts as h (h.host)}
           <button class="hb" class:on={host === h.host} onclick={() => (host = host === h.host ? null : h.host)}>
@@ -135,8 +193,9 @@
             <small>{h.count.toLocaleString('nl-BE')}{#if h.errors}&nbsp;·&nbsp;<span class="e">{h.errors} fouten</span>{/if}</small>
           </button>
         {:else}
-          <p class="hint">Nog geen logs ontvangen. Kies <b>machines toevoegen</b>.</p>
+          {#if !hostsError}<p class="hint">Nog geen logs ontvangen. Kies <b>machines toevoegen</b>.</p>{/if}
         {/each}
+        {#if hostsError}<p class="hint">Lijst met machines {hostsError}{hosts.length ? '; de aantallen zijn van daarnet' : ''}. Nieuwe poging over 30 s.</p>{/if}
       </aside>
       <section>
         <div class="filters">
@@ -163,6 +222,10 @@
               <rect x={i + 0.1} width="0.8" y={40 - he} height={he} class="e" />
             {/each}
           </svg>
+        {:else if histError}
+          <p class="hnote">{histError}</p>
+        {:else if busy}
+          <p class="hnote">grafiek laden…</p>
         {/if}
         {#if error}<p class="err">{error}</p>{/if}
         <div class="list">
@@ -187,7 +250,7 @@
 {#if modal === 'rules'}
   <LogRules hosts={hosts.map((h) => h.host)} onclose={() => (modal = null)} />
 {:else if modal === 'setup'}
-  <LogSetup onclose={() => { modal = null; load() }} />
+  <LogSetup onclose={() => { modal = null; load(); loadHosts() }} />
 {/if}
 
 <style>
@@ -210,6 +273,7 @@
   .hist .t { fill: rgba(255, 255, 255, .18) }
   .hist .w { fill: var(--mid) }
   .hist .e { fill: var(--err) }
+  .hnote { margin: 0 12px 6px; color: var(--dim); font-size: 11.5px }
   .list { flex: 1; overflow: auto; font-size: 12px; border-top: 1px solid var(--line) }
   .ln { display: grid; grid-template-columns: auto 120px 110px 58px 1fr; gap: 10px; padding: 2px 12px; border-bottom: 1px solid rgba(255, 255, 255, .03); align-items: baseline }
   .ln:hover { background: rgba(255, 255, 255, .04) }

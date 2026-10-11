@@ -7,8 +7,8 @@ from sqlalchemy import event, select
 from app import main
 from app.db import ensure_state, get_db, job_lock
 from app.main import app
-from app.models import AppState, CheckResult, Device, Metric, Notification, UpdateRun
-from app.monitoring import devices, engine, network, worker as worker_mod
+from app.models import AppState, CheckHourly, CheckResult, Device, Metric, Notification, UpdateRun
+from app.monitoring import devices, engine, network, rollup, worker as worker_mod
 from app.monitoring.checks import HttpClients
 from app.monitoring.engine import cleanup, housekeeping
 from app.monitoring.upgrade import mark_interrupted
@@ -150,9 +150,14 @@ async def test_retention_and_pruning(authed):
     sid = await _svc(authed, g, "", "http://a", name="A")
     now = datetime.now(timezone.utc)
     agen, db = await _db()
-    for days in (200, 400):
+    for days in (60, 120):
         db.add(CheckResult(service_id=sid, ts=now - timedelta(days=days), ok=True))
+    for days in (200, 400):
         db.add(Metric(service_id=sid, kind="power", name=f"m{days}", ts=now - timedelta(days=days), watts=1.0))
+    for days in (380, 420):
+        db.add(CheckHourly(service_id=sid, hour=rollup.floor_hour(now - timedelta(days=days)), checks=1, ok=1))
+    # De uurtotalen zijn bij: de losse checks van meer dan 90 dagen geleden mogen weg.
+    db.add(AppState(key=rollup.KEY, value={"until": rollup.floor_hour(now).isoformat()}))
     db.add(Notification(title="ongelezen, oud", ts=now - timedelta(days=200)))
     db.add(Notification(title="ongelezen, recent", ts=now - timedelta(days=100)))
     db.add(UpdateRun(target="ssh:1", target_name="oud klaar", status="ok", created_at=now - timedelta(days=400)))
@@ -162,10 +167,11 @@ async def test_retention_and_pruning(authed):
     await cleanup(db)
     await housekeeping(db)
     await db.commit()
-    # Checks een jaar, metingen een half jaar.
+    # Losse checks 90 dagen, per uur opgeteld 400 dagen, metingen een half jaar.
     assert len((await db.execute(select(CheckResult))).scalars().all()) == 1
+    assert len((await db.execute(select(CheckHourly))).scalars().all()) == 1
     assert (await db.execute(select(Metric.name))).scalars().all() == []
-    assert engine.KEEP_CHECKS_DAYS == 365 and engine.KEEP_METRICS_DAYS == 180
+    assert engine.KEEP_CHECKS_DAYS == 90 and engine.KEEP_HOURLY_DAYS == 400 and engine.KEEP_METRICS_DAYS == 180
     titles = (await db.execute(select(Notification.title))).scalars().all()
     assert "ongelezen, recent" in titles and "ongelezen, oud" not in titles
     assert sorted((await db.execute(select(UpdateRun.target_name))).scalars().all()) == ["oud bezig", "recent"]

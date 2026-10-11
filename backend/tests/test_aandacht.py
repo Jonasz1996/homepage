@@ -6,11 +6,13 @@ import httpx
 from sqlalchemy import select
 
 from app import attention
+from app.config import get_settings
 from app.db import get_db
 from app.health import selfcheck as sc
 from app.main import app
-from app.models import (AppState, CronJob, Device, HealRule, MaintenanceWindow, Service, ServiceState, SshHost,
-                        UpdateRun, WebhookSource)
+from app.models import (AppState, CheckResult, CronJob, Device, HealRule, MaintenanceWindow, Service, ServiceState,
+                        SshHost, UpdateRun, WebhookSource)
+from app.monitoring import rollup
 from app.monitoring.checks import HttpClients
 from app.routers import integrations as integrations_router
 
@@ -40,9 +42,123 @@ def _state(db, key, value):
 
 async def test_zonder_worker_staat_dat_bovenaan(authed):
     r = (await authed.get("/api/attention")).json()
-    assert [i["key"] for i in r["items"]] == ["worker"]
-    assert r["items"][0]["level"] == "err" and r["counts"] == {"err": 1, "warn": 0, "info": 0}
+    # Een nieuwe installatie: daarnaast alleen het voorstel voor een kopie buiten de container.
+    assert [i["key"] for i in r["items"]] == ["worker", "offsite-voorstel"]
+    assert r["items"][0]["level"] == "err" and r["counts"] == {"err": 1, "warn": 1, "info": 0}
     assert r["items"][0]["fix"] == {"window": "health", "tab": "homepage"}
+
+
+async def test_syslog_ontvanger_onder_aandacht(authed):
+    agen, db = await _db()
+    now = datetime.now(timezone.utc)
+    _state(db, sc.HEARTBEAT_KEY, {"at": now.isoformat(), "started": now.isoformat()})
+    _state(db, "syslog", {
+        "at": (now - timedelta(minutes=12)).isoformat(), "started": (now - timedelta(days=1)).isoformat(),
+        "received": 9000, "stored": 7766, "lost": 1234, "backlog": 0, "down_since": None,
+        "last_error": {"since": (now - timedelta(hours=2)).isoformat(), "until": (now - timedelta(hours=1)).isoformat(),
+                       "error": "ConnectionRefusedError: [Errno 111] Connect call failed"},
+        "loss": {"since": (now - timedelta(hours=2)).isoformat(), "at": (now - timedelta(hours=1)).isoformat(),
+                 "n": 1234, "why": "vol"}})
+    await db.commit()
+    r = (await authed.get("/api/attention")).json()
+    by = {i["key"]: i for i in r["items"]}
+    down = by["syslog"]
+    assert (down["level"], down["area"], down["title"]) == ("warn", "homepage", "De syslog-ontvanger draait niet")
+    assert down["text"].startswith("Laatste teken van leven 12 min geleden.") and "homepage-syslog" in down["text"]
+    loss = by["syslog:verlies"]
+    assert (loss["level"], loss["title"]) == ("warn", "1.234 logregels niet bewaard")
+    assert "50.000 regels" in loss["text"] and "UDP" in loss["text"] and "ConnectionRefusedError" in loss["text"]
+    assert loss["fix"] == down["fix"] == {"window": "health", "tab": "homepage"}
+    assert r["counts"]["err"] == 0
+    # Ook in Gezondheid › homepage.
+    h = (await authed.get("/api/health")).json()["syslog"]
+    assert h["ok"] is False and h["loss"]["n"] == 1234 and "12 min" in h["why"]
+
+    # Draait weer, en het verlies is meer dan een dag oud: niets meer onder Aandacht.
+    st = await db.get(AppState, "syslog")
+    st.value = {**st.value, "at": now.isoformat(), "loss": {**st.value["loss"], "n": 1,
+                                                             "at": (now - timedelta(hours=25)).isoformat()}}
+    await db.commit()
+    keys = [i["key"] for i in (await authed.get("/api/attention")).json()["items"]]
+    assert not [k for k in keys if k.startswith("syslog")]
+    h = (await authed.get("/api/health")).json()["syslog"]
+    assert h["ok"] is True and h["loss"] is None and h["lost"] == 1234
+    await agen.aclose()
+
+
+async def test_kopie_buiten_de_container_voorgesteld(authed):
+    async def voorstel():
+        r = (await authed.get("/api/attention")).json()
+        return next((i for i in r["items"] + r["ignored"] if i["key"] == "offsite-voorstel"), None)
+
+    # Nergens een kopie van secret.key: oranje, met wat een back-up van de CT in PBS al doet.
+    v = await voorstel()
+    assert v["level"] == "warn" and v["title"] == "Back-up van het dashboard staat alleen in de container"
+    assert "secret.key" in v["text"] and "PBS" in v["text"] and "negeren" in v["text"]
+    assert str(get_settings().offsite_dir) in v["text"]
+    assert v["fix"] == {"window": "health", "tab": "homepage"}
+    # Negeren blijft tot het niveau verandert.
+    r = (await authed.put("/api/attention/ignore", json={"key": v["key"], "sig": v["sig"]})).json()
+    assert "offsite-voorstel" in {i["key"] for i in r["ignored"]}
+    # Een kopie van de sleutel bevestigd: nog ter info (telt niet mee in de knop), en weer zichtbaar.
+    assert (await authed.post("/api/security/secret-key-saved")).status_code == 200
+    r = (await authed.get("/api/attention")).json()
+    v = next(i for i in r["items"] if i["key"] == "offsite-voorstel")
+    assert v["level"] == "info" and "onleesbaar" not in v["text"] and r["counts"]["warn"] == 0
+    # Kopie buiten de container aan: geen voorstel meer.
+    r = await authed.put("/api/health/settings", json={"cpu_warn": 85, "disk_warn": 55, "snapshot_days": 14,
+                                                      "offsite": True})
+    assert r.status_code == 200
+    assert await voorstel() is None
+
+
+async def test_zelfcontrole_van_de_back_up(authed):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    agen, db = await _db()
+    _state(db, sc.HEARTBEAT_KEY, {"at": NOW.isoformat(), "started": NOW.isoformat()})
+    _state(db, sc.STATE_KEY, {
+        "verified": {"name": "homepage-2026-10-04.dump", "ok": False, "why": "pg_restore: input file is too short"},
+        "restore": {"status": "fout", "at": now.isoformat(), "dump": "homepage-2026-10-01.dump",
+                    "why": "pg_restore: COPY failed for table \"users\": ERROR:  kapot", "last_ok": None},
+        "offsite": {"enabled": True, "key": True, "key_stale": True, "dir": "/mnt/homepage-backup", "error": None}})
+    await db.commit()
+
+    async def items():
+        return {i["key"]: i for i in (await authed.get("/api/attention")).json()["items"]}
+
+    by = await items()
+    # Onleesbaar: met de reden erbij (vroeger bleef de tekst leeg).
+    assert by["selfverify"]["text"] == "pg_restore: input file is too short"
+    assert by["selfrestore"]["level"] == "err"
+    assert by["selfrestore"]["title"] == "De back-up van het dashboard lukt niet terug te zetten"
+    assert 'COPY failed for table "users"' in by["selfrestore"]["text"]
+    assert "systemctl start homepage-backuptest" in by["selfrestore"]["text"]
+    assert by["offsite-sleutel"]["level"] == "err" and "wachtzin opnieuw" in by["offsite-sleutel"]["text"]
+
+    async def restore(r):
+        st = await db.get(AppState, sc.STATE_KEY, populate_existing=True)
+        st.value = {**st.value, "restore": r}
+        await db.commit()
+        return (await items()).get("selfrestore")
+
+    # Gelukt, een week geleden: niets.
+    week = (now - timedelta(days=7)).isoformat()
+    assert await restore({"status": "ok", "at": week, "last_ok": week}) is None
+    # Overgeslagen (te weinig plaats), maar de laatste geslaagde test is recent: oranje, met de reden.
+    i = await restore({"status": "overgeslagen", "at": now.isoformat(), "why": "te weinig plaats", "last_ok": week})
+    assert i["level"] == "warn" and i["text"] == "te weinig plaats"
+    # De laatste geslaagde test is 45 dagen oud (de timer loopt niet).
+    old = (now - timedelta(days=45)).isoformat()
+    i = await restore({"status": "ok", "at": old, "last_ok": old})
+    assert i["level"] == "warn" and "al 45 dagen niet op een testdatabase teruggezet" in i["title"]
+    assert "systemctl start homepage-backuptest" in i["text"]
+    i2 = await restore({"status": "overgeslagen", "at": now.isoformat(), "why": "te weinig plaats", "last_ok": old})
+    assert i2["sig"] == i["sig"] and "overgeslagen: te weinig plaats" in i2["text"]
+    # Nog nooit getest: pas na 40 dagen een punt.
+    assert await restore({"status": None, "missing_since": (now - timedelta(days=10)).isoformat()}) is None
+    i = await restore({"status": None, "missing_since": (now - timedelta(days=41)).isoformat()})
+    assert i["level"] == "warn" and "41 dagen" in i["title"]
+    await agen.aclose()
 
 
 async def _seed(authed) -> dict[str, int]:
@@ -97,6 +213,42 @@ async def _seed(authed) -> dict[str, int]:
     await db.commit()
     await agen.aclose()
     return ids
+
+
+async def test_uurtotalen_die_achterlopen(authed):
+    """Telt de worker de checks niet meer per uur op, dan zegt ! het (met TimescaleDB gaan losse checks na 90 dagen
+    toch weg, ook als ze nog niet opgeteld zijn)."""
+    ids = await _tiles(authed, ("nas", "link", {"check": {"type": "http"}}))
+    agen, db = await _db()
+    _state(db, sc.HEARTBEAT_KEY, {"at": NOW.isoformat(), "started": NOW.isoformat()})
+    _state(db, rollup.KEY, {"until": (rollup.floor_hour(NOW) - timedelta(hours=1)).isoformat()})
+    await db.commit()
+
+    async def items() -> dict:
+        return {i["key"]: i for i in (await authed.get("/api/attention")).json()["items"]}
+
+    assert "uurtotalen" not in await items()  # gewoon bij
+    st = await db.get(AppState, rollup.KEY)
+    st.value = {"until": (rollup.floor_hour(NOW) - timedelta(days=3)).isoformat()}
+    await db.commit()
+    it = (await items())["uurtotalen"]
+    assert it["level"] == "warn" and it["title"] == "De worker telt de checks al 3 dagen niet meer per uur op"
+    assert "verdwijnen over 87 dagen de eerste checks voor goed" in it["text"]
+    assert it["fix"] == {"window": "health", "tab": "homepage"}
+
+    # Nog nooit opgeteld, terwijl er al dagen checks zijn: ook.
+    await db.delete(st)
+    db.add(CheckResult(service_id=ids["nas"], ts=NOW - timedelta(days=2), ok=True, maintenance=False))
+    await db.commit()
+    assert (await items())["uurtotalen"]["title"] == "De worker telt de checks niet per uur op"
+
+    # Draait de worker niet, dan zegt dat punt genoeg.
+    hb = await db.get(AppState, sc.HEARTBEAT_KEY)
+    hb.value = {"at": (NOW - timedelta(hours=1)).isoformat(), "started": NOW.isoformat()}
+    await db.commit()
+    got = await items()
+    assert "worker" in got and "uurtotalen" not in got
+    await agen.aclose()
 
 
 async def test_alles_wat_mis_is(authed, monkeypatch):
