@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from .. import logring
 from ..cron.scan import CRON_EVERY, run_scan as cron_scan
 from ..db import get_engine
 from ..health.diskguard import GUARD_EVERY, run_diskguard
@@ -254,6 +255,8 @@ class Worker:
     async def beat(self) -> None:
         async with self.maker() as db:
             await heartbeat(db, self.started)
+            # De laatste logregels voor de diagnose (alleen als er iets bijkwam).
+            await logring.flush(db, "worker")
             await db.commit()
 
     async def tidy(self) -> None:
@@ -391,8 +394,9 @@ class Worker:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.basicConfig(level=logging.INFO, format=logring.FORMAT)
+    # Ook in het geheugen, voor de diagnose; httpx en asyncssh alleen vanaf WARNING.
+    logring.install("worker")
     maker = async_sessionmaker(get_engine("worker"), expire_on_commit=False)
     asyncio.run(Worker(maker).run())
 

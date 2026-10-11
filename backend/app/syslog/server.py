@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import insert, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from .. import logring
 from ..config import get_settings
 from ..db import delete_before, get_engine
 from ..models import LogEntry, LogRule, Notification
@@ -186,6 +187,7 @@ async def handle_tcp(rx: Receiver, reader: asyncio.StreamReader, writer: asyncio
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logring.install("syslog")
     s = get_settings()
     maker = async_sessionmaker(get_engine("syslog"), expire_on_commit=False)
     rx = Receiver(maker)
@@ -197,7 +199,8 @@ async def main() -> None:
                                         limit=MAX_TCP_FRAME)
     log.info("Syslog luistert op %s:%d (udp+tcp), toegelaten: %s", s.syslog_bind, s.syslog_port, s.syslog_allow)
     async with server:
-        await asyncio.gather(rx.writer(), rx.cleanup_loop(), server.serve_forever())
+        # De eigen logregels elke minuut in de database, voor de diagnose.
+        await asyncio.gather(rx.writer(), rx.cleanup_loop(), logring.flush_loop(maker, "syslog"), server.serve_forever())
 
 
 if __name__ == "__main__":
