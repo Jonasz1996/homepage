@@ -10,7 +10,9 @@ nginx overschrijft X-Homepage-Via-Cf, X-Homepage-Access en X-Homepage-Cf-Forged 
 alleen op 127.0.0.1, dus een bezoeker kan ze niet zelf meesturen. De headers van Cloudflare gelooft nginx alleen als NPM
 het verzoek van Cloudflare of een tunnel kreeg (deploy/nginx-map.conf). Stuurt iemand anders ze mee (wie NPM
 rechtstreeks bereikt en zo een ander IP voorwendt, bv. het eigen publieke IP), dan zet nginx X-Homepage-Cf-Forged: zo
-iemand telt altijd als van buitenaf, en het dashboard meldt het.
+iemand telt altijd als van buitenaf, en het dashboard meldt het. Het IP is dan het adres waarvan NPM het verzoek kreeg;
+dat kan gekozen zijn (NPM gelooft X-Real-IP van het LAN), dus de limieten op pogingen delen dan één sleutel
+(deps.limit_ip).
 """
 
 import ipaddress
@@ -22,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import HTTPConnection
 
 from .db import get_db
-from .deps import notify
+from .deps import cf_forged, notify
 from .models import AppState, Notification
 
 STATE_KEY = "outside"
@@ -30,10 +32,9 @@ SEEN_KEY = "outside_seen"
 TEMP = timedelta(hours=1)
 MODES = ("uit", "uur", "aan")
 FORGED_WHY = "vervalste Cloudflare-header van een adres dat geen Cloudflare is"
-# Een melding over vervalste headers: hoogstens één per uur per adres (IPv6: per /64), en tien per uur in totaal.
-FORGED_KEY = "cf-vervalst:"
+# Een melding over vervalste headers: hoogstens één per uur, van welk adres ook (het adres kan gekozen zijn).
+FORGED_KEY = "cf-vervalst"
 FORGED_EVERY = timedelta(hours=1)
-FORGED_MAX = 10
 
 # Volgorde = volgorde in het scherm.
 FEATURES = {
@@ -52,9 +53,13 @@ def _now() -> datetime:
 
 def _ip(conn: HTTPConnection) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
     try:
-        return ipaddress.ip_address(conn.client.host) if conn.client else None
+        ip = ipaddress.ip_address(conn.client.host) if conn.client else None
     except ValueError:
         return None
+    # Een IPv4-adres in IPv6-vorm (::ffff:a.b.c.d) is gewoon dat IPv4-adres.
+    if ip is not None and ip.version == 6 and ip.ipv4_mapped:
+        return ip.ipv4_mapped
+    return ip
 
 
 async def settings(db: AsyncSession) -> dict:
@@ -73,24 +78,24 @@ async def _home_public_ip(db: AsyncSession) -> str | None:
 
 def forged(conn: HTTPConnection) -> bool:
     """Had het verzoek een header van Cloudflare die niet van Cloudflare kwam? (nginx zet dit, zie hierboven.)"""
-    return conn.headers.get("x-homepage-cf-forged") == "1"
+    return cf_forged(conn)
 
 
 async def _report_forged(db: AsyncSession, ip: ipaddress.IPv4Address | ipaddress.IPv6Address | None) -> None:
     """Melding (en tijdlijn) over een vervalste header. Bewaart meteen: een geweigerd verzoek bewaart zelf niets.
     De aanroepers van where() hebben op dat moment nog niets gewijzigd."""
-    who = "?" if ip is None else str(ip) if ip.version == 4 else str(ipaddress.ip_network(f"{ip}/64", strict=False))
-    key = f"{FORGED_KEY}{who}"
-    recent = set((await db.execute(select(Notification.push_key).where(
-        Notification.push_key.like(f"{FORGED_KEY}%"), Notification.ts >= _now() - FORGED_EVERY))).scalars())
-    if key in recent or len(recent) >= FORGED_MAX:
+    if (await db.execute(select(Notification.id).where(
+            Notification.push_key == FORGED_KEY, Notification.ts >= _now() - FORGED_EVERY).limit(1))).first():
         return
+    who = str(ip) if ip is not None else "?"
     notify(db, "Vervalste Cloudflare-header",
            f"Een verzoek van {who} had een header van Cloudflare (CF-Connecting-IP, CF-IPCountry of "
-           "Cf-Access-Jwt-Assertion), maar NPM kreeg het niet van Cloudflare of een tunnel. Zo kan wie NPM "
-           "rechtstreeks bereikt een ander IP voorwenden. Het dashboard nam het echte adres en telt het bezoek als "
-           "van buitenaf. Kwam je zelf via Cloudflare binnen? Dan mist deploy/nginx-map.conf misschien een nieuw "
-           "blok van Cloudflare.", level="warn", source="auth", key=key, data={"ip": who})
+           "Cf-Access-Jwt-Assertion), maar NPM kreeg het niet van Cloudflare of een tunnel: zo kan wie NPM "
+           "rechtstreeks bereikt een ander IP voorwenden. Het dashboard telt het als van buitenaf, met het adres "
+           "waarvan NPM het verzoek kreeg (meestal het echte; van het LAN kan het gekozen zijn). Een uur lang komt "
+           "er geen nieuwe melding over. Kwam je zelf via Cloudflare binnen? Dan mist deploy/nginx-map.conf "
+           "misschien een nieuw blok van Cloudflare: zie de README (Installeren → Cloudflare).",
+           level="warn", source="auth", key=FORGED_KEY, data={"ip": who})
     await db.commit()
 
 

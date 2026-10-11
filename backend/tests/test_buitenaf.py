@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import asyncssh
 import httpx
+import pyotp
 import pytest
 from sqlalchemy import select, update
 from starlette.routing import Route, WebSocketRoute
@@ -20,7 +21,9 @@ from app.models import AppState, Event, Notification, Session, SshHost
 from app.monitoring import ports, watchdog
 from app.monitoring.checks import HttpClients
 from app.routers import integrations as integrations_router
+from app.routers import push as pushroute
 
+from .conftest import PASSWORD
 from .test_ssh import WS, _cookie
 
 CF = {"X-Homepage-Via-Cf": "1"}
@@ -168,13 +171,14 @@ FORGED = {"x-homepage-cf-forged": "1"}
 
 
 async def _forged_notes(db) -> list[Notification]:
-    q = select(Notification).where(Notification.push_key.like(f"{outside.FORGED_KEY}%")).order_by(Notification.id)
+    q = select(Notification).where(Notification.push_key == outside.FORGED_KEY).order_by(Notification.id)
     return list((await db.execute(q)).scalars())
 
 
 async def test_vervalste_cloudflare_header(authed, monkeypatch):
     """Wie NPM rechtstreeks bereikt en zelf CF-Connecting-IP meestuurt (nginx zet dan X-Homepage-Cf-Forged), is nooit
-    thuis: ook niet met het eigen publieke IP of een IP uit een thuisnetwerk. Eén melding per uur per adres."""
+    thuis: ook niet met het eigen publieke IP of een IP uit een thuisnetwerk. Eén melding per uur, van welk adres ook:
+    het adres kan gekozen zijn (NPM gelooft X-Real-IP van het LAN)."""
     agen, db = await _db()
     db.add(AppState(key="public_ip", value={"ip": "94.224.1.7"}))
     db.add(AppState(key=outside.STATE_KEY, value={"home_ip": True, "networks": ["10.8.0.0/24"]}))
@@ -188,29 +192,77 @@ async def test_vervalste_cloudflare_header(authed, monkeypatch):
     assert (await w("192.168.0.20", FORGED))["outside"] is True
     assert (await w("192.168.0.20", {"x-homepage-cf-forged": ""}))["outside"] is False
 
-    # Eén melding per adres (IPv6: per /64), in het meldingencentrum en op de tijdlijn.
-    for ip in ("94.224.1.7", "192.168.0.20", "2a02:1810:1:2::5", "2a02:1810:1:2::6", "2a02:1810:1:3::5"):
-        await w(ip, FORGED)
+    # Eén melding per uur in totaal, in het meldingencentrum en op de tijdlijn; meer adressen geven er geen extra.
+    for ip in ("2a02:1810:1:2::5", "2a02:1810:1:3::5", "203.0.113.1", "::ffff:203.0.113.2"):
+        assert (await w(ip, FORGED))["outside"] is True
     notes = await _forged_notes(db)
-    assert [n.push_key.split(":", 1)[1] for n in notes] == [
-        "94.224.1.7", "10.8.0.5", "192.168.0.20", "2a02:1810:1:2::/64", "2a02:1810:1:3::/64"]
+    assert len(notes) == 1
     n = notes[0]
     assert n.title == "Vervalste Cloudflare-header" and n.level == "warn" and n.source == "auth"
+    assert n.pushed_at is None  # wel naar de gsm
     assert "94.224.1.7" in n.body and "nginx-map.conf" in n.body
     events = (await db.execute(select(Event).where(Event.title == "Vervalste Cloudflare-header"))).scalars().all()
-    assert len(events) == 5 and {e.kind for e in events} == {"toegang"}
-
-    # Hoogstens tien per uur in totaal (hier: zes), ook als het adres telkens anders is.
-    monkeypatch.setattr(outside, "FORGED_MAX", 6)
-    for ip in ("203.0.113.1", "203.0.113.2", "203.0.113.3"):
-        assert (await w(ip, FORGED))["outside"] is True
-    assert len(await _forged_notes(db)) == 6
-    # Een uur later opnieuw.
+    assert len(events) == 1 and events[0].kind == "toegang"
+    # Een uur later opnieuw, met het adres in IPv4-vorm (niet ::/64).
     later = datetime.now(timezone.utc) + timedelta(minutes=61)
     monkeypatch.setattr(outside, "_now", lambda: later)
-    await w("94.224.1.7", FORGED)
-    assert len(await _forged_notes(db)) == 7
+    await w("::ffff:203.0.113.2", FORGED)
+    notes = await _forged_notes(db)
+    assert len(notes) == 2 and notes[1].body.startswith("Een verzoek van 203.0.113.2 ")
+    assert notes[1].push_key == notes[0].push_key  # de nieuwe vervangt de oude op de gsm
     await agen.aclose()
+
+
+async def test_ipv4_in_ipv6_vorm(authed):
+    """::ffff:a.b.c.d (NPM op een dual-stack socket) telt als dat IPv4-adres: thuis-IP, thuisnetwerk, publiek."""
+    agen, db = await _db()
+    db.add(AppState(key="public_ip", value={"ip": "94.224.1.7"}))
+    db.add(AppState(key=outside.STATE_KEY, value={"home_ip": True, "networks": ["10.8.0.0/24"]}))
+    await db.commit()
+    w = lambda ip, h=None: outside.where(_Conn(ip, h), db)  # noqa: E731
+    assert await w("::ffff:94.224.1.7", {"x-homepage-via-cf": "1"}) == {
+        "outside": False, "via_cf": True, "ip": "94.224.1.7", "why": "je eigen publieke IP"}
+    assert (await w("::ffff:10.8.0.5"))["why"] == "thuisnetwerk 10.8.0.0/24"
+    assert (await w("::ffff:81.82.83.84"))["why"] == "publiek IP"
+    assert (await w("::ffff:192.168.0.20"))["outside"] is False
+    await agen.aclose()
+
+
+async def test_vervalste_header_deelt_de_limieten(authed):
+    """Met een vervalste header kan het IP gekozen zijn: elk ander IP geeft dan geen extra pogingen."""
+    await authed.post("/api/auth/logout")
+    clients = []
+
+    def client(ip: str, headers: dict | None = None) -> httpx.AsyncClient:
+        c = httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=(ip, 1234)), base_url="http://test",
+                              headers={**authed.headers, **(headers or {})})
+        clients.append(c)
+        return c
+
+    bad = {"username": "jonas", "password": "fout-wachtwoord"}
+    for i in range(5):
+        assert (await client(f"203.0.113.{i}", FORGED).post("/api/auth/login", json=bad)).status_code == 401
+    assert (await client("203.0.113.99", FORGED).post("/api/auth/login", json=bad)).status_code == 429
+    # Zonder vervalste header telt elk IP apart; de eigenaar komt gewoon binnen.
+    owner = client("192.168.0.10")
+    r = await owner.post("/api/auth/login", json={"username": "jonas", "password": "fout-wachtwoord"})
+    assert r.status_code == 401
+    r = await owner.post("/api/auth/login", json={"username": "jonas", "password": PASSWORD,
+                                                  "code": pyotp.TOTP(authed.totp_secret).now()})
+    assert r.status_code == 200, r.text
+
+    # Onbekende push-adressen: ook één teller voor alle vervalste verzoeken.
+    pushroute._misses._fails.clear()
+    try:
+        for i in range(pushroute.MAX_MISSES):
+            r = await client(f"198.51.100.{i}", FORGED).get(f"/api/push/{'z' * 40}{i:03d}")
+            assert r.status_code == 404
+        assert (await client("198.51.100.250", FORGED).get(f"/api/push/{'z' * 43}")).status_code == 429
+        assert (await client("198.51.100.250").get(f"/api/push/{'z' * 43}")).status_code == 404
+    finally:
+        pushroute._misses._fails.clear()
+        for c in clients:
+            await c.aclose()
 
 
 async def test_vervalste_cloudflare_header_via_de_api(authed):

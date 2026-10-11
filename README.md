@@ -571,17 +571,33 @@ van Cloudflare of een tunnel kreeg. Dat werkt voor allebei:
 - een poortdoorverwijzing naar NPM via de proxy van Cloudflare (oranje wolk): NPM krijgt het verzoek van een adres
   van Cloudflare. Die adresblokken staan in `deploy/nginx-map.conf` (bron: https://www.cloudflare.com/ips)
 - een Cloudflare Tunnel: cloudflared (in een CT of op de host van NPM) komt van een privé-adres bij NPM. Laat de
-  tunnel naar NPM wijzen, niet rechtstreeks naar de container
+  tunnel naar NPM wijzen, niet rechtstreeks naar de container. Op de host van NPM mag dat `localhost`, het
+  Docker-netwerk of het LAN-adres van NPM zelf zijn
 
 Wie NPM rechtstreeks bereikt (poort 443 zonder Cloudflare, of vanaf het LAN) en zelf zo'n header meestuurt, bv. met
-je eigen publieke IP om als thuis te tellen, krijgt zijn echte IP, telt als van buitenaf en geeft een melding
-"Vervalste Cloudflare-header" (hoogstens één per uur per adres, tien per uur in totaal). Krijg je die melding voor
-je eigen bezoek via Cloudflare, dan heeft Cloudflare een nieuw adresblok: vul het aan in `deploy/nginx-map.conf`
-(bij een update zet install.sh het in `/etc/nginx/conf.d/homepage-map.conf`). Een toestel op je LAN kan NPM een
-adres van Cloudflare voorwenden (NPM gelooft `X-Real-IP` van het LAN), maar dat geeft niets: wie op het LAN zit, is
-toch thuis. `X-authentik-username` (de forward-auth van Authentik in NPM) telt alleen van NPM en niet samen met een
-vervalste header. NPM geeft hem op een host zonder forward-auth ook van de bezoeker door, dus het dashboard gebruikt
-hem alleen voor de veiligheidscheck "slot voor het dashboard".
+je eigen publieke IP om als thuis te tellen, telt als van buitenaf en geeft een melding "Vervalste Cloudflare-header"
+(hoogstens één per uur). Het dashboard neemt dan het adres waarvan NPM het verzoek kreeg: van het internet is dat
+het echte IP. NPM gelooft wel `X-Real-IP` van je LAN (en van Cloudflare), dus een toestel op je LAN kan NPM een
+ander adres voorwenden: een adres van Cloudflare geeft niets (wie op het LAN zit, is toch thuis), een ander publiek
+IP telt als vervalst. Daarom delen alle vervalste verzoeken één limiet op mislukte logins en bevestigingen, welk IP
+ze ook tonen. Cloudflare haalt een `X-Real-IP` van de bezoeker weg; alleen een Worker kan er een meesturen. Wil je
+dat NPM voor het dashboard nooit `X-Real-IP` gelooft, zet dan in NPM bij de proxy host van het dashboard onder
+*Advanced* `set_real_ip_from 192.0.2.255/32;` (een adres dat nooit verbindt: zo vervangt die host de lijst die NPM
+vertrouwt). De logs van NPM en een access list op die host zien dan het adres van Cloudflare of cloudflared in
+plaats van dat van de bezoeker; het dashboard ziet nog altijd het echte IP.
+
+De adressen van Cloudflare zijn van alle klanten van Cloudflare. Wil je zeker zijn dat alleen je eigen zone bij NPM
+komt, gebruik dan alleen een Cloudflare Tunnel (geen poortdoorverwijzing naar 443) of Authenticated Origin Pulls.
+
+Krijg je de melding voor je eigen bezoek via Cloudflare, dan heeft Cloudflare een nieuw adresblok. Dat hoort in
+de repository: vul het aan in `deploy/nginx-map.conf` en werk bij (op het kanaal stabiel pas met een nieuwe
+release). Een wijziging in `/opt/homepage` zelf verdwijnt bij de update. Tot dan kan het tijdelijk op de server:
+voeg het blok toe in `/etc/nginx/conf.d/homepage-map.conf` en doe `nginx -t && systemctl reload nginx` (de
+volgende update overschrijft dat bestand weer).
+
+`X-authentik-username` (de forward-auth van Authentik in NPM) telt alleen van NPM en niet samen met een vervalste
+header. NPM geeft hem op een host zonder forward-auth ook van de bezoeker door, dus het dashboard gebruikt hem
+alleen voor de veiligheidscheck "slot voor het dashboard".
 
 **Bewaar een kopie van `/etc/homepage/secret.key`.** Zonder die sleutel zijn de opgeslagen
 wachtwoorden, API-sleutels en 2FA-geheimen onleesbaar.

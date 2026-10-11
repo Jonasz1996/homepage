@@ -152,6 +152,12 @@ CASES = {
                     _want("81.82.83.84", via="1")),
     "tunnel op de host van NPM": ({"X-Forwarded-For": "172.17.0.1", "CF-Connecting-IP": "81.82.83.84"}, NPM,
                                   _want("81.82.83.84", via="1")),
+    # cloudflared op de host van NPM, naar het LAN-adres van NPM: NPM kreeg het van zichzelf en zet zijn eigen IP
+    # achteraan. Dat telt (niet recursief), niet het adres van de bezoeker dat Cloudflare ervoor zette.
+    "tunnel naar het LAN-adres van NPM": ({"X-Forwarded-For": f"81.82.83.84, {NPM}", "CF-Connecting-IP": "81.82.83.84",
+                                           "CF-IPCountry": "BE", "Cf-Access-Jwt-Assertion": "eyJ.x.y"}, NPM,
+                                          _want("81.82.83.84", via="1", country="BE", access="cloudflare-access")),
+    "NPM van zichzelf, zonder Cloudflare": ({"X-Forwarded-For": f"203.0.113.9, {NPM}"}, NPM, _want(NPM)),
     # Gewoon via NPM, zonder Cloudflare (bv. thuis via de eigen DNS).
     "NPM zonder Cloudflare": ({"X-Forwarded-For": "192.168.0.20"}, NPM, _want("192.168.0.20")),
     "NPM publiek zonder Cloudflare": ({"X-Forwarded-For": "81.82.83.84"}, NPM, _want("81.82.83.84")),
