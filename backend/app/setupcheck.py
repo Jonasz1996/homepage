@@ -543,6 +543,12 @@ def lan_row() -> dict:
     if st.get("reden") == "npm-onbekend":
         todo = (f"Het IP van NPM was bij de installatie niet opgegeven, dus bleef het LAN open. Klopt HOMEPAGE_NPM_IP={npm} "
                 f"in {env} en werkt het dashboard via NPM, zet dan HOMEPAGE_LAN_OPEN=0 en voer {run} uit.")
+    elif st.get("reden") == "bijgewerkt":
+        # Een update van een installatie van voor deze regel: het vorige script bewaarde altijd een IP voor NPM, ook
+        # de standaard als er geen opgegeven was.
+        todo = (f"Bijgewerkt van een installatie van voor deze regel: het LAN bleef open, want HOMEPAGE_NPM_IP={npm} "
+                f"is nog niet nagekeken. Open het dashboard via zijn naam in NPM; werkt dat, zet dan "
+                f"HOMEPAGE_LAN_OPEN=0 in {env} en voer in de container {run} uit.")
     else:
         todo = (f"HOMEPAGE_LAN_OPEN=1 staat in {env}. Werkt het dashboard via NPM ({npm}), zet het dan op 0 en voer "
                 f"{run} uit.")
