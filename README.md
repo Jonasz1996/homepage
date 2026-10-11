@@ -372,8 +372,11 @@ Later, deel 3 (Authentik en gsm):
   melding. Geef apparaten een naam of zet ze op "ken ik". Met **volgen** wordt een apparaat elke 6 uur gescand op
   ongeveer 60 gebruikelijke poorten (ssh, http, smb, rdp, docker, databanken, ...) en komt er een melding als er een
   nieuwe poort openstaat. Een privé-adres (willekeurig MAC van een gsm of laptop) heet zo; neemt een toestel met een
-  naam een nieuw privé-adres met dezelfde hostnaam op dezelfde interface, en staat het oude adres niet meer in de
-  ARP-tabel, dan houdt het zijn naam (melding alleen in 🔔); anders is het een nieuw apparaat, met die naam als hint.
+  naam een nieuw privé-adres met dezelfde hostnaam op dezelfde interface, en verdwijnt het oude adres binnen een
+  halfuur uit de ARP-tabel (OPNsense houdt het er tot 20 minuten na het laatste antwoord in; een verlopen rij telt
+  niet), dan houdt het zijn naam (melding alleen in 🔔). Zolang het wacht, staat het nieuwe adres als onbekend in de
+  lijst, zonder melding; staan ze er na dat halfuur allebei nog, dan is het een nieuw apparaat, met die naam als hint.
+  Geef je het intussen zelf een naam, dan blijft het daarbij.
   Meerdere nieuwe apparaten in één ronde geven één melding. Onbekende apparaten en de oude adressen van zo'n toestel
   die 30 dagen niet gezien zijn, verdwijnen, tenzij ze een naam, notitie of *volgen* hebben; met **vergeten** haal je
   er zelf een weg. Rechten voor de API-key:
