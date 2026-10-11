@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 from sqlalchemy import select
 
-from app.models import AppState, CheckResult, Event, Notification
+from app.models import AppState, AuditLog, CheckResult, Event, Notification
 from app.monitoring import updates as upd
 from app.monitoring.capacity import sample
 from app.monitoring.checks import HttpClients
@@ -14,6 +14,8 @@ from app.monitoring.report import build_report, weekly_notification
 from app.monitoring.watchers import watch_pbs
 from app.models import Service
 
+from .conftest import PASSWORD
+from .test_beveiliging import _reauth
 from .test_capacity import _db
 from .test_integrations import PVE, Fake, _group, _svc
 
@@ -127,7 +129,8 @@ async def test_timeline_merges_sources(authed):
     kinds = [(i["kind"], i["title"]) for i in items]
     assert ("storing", "Wiki is weer bereikbaar") in kinds and ("storing", "Wiki is down") in kinds
     assert ("wijziging", "Service 'Wiki' toegevoegd") in kinds
-    assert any(k == "wijziging" and t.startswith("Onderhoud Wiki: 30 min") for k, t in kinds)
+    # Onderhoud beginnen staat er één keer: via zijn melding (toegang), niet nog eens uit de auditlog.
+    assert [k for k, t in kinds if "Onderhoud" in t] == ["toegang"]
     recovered = next(i for i in items if i["title"] == "Wiki is weer bereikbaar")
     assert recovered["data"]["down_s"] == 300 - 2
 
@@ -145,6 +148,47 @@ async def test_timeline_merges_sources(authed):
     await authed.post("/api/notifications/read-all")
     await authed.delete("/api/notifications")
     assert len((await authed.get("/api/timeline", params={"kind": "storing"})).json()["items"]) == 2
+    await agen.aclose()
+
+
+async def test_timeline_one_entry_per_action(authed):
+    """Wat een melding geeft (onderhoud beginnen, een logregel verwijderen, het wachtwoord wijzigen), staat via die
+    melding op de tijdlijn; de regel in de auditlog niet nog eens. Wat geen melding geeft, staat er ook één keer."""
+    g = await _group(authed)
+    sid = await _svc(authed, g, "link", "https://x.jbogaert.be", name="Wiki")
+    assert (await authed.post(f"/api/services/{sid}/maintenance", json={"minutes": 60})).status_code == 200
+    assert (await authed.post(f"/api/services/{sid}/maintenance", json={"minutes": 30})).status_code == 200
+    assert (await authed.post(f"/api/services/{sid}/maintenance", json={"minutes": 0})).status_code == 200
+    assert (await authed.post(f"/api/groups/{g}/maintenance", json={"minutes": 60})).status_code == 200
+    assert (await authed.post(f"/api/groups/{g}/maintenance", json={"minutes": 0})).status_code == 200
+    rule = {"name": "ssh", "pattern": "Failed password"}
+    on = (await authed.post("/api/logs/rules", json=rule)).json()["id"]
+    off = (await authed.post("/api/logs/rules", json={**rule, "name": "kernel", "enabled": False})).json()["id"]
+    assert (await authed.delete(f"/api/logs/rules/{on}")).status_code == 200
+    assert (await authed.delete(f"/api/logs/rules/{off}")).status_code == 200
+    await _reauth(authed)
+    body = {"current": PASSWORD, "new": "nog-een-lang-wachtwoord"}
+    assert (await authed.post("/api/auth/password", json=body)).status_code == 200
+
+    items = (await authed.get("/api/timeline")).json()["items"]
+    seen = [(i["kind"], i["title"]) for i in reversed(items)
+            if i["title"].startswith(("Onderhoud", "Logregel", "Wachtwoord"))]
+    assert [k for k, _ in seen] == ["toegang", "wijziging", "wijziging", "toegang", "wijziging", "wijziging",
+                                    "wijziging", "toegang", "wijziging", "toegang"]
+    titles = [t for _, t in seen]
+    assert titles[0].startswith("Onderhoud: Wiki tot ")
+    assert titles[3].startswith("Onderhoud voor groep G: 1 service tot ")
+    assert titles[1:3] + titles[4:] == [
+        "Onderhoud Wiki: 30 min", "Onderhoud Wiki: gestopt", "Onderhoud G: gestopt", "Logregel ssh toegevoegd",
+        "Logregel kernel toegevoegd", "Logregel verwijderd: ssh", "Logregel kernel verwijderd", "Wachtwoord gewijzigd"]
+    # Ook per service: beginnen, inkorten en stoppen.
+    per = (await authed.get("/api/timeline", params={"service_id": sid})).json()["items"]
+    assert [i["kind"] for i in reversed(per)] == ["toegang", "wijziging", "wijziging"]
+    # De auditlog zelf blijft volledig.
+    agen, db = await _db()
+    actions = [a.action for a in (await db.execute(select(AuditLog).order_by(AuditLog.id))).scalars()]
+    assert actions.count("maintenance") == 5 and actions.count("log_rule_deleted") == 2
+    assert actions.count("password_changed") == 1
     await agen.aclose()
 
 

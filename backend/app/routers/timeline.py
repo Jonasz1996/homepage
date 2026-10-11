@@ -19,20 +19,18 @@ from .integrations import clients
 router = APIRouter(prefix="/api", tags=["timeline"])
 log = logging.getLogger("homepage.api")
 
-# Beheeracties uit de auditlog die op de tijdlijn horen (logins en dergelijke staan in de auditlog zelf).
+# Beheeracties uit de auditlog die op de tijdlijn horen (logins en dergelijke staan in de auditlog zelf). Wat een
+# melding geeft, staat via die melding al op de tijdlijn: Authentik koppelen, het wachtwoord wijzigen en wat
+# confirm_silence bevestigt (onderhoud, een logregel verwijderen, ...). Zonder melding (onderhoud stoppen of inkorten,
+# een regel die uit stond verwijderen) zetten die routes zelf een gebeurtenis op de tijdlijn.
 AUDIT_TITLES = {
-    "maintenance": lambda d: f"Onderhoud {d.get('service') or d.get('group') or ''}: "
-                             + (f"{d.get('minutes')} min" if d.get("minutes") else "gestopt"),
     "syslog_rollout": lambda d: f"rsyslog uitgerold op {d.get('host')}",
     "oidc_settings_changed": lambda d: "Authentik-instellingen gewijzigd",
-    # (Koppelen geeft zelf een melding, en staat zo al op de tijdlijn.)
     "oidc_unlinked": lambda d: "Authentik-account ontkoppeld",
-    "password_changed": lambda d: "Wachtwoord gewijzigd",
     "service_secrets_changed": lambda d: f"Geheimen van {d.get('service')} gewijzigd",
     "ssh_host_added": lambda d: f"SSH-host {d.get('name')} toegevoegd",
     "ssh_host_deleted": lambda d: f"SSH-host {d.get('name')} verwijderd",
     "log_rule_added": lambda d: f"Logregel {d.get('name')} toegevoegd",
-    "log_rule_deleted": lambda d: f"Logregel {d.get('name')} verwijderd",
     "integration_action_failed": lambda d: f"{d.get('service')}: {d.get('op')} mislukt",
 }
 KINDS = ("storing", "herstart", "backup", "updates", "wijziging", "actie", "capaciteit", "netwerk", "toegang", "log", "cron",
