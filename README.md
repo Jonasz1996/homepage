@@ -123,12 +123,16 @@ Fase 6, logs (knop `logs` in de titelbalk):
   traag, kies dan een kortere periode of één machine
 - valt de database even weg, dan houdt de ontvanger tot 50.000 regels in het geheugen en schrijft ze weg zodra ze
   terug is, ook bij een herstart (dan schrijft hij tot 10 seconden zijn wachtrij weg). Over tcp wacht de afzender
-  (rsyslog houdt de regels dan zelf vast), over udp gaan de oudste regels weg en worden ze geteld. Raken er regels
-  verloren of draait de ontvanger niet, dan staat dat in **!** en in hw → homepage zelf
+  (rsyslog houdt de regels dan zelf vast), over udp vallen de nieuwe regels weg (wat al in de wachtrij staat, blijft)
+  en worden ze geteld. Raken er regels verloren of draait de ontvanger niet, dan staat dat in **!** en in hw →
+  homepage zelf. Stopt de ontvanger terwijl de database weg is, dan bewaart hij het verlies in
+  `/var/lib/homepage-syslog` tot de volgende start
 - meldingsregels (regex, machine, ernst, max. één melding per x minuten) naar het meldingencentrum;
   standaard staat "alles vanaf crit" aan
 - **machines toevoegen**: kies een SSH-host en het dashboard installeert en configureert rsyslog. Op een
-  Proxmox-node kan dat meteen voor alle draaiende containers (via `pct`). Of plak het getoonde script zelf
+  Proxmox-node kan dat meteen voor alle draaiende containers (via `pct`). Of plak het getoonde script zelf. rsyslog
+  stuurt in RFC 5424 (tijd met jaar en tijdzone), zodat regels die het vasthield hun eigen tijd houden (tot een dag
+  oud); machines die vóór deze versie ingesteld werden, rol je daarvoor opnieuw uit
 
 Extra's, deel 1 (checks en meldingen):
 
