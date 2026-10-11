@@ -18,8 +18,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..deps import audit, current_user, notify
-from ..models import Service, User, WebhookSource
+from ..deps import audit, confirm_silence, current_session, current_user, notify
+from ..models import Service, Session, User, WebhookSource
 from ..security import decrypt, encrypt
 
 router = APIRouter(prefix="/api", tags=["hooks"])
@@ -143,39 +143,53 @@ async def create_source(body: SourceIn, request: Request, user: User = Depends(c
     return _out(s)
 
 
+# Een webhook die aan staat uitzetten, een nieuw adres geven of verwijderen legt de meldingen van die bron stil
+# (Proxmox, PBS, Kuma sturen naar het oude adres): dat vraagt een recente 2FA en geeft een melding. Zoals een check
+# pauzeren. Aanzetten en een webhook die al uit staat, blijven vrij.
 @router.patch("/webhooks/{sid}")
-async def update_source(sid: int, body: SourceIn, request: Request, user: User = Depends(current_user),
-                        db: AsyncSession = Depends(get_db)):
+async def update_source(sid: int, body: SourceIn, request: Request, sess: Session = Depends(current_session),
+                        user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     s = await db.get(WebhookSource, sid)
     if s is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Niet gevonden")
     await _check_service(db, body.service_id)
+    if s.enabled and not body.enabled:
+        await confirm_silence(db, request, sess, user, f"Webhook uitgezet: {s.name}", "webhook_changed",
+                              name=body.name.strip(), enabled=False)
+    else:
+        await audit(db, request, user, "webhook_changed", name=body.name.strip(), enabled=body.enabled)
     s.name, s.kind, s.service_id, s.enabled = body.name.strip(), body.kind, body.service_id, body.enabled
-    await audit(db, request, user, "webhook_changed", name=s.name, enabled=s.enabled)
     await db.commit()
     return _out(s)
 
 
 @router.post("/webhooks/{sid}/rotate")
-async def rotate_source(sid: int, request: Request, user: User = Depends(current_user),
-                        db: AsyncSession = Depends(get_db)):
+async def rotate_source(sid: int, request: Request, sess: Session = Depends(current_session),
+                        user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """Nieuw adres; het oude werkt meteen niet meer."""
     s = await db.get(WebhookSource, sid)
     if s is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Niet gevonden")
+    if s.enabled:
+        await confirm_silence(db, request, sess, user, f"Nieuw adres voor webhook {s.name}: het oude werkt niet meer",
+                              "webhook_rotated", name=s.name)
+    else:
+        await audit(db, request, user, "webhook_rotated", name=s.name)
     token = secrets.token_urlsafe(32)
     s.token, s.token_hash = encrypt(token), _hash(token)
-    await audit(db, request, user, "webhook_rotated", name=s.name)
     await db.commit()
     return _out(s)
 
 
 @router.delete("/webhooks/{sid}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_source(sid: int, request: Request, user: User = Depends(current_user),
-                        db: AsyncSession = Depends(get_db)):
+async def delete_source(sid: int, request: Request, sess: Session = Depends(current_session),
+                        user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     s = await db.get(WebhookSource, sid)
     if s is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Niet gevonden")
-    await audit(db, request, user, "webhook_deleted", name=s.name)
+    if s.enabled:
+        await confirm_silence(db, request, sess, user, f"Webhook verwijderd: {s.name}", "webhook_deleted", name=s.name)
+    else:
+        await audit(db, request, user, "webhook_deleted", name=s.name)
     await db.delete(s)
     await db.commit()

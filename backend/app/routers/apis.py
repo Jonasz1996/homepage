@@ -25,6 +25,9 @@ from . import integrations as integrations_router
 router = APIRouter(prefix="/api/apis", tags=["apis"])
 
 MAX_PREVIEW = 300_000
+# Van buitenaf: alles waarmee de server een nieuw adres of pad ophaalt (en het antwoord toont) valt onder acties en
+# vraagt een verse 2FA. Anders is API-beheer een opening naar je hele thuisnetwerk. Thuis verandert er niets.
+FETCHES_NEW = outside.guard("acties", fresh=True)
 
 
 # --- schema's ------------------------------------------------------------------
@@ -280,7 +283,7 @@ async def suggest(user: User = Depends(current_user), db: AsyncSession = Depends
 
 # --- API's ---------------------------------------------------------------------------
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, dependencies=[FETCHES_NEW])
 async def create_api(data: ConnIn, request: Request, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     if data.template and data.template not in tpl.TEMPLATES:
         raise HTTPException(422, "Onbekend sjabloon")
@@ -298,7 +301,7 @@ async def create_api(data: ConnIn, request: Request, user: User = Depends(curren
     return {"id": a.id}
 
 
-@router.patch("/{api_id}")
+@router.patch("/{api_id}", dependencies=[FETCHES_NEW])
 async def update_api(api_id: int, data: ConnIn, request: Request, sess: Session = Depends(current_session),
                      user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     a = await _conn(db, api_id)
@@ -357,7 +360,7 @@ async def link_tiles(api_id: int, data: TilesIn, user: User = Depends(current_us
 
 # --- calls -----------------------------------------------------------------------------
 
-@router.post("/{api_id}/calls", status_code=201)
+@router.post("/{api_id}/calls", status_code=201, dependencies=[FETCHES_NEW])
 async def create_call(api_id: int, data: CallIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     a = await _conn(db, api_id)
     c = ApiCall(position=len(a.calls), **data.checked().values())
@@ -374,7 +377,7 @@ async def _call(db: AsyncSession, call_id: int) -> ApiCall:
     return c
 
 
-@router.patch("/calls/{call_id}")
+@router.patch("/calls/{call_id}", dependencies=[FETCHES_NEW])
 async def update_call(call_id: int, data: CallIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     c = await _call(db, call_id)
     for k, v in data.checked().values().items():
@@ -405,15 +408,14 @@ async def order_calls(api_id: int, data: OrderIn, user: User = Depends(current_u
     return {"ok": True}
 
 
-@router.post("/{api_id}/try")
-async def try_call(api_id: int, data: TryIn, request: Request, sess: Session = Depends(current_session),
+@router.post("/{api_id}/try", dependencies=[FETCHES_NEW])
+async def try_call(api_id: int, data: TryIn, sess: Session = Depends(current_session),
                    user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    """Een (nog niet bewaarde) call uitproberen: het antwoord, en wat de velden en de tabel ervan maken."""
+    """Een (nog niet bewaarde) call uitproberen: het antwoord, en wat de velden en de tabel ervan maken.
+    Thuis gaat een GET zonder 2FA (een call bouwen is vaak proberen); wat iets verandert, vraagt altijd een verse 2FA."""
     a = await _conn(db, api_id)
     call = data.call
     if call.method != "GET":
-        if why := await outside.blocked(request, db, "acties"):
-            raise HTTPException(status.HTTP_403_FORBIDDEN, why)
         await recent_auth(sess, user)
     tile = {}
     if data.service_id:
@@ -440,7 +442,7 @@ async def try_call(api_id: int, data: TryIn, request: Request, sess: Session = D
 
 # --- veel tegels tegelijk ------------------------------------------------------------------
 
-@router.post("/bulk")
+@router.post("/bulk", dependencies=[FETCHES_NEW])
 async def bulk(data: BulkIn, request: Request, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """Per tegel een API uit een sjabloon maken (adres = dat van de tegel) en de tegel eraan koppelen."""
     made = []

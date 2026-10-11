@@ -103,7 +103,7 @@ async def update(rule_id: int, body: RuleIn, request: Request, user: User = Depe
     return rule_out(r, await _names(db))
 
 
-@router.delete("/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{rule_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[outside.guard("acties")])
 async def remove(rule_id: int, request: Request, user: User = Depends(recent_auth), db: AsyncSession = Depends(get_db)):
     r = await _rule(db, rule_id)
     await audit(db, request, user, "heal_rule_deleted", rule=r.id, what=healing.describe(r.action))

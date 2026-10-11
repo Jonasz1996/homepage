@@ -82,7 +82,8 @@ def identity(check: dict | None, url: str | None) -> tuple | None:
 
 
 def silencing(old: dict | None, new: dict | None) -> str | None:
-    """Zet deze wijziging een lopende check stil? Dan wat er gebeurt, anders None."""
+    """Zet deze wijziging een lopende check stil? Dan wat er gebeurt, anders None. (Een nieuwe afhankelijkheid van
+    iets dat down of in onderhoud is: zie parent_silencing.)"""
     old, new = old or {}, new or {}
     if active(old) and not active(new):
         return "check gepauzeerd" if new.get("type") else "check verwijderd"
@@ -90,6 +91,26 @@ def silencing(old: dict | None, new: dict | None) -> str | None:
         return "meldingen uitgezet"
     if old.get("type") and new.get("type") and (old.get("notify") or "push") == "push" and new.get("notify") == "centrum":
         return "meldingen niet meer op je gsm"
+    # Leeg = aan (zie _cert_notes).
+    if old.get("type") and new.get("type") and new.get("cert_notify") is False and old.get("cert_notify") is not False:
+        return "certificaatmeldingen uitgezet"
+    return None
+
+
+async def parent_silencing(db: AsyncSession, service: Service, check: dict | None, parent_id: int | None,
+                           now: datetime | None = None) -> str | None:
+    """Wordt een lopende check stil doordat hij een nieuwe ouder krijgt die nu in onderhoud of down is? Onderhoud geldt
+    ook voor alles eronder (in_maintenance), en een kind van een ouder die down is, meldt niets (_parent_failing). Dan
+    wat er gebeurt, anders None. Met de stand van nu: vóór de wijziging aanroepen."""
+    if not parent_id or parent_id == service.parent_id or not active(check):
+        return None
+    parent = await db.get(Service, parent_id)
+    if parent is None:
+        return None
+    if await in_maintenance(db, parent, now or datetime.now(timezone.utc)):
+        return f"afhankelijk van {parent.name} (in onderhoud)"
+    if await _failing(db, [parent, *await ancestors(db, parent)]):
+        return f"afhankelijk van {parent.name} (down)"
     return None
 
 
@@ -156,7 +177,11 @@ async def dependents_count(db: AsyncSession, service_id: int) -> int:
 
 
 async def _parent_failing(db: AsyncSession, service: Service) -> Service | None:
-    for a in await ancestors(db, service):
+    return await _failing(db, await ancestors(db, service))
+
+
+async def _failing(db: AsyncSession, chain: list[Service]) -> Service | None:
+    for a in chain:
         # Een ouder zonder (lopende) check zegt niets, ook al staat er nog een oude status. Een ouder met meldingen
         # uit ook niet: zijn storing komt nergens als melding, dus dan moet het kind zelf melden.
         if not active(a.check) or (a.check or {}).get("notify") == "uit":

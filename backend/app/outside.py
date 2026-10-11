@@ -25,8 +25,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import HTTPConnection
 
 from .db import get_db
-from .deps import cf_forged, notify
-from .models import AppState, Notification
+from .deps import cf_forged, current_session, current_user, notify, recent_auth
+from .models import AppState, Notification, Session, User
 
 STATE_KEY = "outside"
 SEEN_KEY = "outside_seen"
@@ -43,7 +43,8 @@ FEATURES = {
                              "rsyslog uitrollen"),
     "updates": ("updates installeren", "updates installeren en terugdraaien, nachtelijke updates instellen"),
     "acties": ("acties", "VM's en containers aan of uit, Wake-on-LAN, zelfherstel, snapshots verwijderen, hersteltest, "
-                         "API-calls die iets veranderen, poortscan"),
+                         "API-calls die iets veranderen, API's instellen of calls uitproberen, een tegel met "
+                         "integratie een ander adres geven, poortscan"),
     "downloads": ("configuraties en de diagnose downloaden",
                   "oude configuraties en de diagnose downloaden en eigen bestanden ongemaskeerd bekijken"),
 }
@@ -155,13 +156,33 @@ async def blocked(conn: HTTPConnection, db: AsyncSession, feature: str) -> str |
     return f"buiten:{feature}"
 
 
-def guard(feature: str):
-    """Dependency: 403 "buiten:<functie>" als het verzoek van buitenaf komt en die functie daar uit staat."""
+async def require(conn: HTTPConnection, db: AsyncSession, feature: str, sess: Session, user: User) -> None:
+    """Van buitenaf: de functie moet aan staan én je 2FA moet vers zijn (voor deze sessie). Thuis: niets.
+
+    De stand van een functie geldt voor elke sessie van buitenaf (ze staat niet per sessie): zonder verse 2FA zou wie
+    je sessie steelt in dat uur meeliften. Voor routes die het alleen in sommige gevallen vragen (een tegel die een
+    nieuw adres krijgt); anders guard(feature, fresh=True)."""
+    cfg = await settings(db)
+    if not (await where(conn, db, cfg))["outside"]:
+        return
+    if not allowed(cfg, feature)[0]:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, f"buiten:{feature}")
+    await recent_auth(sess, user)
+
+
+def guard(feature: str, fresh: bool = False):
+    """Dependency: 403 "buiten:<functie>" als het verzoek van buitenaf komt en die functie daar uit staat.
+    fresh: van buitenaf ook een verse 2FA vragen (403 "reauth_required"), zie require()."""
     assert feature in FEATURES
 
-    async def dep(conn: HTTPConnection, db: AsyncSession = Depends(get_db)) -> None:
-        if why := await blocked(conn, db, feature):
-            raise HTTPException(status.HTTP_403_FORBIDDEN, why)
+    if fresh:
+        async def dep(conn: HTTPConnection, db: AsyncSession = Depends(get_db),
+                      sess: Session = Depends(current_session), user: User = Depends(current_user)) -> None:
+            await require(conn, db, feature, sess, user)
+    else:
+        async def dep(conn: HTTPConnection, db: AsyncSession = Depends(get_db)) -> None:
+            if why := await blocked(conn, db, feature):
+                raise HTTPException(status.HTTP_403_FORBIDDEN, why)
 
     dep.outside_feature = feature  # voor de test die nagaat welke routes bewaakt zijn
     return Depends(dep)

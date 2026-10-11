@@ -25,6 +25,10 @@ AREAS = ("services", "checks", "back-ups", "cluster", "hardware", "opslag", "net
 CERT_DAYS = 14
 MAX_PER_AREA = 8
 UPDATE_RUN_DAYS = 7
+# Onderhoud met de hand (niet gepland) dat nog zo lang loopt, of voor zoveel services tegelijk: opvallen in "!".
+# Onderhoud zet de meldingen en zelfherstel uit, ook van alles wat ervan afhangt.
+MAINT_LONG = timedelta(hours=24)
+MAINT_MANY = 10
 PBS_KINDS = {"task": "laatste back-up mislukt", "verify": "verify mislukt", "late": "geen back-up in meer dan 26 uur"}
 RUN_BAD = {"fout": "mislukt", "services_down": "zette services down", "terugdraaien_mislukt": "terugdraaien mislukt"}
 
@@ -435,12 +439,50 @@ async def safety(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
 
 async def maintenance(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
     out = []
+    plan: dict[int, datetime] = {}  # service → einde van het geplande venster dat nu loopt
     for w in (await db.execute(select(MaintenanceWindow).where(MaintenanceWindow.enabled.is_(True)))).scalars():
         span = planned.active(w, now)
         if span:
             out.append(item(f"maint:{w.id}", "info", "onderhoud", f"Onderhoud bezig: {w.name}",
                             f"Tot {span[1].astimezone().strftime('%H:%M')}; meldingen staan zolang uit.",
                             {"window": "planned"}, sig=span[0].isoformat()))
+            for s in await planned.targets(db, w):
+                plan[s.id] = max(plan.get(s.id, span[1]), span[1])
+    return out + adhoc_maintenance(list((await db.execute(select(Service).where(
+        Service.maintenance_until > now))).scalars()), plan, now)
+
+
+def adhoc_maintenance(svcs: list[Service], plan: dict[int, datetime], now: datetime) -> list[dict]:
+    """Onderhoud met de hand (de knoppen in de tegel of bij de groep) dat nog meer dan een dag loopt, of voor veel
+    services tegelijk. Wat een gepland venster zette, staat al hierboven. Zo valt een week onderhoud op honderd tegels
+    op, ook als niemand naar de tegels kijkt. De knop opent de tegel: daar staat "onderhoud stoppen"."""
+    def until(s: Service) -> datetime:
+        return _aware(s.maintenance_until)
+
+    hand = sorted((s for s in svcs if until(s) > now and not (s.id in plan and until(s) <= plan[s.id])),
+                  key=lambda s: (until(s), s.name.lower()))
+    if len(hand) > MAINT_MANY:
+        last = hand[-1]
+        names = ", ".join(s.name for s in hand[:5]) + f" en {len(hand) - 5} meer"
+        return [item("maint:veel", "warn", "onderhoud", f"{len(hand)} services in onderhoud",
+                     f"Met de hand, tot uiterlijk {until(last).astimezone().strftime('%d/%m %H:%M')}: {names}. Zolang "
+                     "komen er geen meldingen over, en zelfherstel staat uit. Stoppen: in de tegel, of met ⏸ bij de "
+                     "groep (0 minuten).", {"window": "detail", "service_id": last.id},
+                     sig=f"{len(hand)}:{until(last).isoformat()}")]
+    # Per tegel, of per groep die samen in onderhoud ging (zelfde einde).
+    long: dict[tuple, list[Service]] = {}
+    for s in hand:
+        if until(s) - now > MAINT_LONG:
+            long.setdefault((s.group_id, until(s)), []).append(s)
+    out = []
+    for (_, end), ss in long.items():
+        what = ss[0].name if len(ss) == 1 else (f"{len(ss)} services ({', '.join(s.name for s in ss[:4])}"
+                                                + (" …)" if len(ss) > 4 else ")"))
+        out.append(item(f"maint:hand:{ss[0].id}", "warn", "onderhoud",
+                        f"{what} in onderhoud tot {end.astimezone().strftime('%d/%m %H:%M')}",
+                        f"Nog {ago(end - now)}, met de hand gezet. Zolang komen er geen meldingen over, ook niet over "
+                        "wat ervan afhangt, en zelfherstel staat uit.",
+                        {"window": "detail", "service_id": ss[0].id}, sig=end.isoformat()))
     return out
 
 

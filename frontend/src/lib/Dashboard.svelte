@@ -288,7 +288,8 @@
   async function groupMaintenance(g) {
     const v = prompt(`Hoeveel minuten onderhoud voor alle services in '${g.name}'? (0 = stoppen)`, '60')
     if (v === null) return
-    await act(() => api(`/groups/${g.id}/maintenance`, { method: 'POST', body: { minutes: Math.max(0, parseInt(v, 10) || 0) } }))
+    // Beginnen of verlengen vraagt je 2FA (onderhoud zet de meldingen uit), stoppen niet.
+    await act(() => withReauth(() => api(`/groups/${g.id}/maintenance`, { method: 'POST', body: { minutes: Math.max(0, parseInt(v, 10) || 0) } })))
     await loadStatus()
   }
   async function loadNet() {

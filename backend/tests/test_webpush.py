@@ -368,6 +368,31 @@ async def test_without_devices_and_old_notifications_are_just_marked(authed):
     assert not svc.got and not await _rows(Notification, Notification.pushed_at.is_(None))
 
 
+async def test_wis_gelezen_laat_staan_wat_nog_naar_de_gsm_moet(authed):
+    a = Phone(A)
+    await _subscribe(authed, a, "Pixel")
+    svc = PushService([a])
+    await _run(svc)  # wat er al was
+    (login,) = await _notify({"title": "Login vanaf nieuw IP", "level": "warn", "source": "auth"})
+    # Wie net inlogde, leest en wist alles meteen (voor de worker langskomt): die melding blijft tot ze verstuurd is.
+    assert (await authed.post("/api/notifications/read-all")).status_code == 200
+    assert (await authed.delete("/api/notifications")).json() == {"ok": True, "kept": 1}
+    assert [n.id for n in await _rows(Notification)] == [login]
+    await _run(svc)
+    assert [m["title"] for m in svc.to(a)][-1] == "Login vanaf nieuw IP"
+    assert (await authed.delete("/api/notifications")).json() == {"ok": True, "kept": 0}
+    assert not await _rows(Notification)
+
+    # De pushdienst antwoordt even niet: de melding wacht op een nieuwe poging, en blijft dus ook staan.
+    (nid,) = await _notify({"title": "Check gepauzeerd: wiki", "level": "warn", "source": "auth"})
+    svc.status[A] = 503
+    await _run(svc)
+    assert await _rows(PushQueue)
+    await authed.post("/api/notifications/read-all")
+    assert (await authed.delete("/api/notifications")).json()["kept"] == 1
+    assert [n.id for n in await _rows(Notification)] == [nid]
+
+
 async def test_410_removes_device_and_tells_the_others(authed):
     a, b = Phone(A), Phone(B)
     await _subscribe(authed, a, "oude gsm")

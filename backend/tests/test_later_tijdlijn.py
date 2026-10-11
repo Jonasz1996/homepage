@@ -134,7 +134,8 @@ async def test_timeline_merges_sources(authed):
     only = (await authed.get("/api/timeline", params={"kind": "storing"})).json()["items"]
     assert {i["kind"] for i in only} == {"storing"}
     per = (await authed.get("/api/timeline", params={"service_id": sid})).json()["items"]
-    assert len(per) == 2
+    # Down, weer bereikbaar, en de melding dat het onderhoud begon (toegang: onderhoud zet meldingen uit).
+    assert sorted(i["kind"] for i in per) == ["storing", "storing", "toegang"]
     # Bladeren: alles van vóór het oudste item.
     first = (await authed.get("/api/timeline", params={"limit": 2})).json()
     assert len(first["items"]) == 2 and first["more"]

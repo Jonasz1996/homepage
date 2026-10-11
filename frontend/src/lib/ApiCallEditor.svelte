@@ -53,8 +53,9 @@
     busy = true
     error = ''
     try {
-      if (call) await api(`/apis/calls/${call.id}`, { method: 'PATCH', body: draft() })
-      else await api(`/apis/${conn.id}/calls`, { method: 'POST', body: draft() })
+      // Van buitenaf vraagt een nieuwe of gewijzigde call een verse 2FA (thuis niet).
+      if (call) await withReauth(() => api(`/apis/calls/${call.id}`, { method: 'PATCH', body: draft() }))
+      else await withReauth(() => api(`/apis/${conn.id}/calls`, { method: 'POST', body: draft() }))
       msg = 'Bewaard. De tegels tonen het bij hun volgende verversing.'
       onsaved?.()
       if (!call) onclose()

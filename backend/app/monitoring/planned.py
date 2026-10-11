@@ -16,6 +16,9 @@ from .engine import _aware
 # De worker kijkt elke minuut: een venster gaat een minuut vroeger in, zodat de eerste check al meetelt.
 LEAD = timedelta(seconds=60)
 STARTED_KEY = "maintenance_started"
+# Een herhalend venster loopt hoogstens zo lang per keer (anders is elke dag 24 uur gewoon altijd onderhoud); ook een
+# ouder venster dat langer bewaard is, telt maar zo lang. Eenmalig mag tot 7 dagen.
+REPEAT_MAX = 12 * 60
 WEEKDAYS = ("ma", "di", "wo", "do", "vr", "za", "zo")
 
 
@@ -25,10 +28,10 @@ def _local(dt: datetime) -> datetime:
 
 def occurrences(w: MaintenanceWindow, around: datetime, days: int = 1) -> list[tuple[datetime, datetime]]:
     """Begin en einde van de keren dat het venster loopt, van gisteren tot `days` dagen na `around`."""
-    length = timedelta(minutes=w.minutes)
     if w.repeat == "once":
         st = _aware(w.start)
-        return [(st, st + length)]
+        return [(st, st + timedelta(minutes=w.minutes))]
+    length = timedelta(minutes=min(w.minutes, REPEAT_MAX))
     t = _local(w.start).timetz()
     base = around.astimezone().date()
     out = []
@@ -60,7 +63,8 @@ def next_run(w: MaintenanceWindow, now: datetime) -> datetime | None:
 
 def describe(w: MaintenanceWindow) -> str:
     st = _local(w.start)
-    dur = f"{w.minutes // 60} u {w.minutes % 60:02d}" if w.minutes >= 60 else f"{w.minutes} min"
+    m = w.minutes if w.repeat == "once" else min(w.minutes, REPEAT_MAX)
+    dur = f"{m // 60} u {m % 60:02d}" if m >= 60 else f"{m} min"
     if w.repeat == "once":
         return f"{st.strftime('%d/%m/%Y %H:%M')}, {dur}"
     when = "elke dag" if w.repeat == "daily" else "elke " + ", ".join(WEEKDAYS[d] for d in sorted(w.weekdays or []))

@@ -1,5 +1,5 @@
 <script>
-  import { api } from './api.js'
+  import { api, withReauth } from './api.js'
   import Modal from './Modal.svelte'
 
   let { pages, onclose, ondone } = $props()
@@ -21,10 +21,11 @@
     busy = true
     error = ''
     try {
-      result = await api('/import', {
+      // Van buitenaf vragen tegels met een integratie (die zelf iets ophalen) een verse 2FA.
+      result = await withReauth(() => api('/import', {
         method: 'POST',
         body: { yaml: text, page_id: target === 'new' ? null : Number(target), page_name: pageName },
-      })
+      }))
       ondone()
     } catch (err) {
       error = err.message
