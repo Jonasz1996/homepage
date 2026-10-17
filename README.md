@@ -177,6 +177,10 @@ zegt het venster dat in plaats van "werkt". Dit stel je één keer in:
    het ergste; zet de Docker-naam van NPM bij `npm_names` (API-beheer, NPM). Een toegangslijst is niet nodig als alle
    namen via de tunnel gaan zonder wildcard; wijst er één (of `*.jbogaert.be`) naar je thuis-IP, dan wel.
 7. **Van buitenaf**: niets; het volgt ⚿ → van buitenaf → acties.
+8. **Echt uitvoeren**: staat standaard uit, ook na een update van een bestaande installatie. Tot dan werkt alleen de
+   proef (maken, opruimen en ongedaan maken weigeren, ! → instellingen zegt "alleen als proef"). Klopt een proef op
+   je echte systemen, zet dan bovenaan in het venster **echt uitvoeren** aan; dat vraagt je 2FA-code, kan niet van
+   buitenaf en staat in het auditlog. Uitzetten vraagt geen code (van buitenaf kan ook dat niet).
 
 Fase 5, SSH-terminal (knop `>_` in de titelbalk):
 
@@ -290,8 +294,15 @@ Later, deel 1 (tijdlijn, weekrapport en updates):
   apt of is een service down, dan krijg je een melding en zet *terugdraaien* de machine terug naar de snapshot.
   Fysieke nodes kunnen geen snapshot: dat moet je bewust kiezen (*toch installeren zonder snapshot*). Optioneel
   *alleen beveiligingsupdates*. Onder *'s nachts*: elke nacht om een gekozen uur de beveiligingsupdates, alleen waar
-  een snapshot kan; gaat het mis, dan draait de homepage zelf terug. Eigen snapshots (`hp-upd-…`) van geslaagde
-  installaties verdwijnen na 7 dagen (instelbaar)
+  een snapshot kan; gaat het mis, dan draait de homepage zelf terug. Mislukt `apt-get update` of het downloaden (mirror of
+  DNS weg; de pakketten worden eerst alleen gedownload), dan is er niets geïnstalleerd: de run mislukt met een
+  melding, maar er wordt niet teruggedraaid. Eigen
+  snapshots (`hp-upd-…`) van geslaagde installaties, en van runs die niets installeerden, verdwijnen na 7 dagen
+  (instelbaar). Het dashboard zelf (zijn eigen CT of VM, herkend aan zijn eigen adressen, MAC-adres en hostname) komt
+  nooit 's nachts of samen met andere machines aan de beurt: stopt apt daar halverwege (PostgreSQL of de API
+  herstart), dan is er niemand meer om te melden of terug te draaien. Werk het apart bij in de console van de
+  container (`apt update && apt upgrade`), het dashboard zelf met `deploy/bootstrap.sh`. Alleen die machine aanvinken
+  kan ook; de proef zegt dan wat er mis kan gaan
 - **zelfherstel** (in het mini dashboard van een service): "als Plex 3 checks na elkaar down is, herstart CT 105".
   Acties: de knoppen van de integraties (Proxmox herstart of start een VM/CT, Portainer herstart een container) of
   via SSH `systemctl restart` / `docker restart`. Hoogstens 2 keer per uur (instelbaar tot 5), minstens 10 minuten
@@ -438,7 +449,8 @@ Later, deel 3 (Authentik en gsm):
     versleuteld met een wachtzin die nergens bewaard wordt (scrypt + AES-GCM). Koppel er een NAS-share, PBS-opslag of
     USB-schijf aan, bv. `pct set <id> -mp0 /mnt/nas/homepage,mp=/mnt/homepage-backup` en
     `chown homepage: /mnt/homepage-backup` in de container, daarna `systemctl restart homepage-worker`. Terugzetten
-    staat in `LEESMIJ.txt` in die map, met de versies van PostgreSQL en TimescaleDB van de laatste kopie. Verandert
+    staat in `LEESMIJ.txt` in die map, met de versies van PostgreSQL en TimescaleDB van de laatste kopie (de extensie
+    komt terug in die versie) en daarna de migraties zoals install.sh ze draait. Verandert
     `secret.key` (bv. na een herinstallatie), stel dan de wachtzin opnieuw in: tot dan meldt de zelfcontrole dat de
     sleutel in de kopie verouderd is. Staat de kopie uit, dan stelt **!** ze voor; zit de CT al in een back-up van
     PBS, dan zitten de dumps en `secret.key` daar ook in en mag je dat punt negeren
@@ -611,7 +623,8 @@ Later, deel 3 (Authentik en gsm):
     (`pct snapshot` via SSH op de node, of de Proxmox-API), het apt- of apk-commando (het volledige script staat
     erbij), welke services daarna nagekeken worden en hoe terugdraaien gaat. In `apt` → 's nachts tonen *proef van
     vannacht* en *wat zou er opgeruimd worden* wat de volgende nachtelijke run en het volgende opruimen zouden doen,
-    ook welke machines de nachtelijke run overslaat (fysieke machines en nodes, daar kan geen snapshot)
+    ook welke machines de nachtelijke run overslaat (fysieke machines en nodes, daar kan geen snapshot, en het
+    dashboard zelf)
   - **zelfherstel** (mini dashboard): per regel en in het formulier. Elke voorwaarde (aan, N× down, onderhoud,
     wachttijd, limiet per uur) en de call of het commando. De proef kijkt ook: via de Proxmox-API of de VM/CT nog
     bestaat en of een herstart een start wordt, in Portainer of de container nog bestaat, en via SSH of `sudo -n`
@@ -637,12 +650,17 @@ Later, deel 3 (Authentik en gsm):
   beschrijven. Erin: de versies (ook PostgreSQL, TimescaleDB en de databasemigratie), de processen, de
   aandachtslijst, de instellingen-checklist, de fouten per tegel en per achtergrondtaak, webhooks, gsm's,
   zelfherstelregels, installaties van de laatste 7 dagen, cronjobs met een fout, de laatste 50 meldingen,
-  tijdlijnregels en audit-regels, wat de proefmodus zou doen, en de laatste 200 logregels van de API, de worker en de
-  syslog-ontvanger. Elk geheim dat het dashboard bewaart, is gemaskeerd (ook url-gecodeerd en als base64), net als
+  tijdlijnregels en audit-regels, wat de proefmodus zou doen (de nieuwste proeven met hun plan, begrensd), de laatste
+  5 runs van Nieuwe service (stappen, fouten en wat nog te doen is, zonder de invoer of de calls), hoe het laatste
+  noodplan liep (wanneer, waarom het mislukte, welke bronnen mislukten of oud zijn; niet het document), de laatste
+  200 logregels van de API, de worker en de syslog-ontvanger, en de laatste 50 fouten in je browser (niet opgevangen
+  fouten, verworpen beloftes en mislukte API-verzoeken, het pad zonder querystring). Die laatste houdt alleen het
+  tabblad bij (sessionStorage); ze gaan alleen mee met de diagnose en de server bewaart ze niet. Elk geheim dat het dashboard bewaart, is gemaskeerd (ook url-gecodeerd en als base64), net als
   alles wat op een token, sleutel of wachtwoord lijkt. IP-adressen, namen en gebruikersnamen staan er nog in: kijk
   het bestand na voor je het deelt. Vraagt je 2FA-code en staat van buitenaf uit zoals configuraties downloaden.
   De processen houden hun laatste logregels zelf bij, want de gebruiker `homepage` kan journald niet lezen. Wat vlak
-  voor een crash gebeurde, staat soms alleen in journald: `journalctl -u homepage-worker -n 200` als root
+  voor een crash gebeurde, staat soms alleen in journald: `journalctl -u homepage-worker -n 200` als root. Start het
+  dashboard zelf niet meer: `homepage-diagnose` in de container (zie Bijwerken)
 - **effecten** zoals in aiverslag: een achtergrond van punten en 0/1 die voor de muis wijken, een ripple op elke knop,
   bliksem en vonken bij een geslaagde actie (herstarten, wekken), een vuurbal met flits en schudden bij verwijderen
   en uitloggen, en een bliksem op het belletje als er een nieuwe storing binnenkomt. Uit te zetten met `Ctrl+K` →
@@ -972,7 +990,12 @@ Zo verloopt een update:
 2. is er niet genoeg plaats in `/var/backups/homepage` voor een kopie van de database, dan stopt het hier
 3. de diensten stoppen en het script maakt een kopie van de database (`voor-update-*.dump`, de laatste 2 blijven staan)
 4. het schakelt over op de nieuwe venv en frontend (de vorige blijven staan) en werkt de database bij
-5. de diensten starten weer
+5. het kijkt na of PostgreSQL genoeg verbindingen toelaat voor de diensten (`max_connections`, voor de pools uit
+   `HOMEPAGE_DB_POOL_*` plus wat marge). Is het te weinig, dan zet het die hoger en herstart het PostgreSQL, maar
+   alleen als de database in de container zelf draait; anders waarschuwt het
+6. de diensten starten weer, en het kijkt na of ze blijven draaien: de API via `/api/ping`, de worker en de
+   syslog-ontvanger zonder herstarten. Voor een dienst die niet draait, toont het het commando voor journald;
+   reageert de API niet, dan eindigt het script met een fout (de nieuwe versie blijft staan)
 
 Mislukt de kopie of het bijwerken van de database (of al iets daarvoor), dan wordt de update netjes afgebroken: de
 vorige versie van de code, de bibliotheken en de frontend komt terug, de database is niet veranderd (alle migraties
@@ -981,6 +1004,16 @@ update opnieuw uit. Pas als de database bijgewerkt is, onthoudt het de nieuwe ve
 Een onderbroken update (Ctrl+C, de SSH-verbinding valt weg) wordt net zo afgebroken; was de database op dat moment
 al bijgewerkt, dan blijft de nieuwe versie staan en starten de diensten (voer de update dan nog eens uit).
 
+Alles wat het script toont, staat ook in `/var/log/homepage/install-<datum>.log` (de 10 nieuwste blijven).
+
+Loopt er iets mis, ook als het dashboard zelf niet start: `homepage-diagnose` in de container schrijft alles om het
+na te gaan in één bestand, `/root/homepage-diagnose-<datum>.txt` (alleen voor root leesbaar): de versies, de status
+en de laatste 100 regels uit journald van de drie diensten, PostgreSQL en nginx, `/api/ping` en `/api/healthz`,
+schijf en geheugen, PostgreSQL (`max_connections`, verbindingen, `alembic_version`), de back-ups en kopieën van voor
+een update, en het laatste install-log. Gemaskeerd zijn de waarden in `homepage.env` met SECRET, KEY, TOKEN of PASS
+in de naam, `secret.key`, de setup-code en wat in de logs op een token, sleutel of wachtwoord lijkt. IP-adressen,
+namen en gebruikersnamen staan er nog in: kijk het bestand na voor je het deelt.
+
 Na de update toont het dashboard één keer wat er nieuw is en wat je zelf moet instellen (later: `Ctrl+K` →
 "wat is er nieuw").
 
@@ -988,10 +1021,15 @@ Na de update toont het dashboard één keer wat er nieuw is en wat je zelf moet 
 van vlak voor die update en met de bibliotheken die die versie had (de venv van daarvoor blijft daarvoor staan). Wat
 sinds die update in het dashboard veranderde, gaat verloren; de database van daarvoor wordt eerst nog bewaard als
 `voor-terugzetten-*.dump` (alleen de laatste blijft staan). `homepage-terugzetten --lijst` toont welke kopieën er
-zijn. Stopt het terugzetten halverwege, bijvoorbeeld omdat de frontend niet gebouwd kon worden, los de fout op en
-voer het opnieuw uit. Het werkt vanaf de tweede update met deze versie van het script. Het keurt een teruggezette
-database af bij elke fout van `pg_restore` behalve de onschuldige over de extensie timescaledb
-(`homepage-herstelfouten`), en toont die fouten.
+zijn. Voor het iets stopt, kijkt het na wat kan mislukken: is de kopie leesbaar, is TimescaleDB hier geïnstalleerd
+in de versie van de kopie (die staat ernaast in `.versie`; bij een oudere kopie de versie die nu draait), en is er
+genoeg plaats. Zo niet, dan weigert het en is er niets veranderd. Stopt het terugzetten toch halverwege,
+bijvoorbeeld omdat de frontend niet gebouwd kon worden, dan zegt het hoe het erbij staat: is de database al weg,
+waar staat de bewaarde kopie en hoe zet je die zelf terug (met `runuser`). Zolang de database nog die van nu is,
+starten de diensten weer. Los de fout op (`homepage-diagnose` zet alles om het na te gaan in één bestand) en voer
+het opnieuw uit: het gaat verder met dezelfde bewaarde kopie. Het werkt vanaf de tweede update met deze versie van
+het script. Het keurt een teruggezette database af bij elke fout van `pg_restore` behalve de onschuldige over de
+extensie timescaledb (`homepage-herstelfouten`), en toont die fouten.
 
 Een release maken (voor `stabiel`): een tag `vX.Y.Z` op `main`, bv. `git tag v1.1.0 && git push origin v1.1.0`.
 

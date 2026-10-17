@@ -9,7 +9,8 @@
   // Tabblad "opruimen": alles van één naam weghalen, DNS eerst en de tegel als laatste. Alleen <naam>.<domein>, en
   // alleen records die naar NPM wijzen of van dit dashboard komen: wat blijft staan, zegt de proef.
   // service: de tegel waarvoor je "opruimen…" koos. ondone: er is iets weg (de tegels herladen).
-  let { service = null, services = [], ondone = null } = $props()
+  // echt: "echt uitvoeren" staat aan; anders alleen de proef.
+  let { service = null, services = [], echt = false, ondone = null } = $props()
 
   let domain = $state(null)
   let tile = $state(untrack(() => (service?.id ? String(service.id) : '')))
@@ -122,8 +123,10 @@
   {#if plan && changed}<p class="hint small w">Gewijzigd na de proef: doe de proef opnieuw.</p>{/if}
   <div class="btns">
     <button class="mini" disabled={busy} onclick={() => proef()}>proef</button>
-    <button class="mini x" disabled={busy || changed || !plan?.kan || !plan?.steps?.length} onclick={go}>opruimen</button>
+    {#if echt}<button class="mini x" disabled={busy || changed || !plan?.kan || !plan?.steps?.length} onclick={go}>opruimen</button>{/if}
   </div>
+  {#if !echt}<p class="hint small">Echt uitvoeren staat uit: opruimen kan alleen als proef. Zet het bovenaan aan om
+    echt op te ruimen.</p>{/if}
   {#if plan && !plan.kan && plan.waarom?.length}
     <div class="no">Kan niet:<ul>{#each plan.waarom as w, i (i)}<li>{w}</li>{/each}</ul></div>
   {/if}

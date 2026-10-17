@@ -1,8 +1,10 @@
 """Diagnose-export (knop "diagnose ↓" onder !): één JSON-bestand om bij een foutmelding te voegen.
 
 Erin: versies, de processen, het aandacht-overzicht, de instellingen-checklist, de fouten per integratie en per
-achtergrondtaak, de laatste meldingen, tijdlijn en audit, wat de proefmodus zou doen, en de laatste 200 logregels
-van de API, de worker en de syslog-ontvanger.
+achtergrondtaak, de laatste meldingen, tijdlijn en audit, wat de proefmodus zou doen, de laatste runs van Nieuwe
+service, hoe het laatste noodplan liep, de laatste 200 logregels van de API, de worker en de syslog-ontvanger, en (met
+POST) wat de browser zelf bijhield: zijn laatste fouten en mislukte verzoeken. Die ring komt alleen in deze ene
+export: hij wordt nergens bewaard.
 
 Alleen lezen: geen ensure_state, geen nieuwe VAPID-sleutels, en genegeerde punten worden hier niet opgeruimd (dat
 doet routers/attention.overview wel). Geheimen komen er niet in. Versleutelde kolommen en AppState met geheimen
@@ -28,14 +30,14 @@ from sqlalchemy import or_, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import attention, logring, proef
+from . import attention, logring, nieuweservice as ns, proef
 from .config import get_settings
 from .health import selfcheck as sc
 from .integrations import REGISTRY
 from .masking import MIN_KNOWN, basic, mask_tree, variants
 from .models import (ApiConnection, AppState, AuditLog, CronJob, Event, HealRule, Notification, PushMonitor,
                      PushSubscription, Service, ServiceState, SshHost, SshKey, UpdateRun, User, WebhookSource)
-from .monitoring import restoretest, upgrade, watchdog
+from .monitoring import noodplan, restoretest, upgrade, watchdog
 from .routers import attention as attention_router, integrations as integ, versie
 from .security import decrypt
 from .syslog import server as rxs
@@ -47,6 +49,18 @@ FORMAAT = 1
 SETUP_TIMEOUT = 25
 LAST = 50
 PROEF_EVENTS = 20
+# Van de proeven op de tijdlijn alleen de nieuwste met hun hele plan; per plan hoogstens zoveel stappen, en van elk
+# script het begin en het einde (een update-plan van een hele cluster heeft er één per machine).
+PROEF_PLANS = 5
+PROEF_STEPS = 30
+PROEF_SCRIPT = 1500
+NS_RUNS = 5
+NS_STEP = ("nr", "key", "title", "status", "fatal", "started_at", "finished_at")
+# De ring van de browser: zoveel regels, elke tekst hoogstens zo lang (de browser kort zelf ook al in).
+BROWSER = 50
+BROWSER_KINDS = ("fout", "belofte", "api")
+BROWSER_TEXT = 500
+BROWSER_PATH = 300
 UPDATE_DAYS = 7
 OUTPUT_TAIL = 2048
 MAX_ERRORS = 30
@@ -417,6 +431,21 @@ def _heal(rules: list[HealRule]) -> list[dict]:
             for r in rules]
 
 
+def _plan(p):
+    """Een proefplan, begrensd: hoogstens PROEF_STEPS stappen en van elk script het begin en het einde."""
+    if not isinstance(p, dict) or not p:
+        return p
+    steps = [s for s in p.get("steps") or [] if isinstance(s, dict)]
+    out = {**p, "steps": [{**s, "script": logring.cut(s["script"], PROEF_SCRIPT, _KNOWN.get())}
+                          if isinstance(s.get("script"), str) else s for s in steps[:PROEF_STEPS]]}
+    if len(steps) > PROEF_STEPS:
+        out["stappen_weggelaten"] = len(steps) - PROEF_STEPS
+    for k in ("checks", "skipped", "after", "warnings"):
+        if isinstance(p.get(k), list):
+            out[k] = p[k][:MAX_ERRORS]
+    return out
+
+
 async def _proef(db: AsyncSession, rules: list[HealRule]) -> dict:
     """Welke automatische runs alleen als proef lopen, en wat ze laatst zouden gedaan hebben. Elke vlag met een
     standaardwaarde: wie ze nog niet kent (een oudere stand), heeft ze uit."""
@@ -428,18 +457,97 @@ async def _proef(db: AsyncSession, rules: list[HealRule]) -> dict:
                                     Event.body, Event.data)
                          .where(Event.title.startswith(proef.EVENT_PREFIX, autoescape=True))
                          .order_by(Event.ts.desc(), Event.id.desc()).limit(PROEF_EVENTS))
-    for e in events:
+    for i, e in enumerate(events):
         plan = (e.pop("data") or {}).get("plan")
-        if plan:
-            e["plan"] = plan
+        if plan and i < PROEF_PLANS:
+            e["plan"] = _plan(plan)
             del e["body"]  # dezelfde inhoud als tekst
+        elif e["body"]:
+            # Een oudere proef: alleen het begin en het einde van de tekst.
+            e["body"] = logring.cut(e["body"], 1000, _KNOWN.get())
     return {"vlaggen": {"update_settings.proef": bool(upd.get("proef", False)),
                         "update_settings.cleanup_proef": bool(upd.get("cleanup_proef", False)),
                         "heal_rules.dry_run": sum(1 for r in rules if getattr(r, "dry_run", False)),
                         "restoretest.dry": bool(restoretest.settings(rt).get("dry", False))},
-            "update_auto_proef": await _value(db, "update_auto_proef") or None,
-            "update_cleanup_proef": await _value(db, "update_cleanup_proef") or None,
-            "restoretest_dry_history": dry[:3], "tijdlijn": events}
+            "update_auto_proef": _plan(await _value(db, "update_auto_proef")) or None,
+            "update_cleanup_proef": _plan(await _value(db, "update_cleanup_proef")) or None,
+            "restoretest_dry_history": [{**h, "plan": _plan(h.get("plan"))} if "plan" in h else h for h in dry[:3]],
+            "tijdlijn": events}
+
+
+async def _nieuwe_service(db: AsyncSession) -> dict:
+    """De laatste runs van Nieuwe service: soort, stand, de stappen met hun stand en fout, en wat nog zelf te doen is.
+    Niet de invoer, de calls of wat een stap bewaarde om iets ongedaan te maken (daar staan ID's en oude
+    instellingen in): van wat gemaakt of verwijderd is alleen de soort."""
+    runs = ns.runs_of(await _value(db, ns.STATE_KEY))
+    out = []
+    for run in runs[:NS_RUNS]:
+        r = ns.effective(run)
+        steps = [s for s in r.get("steps") or [] if isinstance(s, dict)]
+        out.append({**{k: r.get(k) for k in ("id", "kind", "of", "fqdn", "by", "at", "updated_at", "status",
+                                             "undone_by", "can_undo")},
+                    "error": _errors(r.get("error")), "warning": _errors(r.get("warning")),
+                    "todo": _errors(list(r.get("todo") or [])),
+                    "steps": [{**{k: s.get(k) for k in NS_STEP}, "detail": _errors(s.get("detail"))}
+                              for s in steps[:MAX_ERRORS]],
+                    "created": [c.get("kind") for c in r.get("created") or [] if isinstance(c, dict)][:MAX_ERRORS],
+                    "removed": [c.get("kind") for c in r.get("removed") or [] if isinstance(c, dict)][:MAX_ERRORS]})
+    return {"echt": await ns.real(db), "runs": len(runs), "laatste": out}
+
+
+async def _noodplan(db: AsyncSession, now: datetime) -> dict:
+    """Hoe het laatste noodplan liep: wanneer, of de laatste poging mislukte (en waarom), welke bronnen mislukten of
+    uit een vorig noodplan komen, en de kopie buiten de container. Niet het document of de gegevens zelf."""
+    v = await _value(db, noodplan.STATE_KEY)
+    srcs = [x for x in v.get("sources") or [] if isinstance(x, dict)]
+    off = v.get("offsite") if isinstance(v.get("offsite"), dict) else {}
+    failed = v.get("failed") if isinstance(v.get("failed"), dict) else None
+    running = v.get("running") if isinstance(v.get("running"), dict) else None
+    try:
+        n = noodplan.counts(v.get("data")) if v.get("at") else None
+    except Exception:  # noqa: BLE001 - een vreemde bewaarde waarde mag de export niet tegenhouden
+        n = {"fout": "onleesbaar"}
+    return {**{k: v.get(k) for k in ("at", "tried", "trigger", "by", "seconds", "masked", "masked_kinds")},
+            "running": {k: running.get(k) for k in ("at", "by")} if running else None,
+            "loopt": noodplan.is_busy(v, now),
+            "failed": {"at": failed.get("at"), "error": _errors(failed.get("error"))} if failed else None,
+            "bronnen": len(srcs),
+            "bronnen_fout": [{**{k: x.get(k) for k in ("key", "name", "covered", "from", "failing_since")},
+                              "error": _errors(x.get("error"))}
+                             for x in srcs if not x.get("ok")][:MAX_ERRORS],
+            "offsite": {k: off.get(k) for k in ("enabled", "at")} | {"error": _errors(off.get("error"))},
+            "aantallen": n,
+            "problemen": [{"key": k, "text": _errors(t)} for k, t in noodplan.problems(v, now)]}
+
+
+def _browser_text(x, n: int) -> str | None:
+    return logring.bound(x, n, _KNOWN.get()) if isinstance(x, str) and x else None
+
+
+def _browser_path(x) -> str | None:
+    """Een pad zonder querystring of #: daar staan soms codes of tokens in."""
+    return _browser_text(x.split("?", 1)[0].split("#", 1)[0], BROWSER_PATH) if isinstance(x, str) else None
+
+
+def browser(entries: list | None) -> dict | None:
+    """Wat de browser zelf bijhield: niet opgevangen fouten, verworpen beloftes en mislukte API-verzoeken (methode,
+    pad, status). Alleen de laatste BROWSER, elke tekst begrensd; daarna gemaskeerd zoals de rest. Alleen voor deze
+    export: dit wordt nergens bewaard."""
+    if entries is None:
+        return None
+    rows = [e for e in entries if isinstance(e, dict)]
+    out = []
+    for e in rows[-BROWSER:]:
+        kind = e.get("kind") if e.get("kind") in BROWSER_KINDS else "?"
+        row = {"kind": kind, "at": _browser_text(e.get("at"), 40), "msg": _browser_text(e.get("msg"), BROWSER_TEXT)}
+        if kind == "api":
+            st = e.get("status")
+            row |= {"method": _browser_text(e.get("method"), 10), "path": _browser_path(e.get("path")),
+                    "status": st if isinstance(st, int) and not isinstance(st, bool) else None}
+        elif e.get("waar"):
+            row["waar"] = _browser_path(e.get("waar"))
+        out.append(row)
+    return {"aantal": len(rows), "regels": out}
 
 
 async def _logs(db: AsyncSession) -> dict:
@@ -456,8 +564,9 @@ async def _logs(db: AsyncSession) -> dict:
 
 # --- samen ------------------------------------------------------------------------------------------------------
 
-async def build(db: AsyncSession, user: User, frontend_nr: int | None = None) -> dict:
-    """De hele export, gemaskeerd en klaar voor JSON. Schrijft niets."""
+async def build(db: AsyncSession, user: User, frontend_nr: int | None = None, ring: list | None = None) -> dict:
+    """De hele export, gemaskeerd en klaar voor JSON. Schrijft niets. ring: wat de browser zelf bijhield (POST), of
+    None."""
     counts: Counter = Counter()
     raw = set(await known_secrets(db, counts))
     # Een kort wachtwoord of een gewoon woord (homepage, proxmox, ...) overal vervangen, zou het net verraden
@@ -467,7 +576,7 @@ async def build(db: AsyncSession, user: User, frontend_nr: int | None = None) ->
     token = _KNOWN.set(tuple(known))
     try:
         # Eerst alles tekst (tijdstippen ook), dan maskeren: zo ontsnapt er niets via de JSON-codering.
-        out = mask_tree(_bounded(jsonable_encoder(await _export(db, user, frontend_nr))), known, counts)
+        out = mask_tree(_bounded(jsonable_encoder(await _export(db, user, frontend_nr, ring))), known, counts)
     finally:
         _KNOWN.reset(token)
     if weak:
@@ -479,7 +588,7 @@ async def build(db: AsyncSession, user: User, frontend_nr: int | None = None) ->
     return out
 
 
-async def _export(db: AsyncSession, user: User, frontend_nr: int | None) -> dict:
+async def _export(db: AsyncSession, user: User, frontend_nr: int | None, ring: list | None = None) -> dict:
     now = datetime.now(timezone.utc)
     # Eerst de checklist: die vraagt de API's van de tegels (en vult zo ook de fouten per tegel aan). De sessie van
     # het verzoek houdt intussen geen transactie open.
@@ -523,7 +632,10 @@ async def _export(db: AsyncSession, user: User, frontend_nr: int | None) -> dict
         "audit": await _rows(db, select(AuditLog.id, AuditLog.ts, AuditLog.user_id, AuditLog.action, AuditLog.detail,
                                         AuditLog.ip).order_by(AuditLog.ts.desc(), AuditLog.id.desc()).limit(LAST)),
         "proef": await _proef(db, rules),
+        "nieuwe_service": await _nieuwe_service(db),
+        "noodplan": await _noodplan(db, now),
         "logs": await _logs(db),
+        "browser": browser(ring),
     }
     # Een cronregel kan een wachtwoord bevatten (mysqldump -p..., curl -u ...): de tijdlijn zet het commando van een
     # nieuwe of verdwenen job in de tekst.

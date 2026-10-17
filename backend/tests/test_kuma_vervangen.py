@@ -17,6 +17,7 @@ from app.monitoring.checks import Outcome, check_http
 from app.monitoring.engine import mass_check, record
 from app.schemas import clean_check
 
+from .conftest import H
 from .test_beveiliging import _reauth
 
 NOW = datetime.now(timezone.utc)
@@ -366,30 +367,54 @@ async def test_vastgelopen_checks(authed):
     await agen.aclose()
 
 
+def _zabbix() -> httpx.AsyncClient:
+    """Zonder login, van een andere machine op het LAN (zoals Zabbix): de testclient zelf komt van 127.0.0.1."""
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=("192.168.0.60", 40000)),
+                             base_url="http://test", headers=H)
+
+
 async def test_healthz(authed, monkeypatch):
+    monkeypatch.setattr(watchdog, "_healthz", None)
+    monkeypatch.setattr(watchdog, "_seen_saved", None)
+    async with _zabbix() as zabbix:
+        r = await zabbix.get("/api/healthz")
+        assert r.status_code == 503 and r.json() == {"ok": False}
+        agen, db = await _db()
+        db.add(AppState(key="worker", value={"at": datetime.now(timezone.utc).isoformat()}))
+        await db.commit()
+        monkeypatch.setattr(watchdog, "_healthz", None)
+        assert (await zabbix.get("/api/healthz")).status_code == 200
+        # Een check zonder resultaat in de laatste 5 minuten: niet gezond.
+        g = await _group(authed)
+        sid = await _svc(authed, g, "x", {"type": "http"})
+        db.add(CheckResult(service_id=sid, ts=datetime.now(timezone.utc) - timedelta(minutes=10), ok=True))
+        await db.commit()
+        monkeypatch.setattr(watchdog, "_healthz", None)
+        assert (await zabbix.get("/api/healthz")).status_code == 503
+        # Van buitenaf bestaat hij niet, en zonder login.
+        assert (await zabbix.get("/api/healthz", headers={"X-Homepage-Via-Cf": "1"})).status_code == 404
+    seen = await db.get(AppState, watchdog.SEEN_KEY)
+    assert seen and seen.value["at"] and seen.value["ip"] == "192.168.0.60"
+    rows = {r["key"]: r for grp in (await authed.get("/api/attention/setup")).json()["groups"] for r in grp["rows"]}
+    assert rows["wachter"]["state"] == "ok"
+    await agen.aclose()
+
+
+async def test_healthz_vanuit_de_container_is_geen_wachter(authed, monkeypatch):
+    """homepage-diagnose vraagt /api/healthz op in de container zelf (127.0.0.1): dat antwoordt gewoon, maar telt niet
+    als iemand die het dashboard bewaakt (wat in de container draait, merkt niet dat de container uitvalt)."""
     monkeypatch.setattr(watchdog, "_healthz", None)
     monkeypatch.setattr(watchdog, "_seen_saved", None)
     r = await authed.get("/api/healthz")
     assert r.status_code == 503 and r.json() == {"ok": False}
     agen, db = await _db()
-    db.add(AppState(key="worker", value={"at": datetime.now(timezone.utc).isoformat()}))
-    await db.commit()
-    monkeypatch.setattr(watchdog, "_healthz", None)
-    assert (await authed.get("/api/healthz")).status_code == 200
-    # Een check zonder resultaat in de laatste 5 minuten: niet gezond.
-    g = await _group(authed)
-    sid = await _svc(authed, g, "x", {"type": "http"})
-    db.add(CheckResult(service_id=sid, ts=datetime.now(timezone.utc) - timedelta(minutes=10), ok=True))
-    await db.commit()
-    monkeypatch.setattr(watchdog, "_healthz", None)
-    assert (await authed.get("/api/healthz")).status_code == 503
-    # Van buitenaf bestaat hij niet, en zonder login.
-    assert (await authed.get("/api/healthz", headers={"X-Homepage-Via-Cf": "1"})).status_code == 404
-    seen = await db.get(AppState, watchdog.SEEN_KEY)
-    assert seen and seen.value["at"]
+    assert await db.get(AppState, watchdog.SEEN_KEY) is None
     rows = {r["key"]: r for grp in (await authed.get("/api/attention/setup")).json()["groups"] for r in grp["rows"]}
-    assert rows["wachter"]["state"] == "ok"
+    assert rows["wachter"]["state"] == "none"
     await agen.aclose()
+    for host in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+        assert watchdog._zelf(type("C", (), {"client": type("A", (), {"host": host})()})())
+    assert not watchdog._zelf(type("C", (), {"client": type("A", (), {"host": "192.168.0.60"})()})())
 
 
 async def test_healthz_kort_na_het_opstarten(authed, monkeypatch):
@@ -398,7 +423,8 @@ async def test_healthz_kort_na_het_opstarten(authed, monkeypatch):
     monkeypatch.setattr(watchdog, "_healthz", None)
     monkeypatch.setattr(watchdog, "_seen_saved", None)
     monkeypatch.setattr(watchdog.time, "monotonic", lambda: 100.0)
-    await authed.get("/api/healthz")
+    async with _zabbix() as zabbix:
+        await zabbix.get("/api/healthz")
     agen, db = await _db()
     assert await db.get(AppState, watchdog.SEEN_KEY)
     await agen.aclose()

@@ -1,4 +1,6 @@
 // Kleine wrapper rond fetch. De X-Requested-With-header is de CSRF-bescherming van de API.
+import { apiFailed } from './errorring.js'
+
 export class ApiError extends Error {
   constructor(message, status) {
     super(message)
@@ -9,12 +11,19 @@ export class ApiError extends Error {
 export async function api(path, { method = 'GET', body } = {}) {
   const headers = { 'X-Requested-With': 'homepage' }
   if (body !== undefined) headers['Content-Type'] = 'application/json'
-  const r = await fetch('/api' + path, {
-    method,
-    headers,
-    credentials: 'same-origin',
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  })
+  let r
+  try {
+    r = await fetch('/api' + path, {
+      method,
+      headers,
+      credentials: 'same-origin',
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    })
+  } catch (e) {
+    // Geen antwoord (geen netwerk, de server herstart): voor de diagnose als status 0.
+    apiFailed(method, '/api' + path, 0, e?.message)
+    throw e
+  }
   const text = await r.text()
   let data = null
   try { data = text ? JSON.parse(text) : null } catch { data = text }
@@ -23,6 +32,7 @@ export async function api(path, { method = 'GET', body } = {}) {
     // Zonder uitleg van de API (bv. een 502/504 van een proxy ertussen) en zonder statusText (leeg over HTTP/2,
     // zoals via NPM of Cloudflare): dan toch iets leesbaars, met de code.
     const msg = typeof d === 'string' ? d : Array.isArray(d) ? d.map((x) => String(x.msg).replace(/^Value error, /, '')).join(', ') : r.statusText || `Mislukt (fout ${r.status})`
+    apiFailed(method, '/api' + path, r.status, msg)
     if (r.status === 401 && !path.startsWith('/auth/')) window.dispatchEvent(new Event('hp:unauth'))
     if (r.status === 403 && msg.startsWith('buiten:')) {
       signalOutside(msg)

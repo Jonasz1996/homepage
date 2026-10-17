@@ -82,6 +82,14 @@ def totp_clock(monkeypatch):
     return clock
 
 
+@pytest.fixture(autouse=True)
+def dashboard_self(monkeypatch):
+    """Wie het dashboard zelf is (updates slaan die machine over), los van de adressen en de hostname van de machine
+    waarop de tests lopen. Een test die het nodig heeft, zet zelf upgrade.me."""
+    from app.monitoring import upgrade
+    monkeypatch.setattr(upgrade, "me", lambda: upgrade.Me())
+
+
 @pytest.fixture
 async def client(migrated):
     engine = create_async_engine(TEST_DB)

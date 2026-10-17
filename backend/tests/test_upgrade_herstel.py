@@ -119,7 +119,7 @@ async def test_install_ct_with_snapshot_check_and_rollback(authed, monkeypatch):
                               _t("portainer:1:x", "nginx", "docker")])
 
     plans = (await authed.get("/api/updates/plans")).json()
-    assert plans[f"ssh:{hid}:ct:105"] == {"can": True, "why": None, "snapshot": "pct", "nosnap": None}
+    assert plans[f"ssh:{hid}:ct:105"] == {"can": True, "why": None, "snapshot": "pct", "nosnap": None, "self": None}
     assert plans[f"ssh:{hid}"]["snapshot"] is None and "fysieke" in plans[f"ssh:{hid}"]["nosnap"]
     assert not plans["portainer:1:x"]["can"]
 
