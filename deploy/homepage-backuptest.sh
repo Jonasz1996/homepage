@@ -8,8 +8,8 @@
 # Het resultaat komt in $BK/backuptest (ok=1, 0 of overgeslagen), wat pg_restore schreef in $BK/backuptest.log (alleen
 # als pg_restore deze keer liep: dan staat log=1 in het resultaat). De worker leest het en toont het in hw → homepage zelf, en onder ! als het mislukt. Het script zelf eindigt altijd met 0:
 # de dienst hoeft niet op "failed" te staan voor iets wat het dashboard al meldt.
-# Om te testen: BACKUP_DIR, BACKUPTEST_DB, BACKUPTEST_MAX_PCT, BACKUPTEST_TIMEOUT, BACKUPTEST_DF_PATH, HERSTELFOUTEN en
-# de gewone PostgreSQL-variabelen (PGDATABASE, PGHOST, PGPORT).
+# Om te testen: BACKUP_DIR, BACKUPTEST_DB, BACKUPTEST_MAX_PCT, BACKUPTEST_TIMEOUT, BACKUPTEST_DF_PATH, HERSTELFOUTEN,
+# DUMPINFO en de gewone PostgreSQL-variabelen (PGDATABASE, PGHOST, PGPORT).
 set -u
 
 BK=${BACKUP_DIR:-/var/backups/homepage}
@@ -21,6 +21,7 @@ MAXPCT=${BACKUPTEST_MAX_PCT:-70}
 # Zo lang mogen terugzetten en nakijken samen duren, in seconden (homepage-backuptest.service geeft iets meer).
 LIMIT=${BACKUPTEST_TIMEOUT:-3600}
 HF=${HERSTELFOUTEN:-/usr/local/sbin/homepage-herstelfouten}
+DI=${DUMPINFO:-/usr/local/sbin/homepage-dumpinfo}
 OUT="$BK/backuptest"
 LOG="$BK/backuptest.log"
 # Elke opdracht hieronder zegt zelf over welke database het gaat.
@@ -91,10 +92,14 @@ if ! PGV=$(q -d "$LIVE" -c "SHOW server_version" 2>&1); then
 fi
 PGV=${PGV%% *}
 
+# De versie van TimescaleDB in de echte database: de dump komt van daar (van vannacht), en terugzetten lukt alleen met
+# de extensie in dezelfde versie (homepage-terugzetten en LEESMIJ.txt doen het net zo).
+TSL=$(q -d "$LIVE" -c "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'")
+case "$TSL" in *[!0-9A-Za-z.-]*) TSL="" ;; esac
 # Plaats: de testdatabase wordt ongeveer zo groot als de echte zonder de logregels (die gaan niet mee in de dump), plus
 # hoogstens max_wal_size aan WAL tijdens het terugzetten. Met TimescaleDB staan de logregels in de chunks.
 LOGS="pg_total_relation_size(to_regclass('public.log_entries'))"
-if [ "$(q -d "$LIVE" -c "SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'")" = 1 ]; then
+if [ -n "$TSL" ]; then
   LOGS="(SELECT hypertable_size(format('%I.%I', hypertable_schema, hypertable_name)::regclass)
            FROM timescaledb_information.hypertables WHERE hypertable_schema = 'public' AND hypertable_name = 'log_entries'),
          $LOGS"
@@ -114,11 +119,13 @@ OWNER=$(q -d "$LIVE" -c "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE d
 if ! e=$(createdb -O "${OWNER:-postgres}" "$TEST" 2>&1); then
   klaar 0 "testdatabase aanmaken mislukt: $e"
 fi
+# Of de dump TimescaleDB nodig heeft, zegt homepage-dumpinfo (net als bij homepage-terugzetten).
 TS=""
-if pg_restore -l "$D" 2>/dev/null | grep -q 'EXTENSION.*timescaledb'; then
-  TS=1
-  if ! e=$(q -d "$TEST" -c "CREATE EXTENSION IF NOT EXISTS timescaledb" -c "SELECT timescaledb_pre_restore()" 2>&1); then
-    klaar 0 "TimescaleDB klaarzetten mislukt: $e"
+if [ "$(sh "$DI" "$D" 2>/dev/null)" = timescaledb ]; then
+  TS=1 VER=""
+  [ -z "$TSL" ] || VER=" VERSION '$TSL'"
+  if ! e=$(q -d "$TEST" -c "CREATE EXTENSION IF NOT EXISTS timescaledb$VER" -c "SELECT timescaledb_pre_restore()" 2>&1); then
+    klaar 0 "TimescaleDB${TSL:+ $TSL} klaarzetten mislukt: $e"
   fi
 fi
 LOGGED=1

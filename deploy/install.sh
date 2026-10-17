@@ -17,6 +17,7 @@ set -euo pipefail
 APP_DIR=/opt/homepage
 CONF_DIR=/etc/homepage
 BK=/var/backups/homepage
+LOG_DIR=/var/log/homepage
 # NPM_IP: het IP van Nginx Proxy Manager. Wordt bij de eerste keer bewaard in homepage.env en daarna daar gelezen.
 NPM_IP="${NPM_IP:-$(sed -n 's/^HOMEPAGE_NPM_IP=//p' "$CONF_DIR/homepage.env" 2>/dev/null | tail -1 || true)}"
 # Niet opgegeven en nog niet bewaard: dan is de standaard een gok, en blijft het LAN open (zie nginx hieronder).
@@ -28,8 +29,19 @@ warn() { printf '\033[1;33m!! %s\033[0m\n' "$*"; }
 
 # Hoe ver de update is: dat bepaalt wat er bij een fout teruggezet wordt (zie bij_fout).
 TERUG_NAAR="" GESTOPT="" GEWISSELD="" KLAAR="" REDEN="" VENV_NIEUW="" VENV_OUD="" VERSIE="" DUMP=""
-ONDERBROKEN="" UITSTEL=""
+ONDERBROKEN="" UITSTEL="" INSTALL_LOG="" TEE_PID=""
 afbreken() { REDEN=$1; exit 1; }
+
+# Het log afsluiten (zie hieronder bij het begin): de uitvoer weer rechtstreeks naar de terminal, en wachten tot tee
+# alles geschreven heeft (hoogstens 5 s), zodat wie install.sh aanriep (bootstrap.sh, homepage-terugzetten) pas daarna
+# verder schrijft.
+# shellcheck disable=SC2317  # loopt via trap, dat ziet shellcheck niet
+log_dicht() {
+  [ -n "$TEE_PID" ] || return 0
+  exec 1>&3 2>&4 3>&- 4>&-
+  for _ in $(seq 50); do kill -0 "$TEE_PID" 2>/dev/null || break; sleep 0.1; done
+  TEE_PID=""
+}
 
 # Onderbroken (Ctrl+C, de SSH-verbinding valt weg, kill): net als een fout, zodat bij_fout terugzet en de diensten weer
 # start. Zonder dit stopt bash meteen en ziet de EXIT-trap $? = 0: dan bleven de diensten stilstaan.
@@ -104,9 +116,10 @@ bij_fout() {
   trap '' INT HUP TERM PIPE
   trap - EXIT
   set +e
-  [ "$rc" -ne 0 ] || exit 0
+  [ "$rc" -ne 0 ] || { log_dicht; exit 0; }
   printf '\n\033[1;31m!! %s\033[0m\n' "${REDEN:-Er ging iets mis, zie hierboven.}"
-  [ -z "${HOMEPAGE_TERUGZETTEN:-}" ] || exit "$rc"
+  [ -z "$INSTALL_LOG" ] || warn "Alles van deze keer staat ook in $INSTALL_LOG."
+  [ -z "${HOMEPAGE_TERUGZETTEN:-}" ] || { log_dicht; exit "$rc"; }
   if [ -z "$KLAAR" ]; then
     [ -z "$GEWISSELD" ] || wissel_terug
     [ -z "$TERUG_NAAR" ] || git -C "$APP_DIR" checkout -q -f --detach "$TERUG_NAAR" \
@@ -117,11 +130,13 @@ bij_fout() {
   [ -z "$GESTOPT" ] || systemctl start homepage-api homepage-worker homepage-syslog
   if [ -n "$KLAAR" ]; then
     warn "De database is al bijgewerkt, dus versie $VERSIE blijft staan. Los de fout op en voer het opnieuw uit."
+    [ -z "$DUMP" ] || [ ! -f "$DUMP.versie" ] || warn "Of terug naar de vorige versie: homepage-terugzetten."
   elif [ -n "$TERUG_NAAR" ]; then
     warn "Update afgebroken: ${PREV_VERSIE:-de vorige versie} blijft draaien en de database is niet veranderd."
   else
     warn "Afgebroken, de database is niet veranderd. Opnieuw uitvoeren mag."
   fi
+  log_dicht
   exit "$rc"
 }
 
@@ -201,8 +216,142 @@ PY
   done <<< "$uit"
 }
 
+# Gebruikt homepage (HOMEPAGE_DATABASE_URL, al ingelezen) de PostgreSQL die dit script beheert: op deze machine, via
+# de socket of localhost, op de poort waar psql als postgres op uitkomt? Schrijft 1 of niets.
+db_lokaal() {
+  HOMEPAGE_PG_POORT=$(runuser -u postgres -- psql -XAtq -c "SHOW port") python3 -I - <<'PY'
+import os
+from urllib.parse import parse_qs, urlsplit
+
+u = urlsplit(os.environ.get("HOMEPAGE_DATABASE_URL") or "postgresql+asyncpg://homepage@/homepage")
+q = parse_qs(u.query)
+hosts = [h for h in [u.hostname or "", *q.get("host", [])] if h]
+try:
+    port = u.port or int(q.get("port", ["5432"])[0])
+except ValueError:
+    port = None
+lokaal = all(h.startswith("/") or h in ("localhost", "127.0.0.1", "::1") for h in hosts)
+print("1" if lokaal and str(port) == os.environ["HOMEPAGE_PG_POORT"] else "")
+PY
+}
+
+# Genoeg verbindingen in PostgreSQL voor de drie diensten: hun pools samen (HOMEPAGE_DB_POOL_API, _WORKER en _SYSLOG uit
+# homepage.env, al ingelezen; standaard 20 + 40 + 5, zie pool_max in backend/app/db.py) plus VERBINDINGEN_MARGE voor
+# pg_dump, de migraties, psql en de test van de back-up. Wat PostgreSQL voor superusers achterhoudt
+# (superuser_reserved_connections, reserved_connections), krijgt homepage niet. Te weinig: max_connections hoger
+# (ALTER SYSTEM, PostgreSQL herstart), maar alleen op de PostgreSQL van dit script (db_lokaal); anders een
+# waarschuwing. Nooit lager.
+VERBINDINGEN_MARGE=10
+db_verbindingen() {
+  local n pools=0 max res nodig nieuw auto
+  for n in "${HOMEPAGE_DB_POOL_API:-20}" "${HOMEPAGE_DB_POOL_WORKER:-40}" "${HOMEPAGE_DB_POOL_SYSLOG:-5}"; do
+    case "$n" in
+      ''|*[!0-9]*) warn "HOMEPAGE_DB_POOL_*=$n in $CONF_DIR/homepage.env is geen getal: max_connections niet nagekeken."
+                   return 0 ;;
+    esac
+    n=$((10#$n))
+    pools=$((pools + (n > 0 ? n : 1)))
+  done
+  if ! read -r max res < <(runuser -u postgres -- psql -XAtq -F ' ' -c "SELECT current_setting('max_connections'),
+      current_setting('superuser_reserved_connections')::int
+      + coalesce(current_setting('reserved_connections', true), '0')::int") \
+     || ! [[ "$max" =~ ^[0-9]+$ && "$res" =~ ^[0-9]+$ ]]; then
+    warn "max_connections van PostgreSQL niet te lezen: niet nagekeken."
+    return 0
+  fi
+  nodig=$((pools + VERBINDINGEN_MARGE + res))
+  if [ "$max" -ge "$nodig" ]; then
+    echo "max_connections $max: genoeg voor de diensten ($pools) en $VERBINDINGEN_MARGE extra."
+    return 0
+  fi
+  nieuw=$(( (nodig + 9) / 10 * 10 ))
+  if [ -z "$(db_lokaal)" ]; then
+    warn "De diensten openen samen tot $pools verbindingen met de database (HOMEPAGE_DB_POOL_* in $CONF_DIR/homepage.env),\
+ max_connections is $max: zet het op die server op minstens $nieuw, of verklein de pools."
+    return 0
+  fi
+  echo "max_connections van $max naar $nieuw: de diensten openen samen tot $pools verbindingen (HOMEPAGE_DB_POOL_*)."
+  # Wat ALTER SYSTEM verandert, staat in postgresql.auto.conf: eerst een kopie, om terug te kunnen.
+  auto="$(runuser -u postgres -- psql -XAtq -c "SHOW data_directory")/postgresql.auto.conf"
+  if ! cp -p "$auto" "$auto.homepage-vorige"; then
+    warn "max_connections niet aangepast ($auto niet te kopiëren): zet het zelf op minstens $nieuw."
+    return 0
+  fi
+  if ! runuser -u postgres -- psql -XAtq -c "ALTER SYSTEM SET max_connections = $nieuw"; then
+    rm -f "$auto.homepage-vorige"
+    warn "max_connections niet aangepast (zie hierboven): zet het zelf op minstens $nieuw."
+    return 0
+  fi
+  if systemctl restart postgresql && pg_klaar; then
+    rm -f "$auto.homepage-vorige"
+  else
+    # Start PostgreSQL er niet mee (bv. te weinig gedeeld geheugen): terug zoals het was.
+    mv -f "$auto.homepage-vorige" "$auto"
+    systemctl restart postgresql || true
+    pg_klaar || true
+    warn "PostgreSQL startte niet met max_connections = $nieuw en staat weer op $max. Verklein de pools\
+ (HOMEPAGE_DB_POOL_* in $CONF_DIR/homepage.env), of kijk na waarom: journalctl -u 'postgresql*' -n 50."
+  fi
+}
+
+# Wacht tot PostgreSQL verbindingen aanneemt (hoogstens 30 s).
+pg_klaar() {
+  for _ in $(seq 30); do
+    runuser -u postgres -- psql -XAtq -c "SELECT 1" >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  return 1
+}
+
+# Draaien de diensten na het herstarten? De API: antwoordt /api/ping (hoogstens 20 s). De worker en de
+# syslog-ontvanger: actief, en minstens 10 s na de start nog altijd zonder herstart. Met Restart=always (RestartSec=5)
+# staat een proces dat telkens meteen crasht tussen twee pogingen even op "activating", maar soms net op "active":
+# NRestarts telt dan wel op. Wat niet draait: de opdracht om te zien waarom. Draait de API niet, dan mislukt de
+# installatie (bootstrap.sh en homepage-terugzetten zien dat); de worker en de syslog-ontvanger geven een waarschuwing.
+diensten_nakijken() {
+  local start=$SECONDS d api="" wacht
+  local -A n0
+  for d in homepage-worker homepage-syslog; do
+    n0[$d]=$(systemctl show -p NRestarts --value "$d" 2>/dev/null || true)
+  done
+  for _ in $(seq 20); do
+    if curl -fsS http://127.0.0.1/api/ping >/dev/null 2>&1; then api=1; break; fi
+    sleep 1
+  done
+  wacht=$((10 - (SECONDS - start)))
+  [ "$wacht" -le 0 ] || sleep "$wacht"
+  for d in homepage-worker homepage-syslog; do
+    if [ "$(systemctl is-active "$d" 2>/dev/null)" = active ] \
+       && [ "$(systemctl show -p NRestarts --value "$d" 2>/dev/null || true)" = "${n0[$d]}" ]; then
+      echo "$d draait."
+    else
+      warn "$d draait niet (of herstart telkens opnieuw): journalctl -u $d -n 100 --no-pager"
+    fi
+  done
+  if [ -n "$api" ]; then
+    echo "API draait."
+  else
+    afbreken "De API reageert niet ($(systemctl is-active homepage-api 2>/dev/null || true)):\
+ journalctl -u homepage-api -n 100 --no-pager (alles samen: homepage-diagnose)."
+  fi
+}
+
 [ "$(id -u)" -eq 0 ] || { echo "Voer uit als root."; exit 1; }
 [ -d "$APP_DIR/backend" ] || { echo "Verwacht de repository in $APP_DIR."; exit 1; }
+# Alles wat het script schrijft, komt ook in $LOG_DIR/install-<datum>.log: een mislukte update is zo achteraf na te
+# lezen (homepage-diagnose neemt het nieuwste mee). De 10 nieuwste blijven. Alleen de uitvoer gaat via tee: vragen
+# lezen nog altijd van de terminal, en de exitcode blijft die van het script zelf. tee negeert Ctrl+C en een
+# wegvallende SSH-verbinding: wat er dan gebeurt, beslist het script zelf (onderbroken), en het log loopt door. Het
+# log bestaat al voor tee start (alleen voor root: de setup-code staat erin), zodat het opruimen het meetelt.
+if install -d -m 750 "$LOG_DIR" 2>/dev/null; then
+  INSTALL_LOG="$LOG_DIR/install-$(date +%Y%m%d-%H%M%S).log"
+  install -m 600 /dev/null "$INSTALL_LOG"
+  exec 3>&1 4>&2
+  exec > >(trap '' INT HUP TERM; exec tee -a "$INSTALL_LOG") 2>&1
+  TEE_PID=$!
+  trap log_dicht EXIT
+  find "$LOG_DIR" -maxdepth 1 -name 'install-*.log' | sort -r | tail -n +11 | xargs -r rm -f
+fi
 # shellcheck source=/dev/null
 . /etc/os-release
 case "$VERSION_CODENAME" in
@@ -368,9 +517,15 @@ $((NODIG >> 20)) MB nodig. Wat plaats inneemt: du -sh $BK/* /var/lib/postgresql"
       afbreken "Kopie van de database mislukt."
     fi
     echo "Kopie van de database: $DUMP"
-    # Naast de kopie: welke versie erbij hoort (onbekend bij een update van een heel oude installatie).
+    # Naast de kopie: welke versie erbij hoort (onbekend bij een update van een heel oude installatie), en voor
+    # homepage-terugzetten de versie van TimescaleDB (de extensie moet in dezelfde versie terugkomen) en hoe groot de
+    # database was (zoveel plaats vraagt het terugzetten). Leeg als het niet te lezen is: dan schat terugzetten zelf.
     if [ -n "$PREV_COMMIT" ]; then
-      printf 'commit=%s\nversie=%s\n' "$PREV_COMMIT" "${PREV_VERSIE:-${PREV_COMMIT:0:7}}" > "$DUMP.versie"
+      TSV=$(runuser -u postgres -- psql -XAtq -d homepage \
+        -c "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'" || true)
+      GROOTTE=$(runuser -u postgres -- psql -XAtq -d homepage -c "SELECT pg_database_size(current_database())" || true)
+      printf 'commit=%s\nversie=%s\ntimescaledb=%s\ngrootte=%s\n' "$PREV_COMMIT" "${PREV_VERSIE:-${PREV_COMMIT:0:7}}" \
+        "$TSV" "$GROOTTE" > "$DUMP.versie"
     fi
   fi
 fi
@@ -438,20 +593,16 @@ install -m 644 "$APP_DIR/deploy/homepage-backuptest.service" "$APP_DIR/deploy/ho
   /etc/systemd/system/
 install -m 755 "$APP_DIR/deploy/homepage-backuptest.sh" /usr/local/sbin/homepage-backuptest
 install -m 755 "$APP_DIR/deploy/herstelfouten.sh" /usr/local/sbin/homepage-herstelfouten
+# Of een dump TimescaleDB nodig heeft: ook voor homepage-terugzetten en de test van de back-up.
+install -m 755 "$APP_DIR/deploy/dumpinfo.sh" /usr/local/sbin/homepage-dumpinfo
+# Alles in één tekstbestand bij een probleem, ook als het dashboard zelf niet start.
+install -m 755 "$APP_DIR/deploy/diagnose.sh" /usr/local/sbin/homepage-diagnose
 systemctl daemon-reload
 systemctl enable --now homepage-backup.timer homepage-backuptest.timer
 systemctl enable homepage-api homepage-worker homepage-syslog
+db_verbindingen
 systemctl restart homepage-api homepage-worker homepage-syslog
-API_OK=""
-for _ in $(seq 20); do
-  if curl -fsS http://127.0.0.1/api/ping >/dev/null 2>&1; then API_OK=1; break; fi
-  sleep 1
-done
-if [ -n "$API_OK" ]; then
-  echo "API draait."
-else
-  warn "API reageert niet: journalctl -u homepage-api"
-fi
+diensten_nakijken
 
 IP=$(hostname -I | awk '{print $1}')
 say "Klaar (versie $VERSIE, ${KANAAL:-nieuwste})"
@@ -486,6 +637,7 @@ fi
 cat <<EOF
 Bijwerken: hetzelfde bootstrap-commando opnieuw uitvoeren.
 Werkt iets niet meer na een update: homepage-terugzetten (vorige versie plus de database van daarvoor).
+Wat er misloopt, in één bestand om te delen: homepage-diagnose.
 EOF
 # Nog geen account (ook bij een tweede keer uitvoeren): de setup-code tonen.
 USERS=$(runuser -u postgres -- psql -d homepage -tAc "SELECT count(*) FROM users" 2>/dev/null || echo 0)
