@@ -48,16 +48,24 @@
 <Modal title="pvesh get /cluster/resources" {onclose} wide>
   {#if error}<p class="err">{error}</p>{/if}
   {#if !data}
-    <p class="hint">Proxmox bevragen…</p>
+    <p class="hint">Proxmox bevragen… Alle tegels tegelijk; een Proxmox die niet antwoordt, geeft na 8 s een time-out.</p>
   {:else}
     {#each data.errors as e}<p class="e">{e.service}: {e.error}</p>{/each}
     {#if data.errors.length}
-      <p class="hint small">Token of url aanpassen: ✎ bewerken → klik op de Proxmox-tegel → url (bv. <code>https://192.168.0.50:8006</code>),
+      <p class="hint small">Adres of token aanpassen: hangt de tegel aan een API, dan in API-beheer bij die API, anders via
+        ✎ bewerken → klik op de Proxmox-tegel. url = het IP van een node (bv. <code>https://192.168.0.50:8006</code>),
         insecure <code>true</code>, geheimen <code>username</code> = token-id (<code>homepage@pve!dashboard</code>) en
-        <code>password</code> = het token-geheim. Bij een cluster volstaat één tegel.</p>
+        <code>password</code> = het token-geheim. Bij een cluster volstaat één API of tegel.</p>
+    {/if}
+    {#if data.skipped?.length}
+      <p class="hint small">Overgeslagen, zonder token en zonder API: {data.skipped.join(', ')}. Koppel ze onder
+        ✎ bewerken → Integratie en API aan je Proxmox-API als ze iets van Proxmox moeten tonen.</p>
     {/if}
     {#if !data.items.length}
-      <p class="hint">Niets gevonden. Voeg eerst een Proxmox-tegel toe (type <b>proxmox</b> met een API-token).</p>
+      <p class="hint">{#if data.errors.length}Geen enkele Proxmox antwoordde, zie hierboven.
+        {:else if data.asked}Proxmox gaf geen nodes of machines terug.
+        {:else}Nog geen Proxmox om te bevragen. Voeg een tegel van type <b>proxmox</b> toe met een API-token, of koppel er
+        een aan je Proxmox-API.{/if}</p>
     {/if}
     <div class="top">
       <button class="mini" onclick={() => all(true)}>alles</button>
