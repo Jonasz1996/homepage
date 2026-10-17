@@ -538,6 +538,18 @@ if ! (cd "$APP_DIR/backend" && runuser -u homepage -- env HOMEPAGE_DATABASE_URL=
   afbreken "Database bijwerken mislukt."
 fi
 KLAAR=1
+# Vanaf hier blijft deze versie staan, ook als er nog iets mislukt (nginx, de diensten): bij_fout raadt dan
+# homepage-terugzetten aan. Dus meteen de commando's om te herstellen van deze versie, niet pas bij Services: tot dan
+# was het dat van de vorige versie (bij een update van voor homepage-dumpinfo één dat bij een grote database stopt als
+# die al weg is).
+# Een update terugdraaien: vorige versie plus de kopie van de database van vlak voor die update.
+install -m 755 "$APP_DIR/deploy/terugzetten.sh" /usr/local/sbin/homepage-terugzetten
+# Welke fouten van pg_restore tellen (ook voor de maandelijkse test van de back-up).
+install -m 755 "$APP_DIR/deploy/herstelfouten.sh" /usr/local/sbin/homepage-herstelfouten
+# Of een dump TimescaleDB nodig heeft: ook voor homepage-terugzetten en de test van de back-up.
+install -m 755 "$APP_DIR/deploy/dumpinfo.sh" /usr/local/sbin/homepage-dumpinfo
+# Alles in één tekstbestand bij een probleem, ook als het dashboard zelf niet start.
+install -m 755 "$APP_DIR/deploy/diagnose.sh" /usr/local/sbin/homepage-diagnose
 
 # Vanaf hier draait de nieuwe versie. Wat er nu draait: het dashboard toont het (en wat er nieuw is), een volgende
 # update en homepage-terugzetten gebruiken het.
@@ -581,22 +593,16 @@ chgrp homepage "$CONF_DIR/nginx" && chmod 640 "$CONF_DIR/nginx"
 [ -z "$BIJGEWERKT" ] || echo "HOMEPAGE_LAN_OPEN=1" >> "$CONF_DIR/homepage.env"
 
 say "Services"
-# Een update terugdraaien: vorige versie plus de kopie van de database van vlak voor die update.
-install -m 755 "$APP_DIR/deploy/terugzetten.sh" /usr/local/sbin/homepage-terugzetten
 install -m 644 "$APP_DIR/deploy/homepage-api.service" "$APP_DIR/deploy/homepage-worker.service" \
   "$APP_DIR/deploy/homepage-syslog.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/homepage-backup.service" "$APP_DIR/deploy/homepage-backup.timer" /etc/systemd/system/
 install -m 755 "$APP_DIR/deploy/homepage-backup.sh" /usr/local/sbin/homepage-backup
 # Elke 1e van de maand de nieuwste back-up terugzetten in een testdatabase (die daarna weer weg is), als postgres.
-# Welke fouten van pg_restore tellen, staat in homepage-herstelfouten: homepage-terugzetten gebruikt het ook.
+# Welke fouten van pg_restore tellen, staat in homepage-herstelfouten (hierboven, na het bijwerken van de database):
+# homepage-terugzetten gebruikt het ook.
 install -m 644 "$APP_DIR/deploy/homepage-backuptest.service" "$APP_DIR/deploy/homepage-backuptest.timer" \
   /etc/systemd/system/
 install -m 755 "$APP_DIR/deploy/homepage-backuptest.sh" /usr/local/sbin/homepage-backuptest
-install -m 755 "$APP_DIR/deploy/herstelfouten.sh" /usr/local/sbin/homepage-herstelfouten
-# Of een dump TimescaleDB nodig heeft: ook voor homepage-terugzetten en de test van de back-up.
-install -m 755 "$APP_DIR/deploy/dumpinfo.sh" /usr/local/sbin/homepage-dumpinfo
-# Alles in één tekstbestand bij een probleem, ook als het dashboard zelf niet start.
-install -m 755 "$APP_DIR/deploy/diagnose.sh" /usr/local/sbin/homepage-diagnose
 systemctl daemon-reload
 systemctl enable --now homepage-backup.timer homepage-backuptest.timer
 systemctl enable homepage-api homepage-worker homepage-syslog

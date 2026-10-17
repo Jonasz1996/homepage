@@ -222,6 +222,17 @@ async def test_voorbereiden_weigert_voor_er_iets_stilvalt(tmp_path):
         assert r.returncode != 0 and "De kopie is onleesbaar" in r.stdout and "Er is niets veranderd" in r.stdout
         o.dump.write_bytes(good)
 
+        # PostgreSQL draait niet (de kopie heeft geen timescaledb= ernaast): dat zeggen, en niet dat de database van
+        # nu geen TimescaleDB heeft of dat ze niet bereikbaar is voor een kopie.
+        host = o.env["PGHOST"]
+        o.env["PGHOST"] = str(tmp_path / "geen-socket")
+        try:
+            r = o.run()
+        finally:
+            o.env["PGHOST"] = host
+        assert r.returncode != 0 and "PostgreSQL is niet bereikbaar" in r.stdout, r.stdout + r.stderr
+        assert "Er is niets" in r.stdout and "TimescaleDB" not in r.stdout and "TS=" not in r.stdout
+
         # Te weinig plaats voor de kopie van nu en de teruggezette database.
         o.maak_dump({"grootte": 10 ** 18})
         r = o.run()

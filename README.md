@@ -1010,10 +1010,10 @@ in de versie van de kopie (die staat ernaast in `.versie`; bij een oudere kopie 
 genoeg plaats. Zo niet, dan weigert het en is er niets veranderd. Stopt het terugzetten toch halverwege,
 bijvoorbeeld omdat de frontend niet gebouwd kon worden, dan zegt het hoe het erbij staat: is de database al weg,
 waar staat de bewaarde kopie en hoe zet je die zelf terug (met `runuser`). Zolang de database nog die van nu is,
-starten de diensten weer. Los de fout op en voer het opnieuw uit: het gaat verder met dezelfde bewaarde kopie. Het
-werkt vanaf de tweede update met deze versie van het script. Het keurt een teruggezette database af bij elke fout
-van `pg_restore` behalve de onschuldige over de extensie timescaledb (`homepage-herstelfouten`), en toont die
-fouten.
+starten de diensten weer. Los de fout op (`homepage-diagnose` zet alles om het na te gaan in één bestand) en voer
+het opnieuw uit: het gaat verder met dezelfde bewaarde kopie. Het werkt vanaf de tweede update met deze versie van
+het script. Het keurt een teruggezette database af bij elke fout van `pg_restore` behalve de onschuldige over de
+extensie timescaledb (`homepage-herstelfouten`), en toont die fouten.
 
 Een release maken (voor `stabiel`): een tag `vX.Y.Z` op `main`, bv. `git tag v1.1.0 && git push origin v1.1.0`.
 

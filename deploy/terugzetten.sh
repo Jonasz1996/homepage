@@ -70,6 +70,12 @@ voorbereiden() {
     echo "De kopie is onleesbaar (zie hierboven). Er is niets veranderd."
     exit 1
   fi
+  # Alles hieronder vraagt het aan PostgreSQL. Draait dat niet, dan dat zeggen: anders lijkt het verderop alsof de
+  # database van nu geen TimescaleDB heeft, of PostgreSQL het niet laadt.
+  if ! qp -c "SELECT 1" >/dev/null; then
+    echo "PostgreSQL is niet bereikbaar (zie hierboven), dus valt er niets na te kijken. Er is niets veranderd."
+    exit 1
+  fi
   TS_NU=$(q -c "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'" 2>/dev/null || true)
   TS=""
   if [ "$info" = timescaledb ]; then

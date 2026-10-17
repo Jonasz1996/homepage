@@ -281,6 +281,20 @@ def test_installatie_installeert_de_nieuwe_commandos():
     assert "Wat er misloopt, in één bestand om te delen: homepage-diagnose." in TEXT
 
 
+def test_herstelcommandos_meteen_na_het_bijwerken_van_de_database():
+    """Mislukt er na het bijwerken van de database nog iets (nginx, de diensten), dan raadt bij_fout
+    homepage-terugzetten aan: dat moet dan al dat van deze versie zijn, met homepage-dumpinfo en -herstelfouten erbij,
+    en niet nog dat van de vorige (bij de eerste update naar deze versie: met de pipe naar grep -q)."""
+    klaar = TEXT.index("\nKLAAR=1\n")
+    for script, naam in (("terugzetten", "terugzetten"), ("herstelfouten", "herstelfouten"),
+                         ("dumpinfo", "dumpinfo"), ("diagnose", "diagnose")):
+        regel = f'\ninstall -m 755 "$APP_DIR/deploy/{script}.sh" /usr/local/sbin/homepage-{naam}\n'
+        assert TEXT.count(regel) == 1, regel
+        assert klaar < TEXT.index(regel) < TEXT.index('\nsay "nginx"\n'), regel
+    # Daarvoor gaat een mislukte update helemaal terug, en is homepage-terugzetten niet nodig.
+    assert "homepage-terugzetten." in _functie("bij_fout").split('if [ -n "$KLAAR" ]; then')[1].split("elif")[0]
+
+
 def test_api_niet_na_een_update_zegt_hoe_terug(tmp_path):
     """Na het bijwerken van de database blijft de nieuwe versie staan; de kopie van voor de update is er nog."""
     dump = tmp_path / "voor-update-20261017-120000.dump"
