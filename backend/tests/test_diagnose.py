@@ -76,9 +76,11 @@ async def test_vraagt_2fa_staat_buiten_uit_en_laat_een_spoor(authed):
     d = r.json()
     assert d["formaat"] == 1 and r.headers["content-disposition"] == f'attachment; filename="{d["bestand"]}"'
     for k in ("versie", "processen", "aandacht", "instellingen", "integraties", "achtergrond", "webhooks",
-              "pushtoestellen", "zelfherstel", "updates", "cron", "meldingen", "tijdlijn", "audit", "proef", "logs",
-              "gemaskeerd"):
+              "pushtoestellen", "zelfherstel", "updates", "cron", "meldingen", "tijdlijn", "audit", "proef",
+              "nieuwe_service", "noodplan", "logs", "gemaskeerd"):
         assert k in d, k
+    # Zonder POST geen ring van de browser.
+    assert d["browser"] is None
 
     agen, db = await _db()
     rows = list((await db.execute(select(AuditLog).where(AuditLog.action == "diagnose_download"))).scalars())
@@ -88,11 +90,18 @@ async def test_vraagt_2fa_staat_buiten_uit_en_laat_een_spoor(authed):
 
     r = await authed.get("/api/diagnose", headers=CF)
     assert r.status_code == 403 and r.json()["detail"] == "buiten:downloads"
+    r = await authed.post("/api/diagnose", json={"browser": []}, headers=CF)
+    assert r.status_code == 403 and r.json()["detail"] == "buiten:downloads"
     await _stale(authed)
     r = await authed.get("/api/diagnose")
     assert r.status_code == 403 and r.json()["detail"] == "reauth_required"
+    r = await authed.post("/api/diagnose", json={"frontend": 31, "browser": [{"kind": "fout", "msg": "x"}]})
+    assert r.status_code == 403 and r.json()["detail"] == "reauth_required"
     # Van buitenaf eerst de buitenmodus, zoals bij een configuratie downloaden.
     assert (await authed.get("/api/diagnose", headers=CF)).json()["detail"] == "buiten:downloads"
+    agen, db = await _db()
+    assert len((await db.execute(select(AuditLog).where(AuditLog.action == "diagnose_download"))).all()) == 1
+    await agen.aclose()
 
 
 async def test_een_tegelijk(authed, monkeypatch):
@@ -269,6 +278,193 @@ async def test_proef_in_de_export(authed):
     agen, db = await _db()
     assert (await db.execute(select(func.count()).select_from(Notification))).scalar() == notes
     await agen.aclose()
+
+
+async def test_proef_begrensd(authed):
+    """Een plan van een hele cluster, telkens met een script: alleen de nieuwste proeven met hun plan, hoogstens
+    PROEF_STEPS stappen, en van elk script het begin en het einde."""
+    script = "\n".join(f"echo regel {i}" for i in range(2000))
+    plan = proef.plan("Nachtelijke updates", [proef.step(f"ct{i}", "ssh", "apt-get upgrade", script=script)
+                                              for i in range(50)])
+    agen, db = await _db()
+    for i in range(8):
+        proef.record(db, "updates", f"Nachtelijke updates {i}", plan)
+    db.add(AppState(key="update_auto_proef", value=plan))
+    await db.commit()
+    await agen.aclose()
+
+    p = (await _diagnose(authed))["proef"]
+    assert len(p["tijdlijn"]) == 8
+    full = [e for e in p["tijdlijn"] if "plan" in e]
+    assert len(full) == diagnose.PROEF_PLANS
+    for e in full:
+        assert len(e["plan"]["steps"]) == diagnose.PROEF_STEPS and e["plan"]["stappen_weggelaten"] == 20
+        assert all(len(s["script"]) <= diagnose.PROEF_SCRIPT for s in e["plan"]["steps"])
+        assert e["plan"]["steps"][0]["script"].startswith("echo regel 0")
+        assert e["plan"]["steps"][0]["script"].endswith("echo regel 1999")
+    for e in p["tijdlijn"]:
+        if "plan" not in e:
+            assert e["body"].startswith("Nachtelijke updates") and len(e["body"]) <= 1000
+    assert len(p["update_auto_proef"]["steps"]) == diagnose.PROEF_STEPS
+
+
+def _ns_run(i: int, **kw) -> dict:
+    return {"id": f"ns-{i}", "kind": "maken", "of": None, "fqdn": f"s{i}.jbogaert.be", "by": "jonas",
+            "at": f"2026-10-{10 + i:02d}T10:00:00+00:00", "updated_at": f"2026-10-{10 + i:02d}T10:01:00+00:00",
+            "status": "klaar", "warning": None, "input": {"name": f"s{i}", "ip": "192.168.0.27", "port": 8096},
+            "hash": "0123456789abcdef",
+            "steps": [{"nr": 1, "key": "npm_host", "title": "Proxy host in NPM", "call": "POST http://npm/api/x",
+                       "status": "ok", "detail": None, "started_at": "a", "finished_at": "b", "fatal": True,
+                       "spec": {"oude_config": "SPEC-MARKER"}}],
+            "created": [{"kind": "npm_host", "id": 57, "label": "NPM-host #57", "spec": "SPEC-MARKER"}],
+            "removed": [], "error": None, "undone_by": None, "todo": [], **kw}
+
+
+async def test_nieuwe_service_runs_in_de_export(authed):
+    """De laatste runs: soort, stand, stappen met hun stand en gemaskeerde fout, en wat nog te doen is. Niet de invoer,
+    de calls of wat een stap bewaarde om iets ongedaan te maken."""
+    g = await _group(authed)
+    sid = await _svc(authed, g, "link", "https://npm.lan", name="NPM")
+    secret = "NPM-actie-geheim-8c1e44"
+    agen, db = await _db()
+    svc = await db.get(Service, sid)
+    svc.secrets = encrypt_json({"username": "dashboard-acties@jbogaert.be", "password": secret})
+    stuck = _ns_run(9, status="bezig", error=None, todo=["hostname in config.yml"])
+    stuck["steps"][0] |= {"status": "fout", "detail": f"401 met wachtwoord {secret}"}
+    runs = [stuck, *[_ns_run(i) for i in range(8, 0, -1)]]
+    db.add(AppState(key="nieuwe_service", value={"runs": runs}))
+    await db.commit()
+    await agen.aclose()
+
+    r = await authed.get("/api/diagnose")
+    assert r.status_code == 200, r.text
+    assert secret not in r.text and "SPEC-MARKER" not in r.text and "POST http://npm/api/x" not in r.text
+    n = r.json()["nieuwe_service"]
+    assert n["echt"] == {"on": False, "at": None, "by": None} and n["runs"] == 9
+    assert [x["id"] for x in n["laatste"]] == ["ns-9", "ns-8", "ns-7", "ns-6", "ns-5"]
+    first = n["laatste"][0]
+    # "bezig" zonder taak in dit proces: onderbroken, zoals het venster het toont.
+    assert first["status"] == "onderbroken" and first["can_undo"] is True and "herstartte" in first["error"]
+    assert first["todo"] == ["hostname in config.yml"] and first["kind"] == "maken"
+    assert first["steps"] == [{"nr": 1, "key": "npm_host", "title": "Proxy host in NPM", "status": "fout",
+                               "fatal": True, "started_at": "a", "finished_at": "b",
+                               "detail": "401 met wachtwoord ***"}]
+    assert first["created"] == ["npm_host"] and first["removed"] == []
+    assert not {"input", "hash", "call", "spec"} & set(first)
+    # Aan: wie het aanzette en wanneer.
+    assert (await authed.put("/api/nieuweservice/echt", json={"on": True})).status_code == 200
+    assert (await _diagnose(authed))["nieuwe_service"]["echt"]["by"] == "jonas"
+
+
+async def test_noodplan_in_de_export(authed):
+    """Hoe het laatste noodplan liep, welke bronnen mislukten of oud zijn, en waarom de laatste poging mislukte. Niet
+    het document of de gegevens zelf."""
+    g = await _group(authed)
+    sid = await _svc(authed, g, "link", "https://pbs.lan", name="PBS")
+    secret = "PBS-token-geheim-3f9a71"
+    agen, db = await _db()
+    (await db.get(Service, sid)).secrets = encrypt_json({"username": "root@pam!dash", "password": secret})
+    old = "2026-09-01T06:00:00+00:00"
+    db.add(AppState(key="noodplan", value={
+        "v": 1, "at": "2026-10-12T06:00:00+00:00", "tried": "2026-10-13T06:00:00+00:00", "trigger": "week",
+        "by": None, "seconds": 12, "masked": 1, "masked_kinds": ["token"],
+        "running": {"at": "2026-10-13T06:00:00+00:00", "by": "worker", "pid": 4242},
+        "failed": {"at": "2026-10-13T06:00:00+00:00", "error": f"ConnectError: 401 token {secret}"},
+        "sources": [{"key": "pve:1", "name": "pve50", "ok": True},
+                    {"key": "pbs:2", "name": "pbs-pi", "ok": False, "error": f"401 PBSAPIToken=root@pam!dash:{secret}",
+                     "from": old},
+                    {"key": "pve:3", "name": "pve-tweede-tegel", "ok": False, "covered": True, "error": "dubbel"},
+                    {"key": "pbs:4", "name": "pbs-nieuw", "ok": False, "error": "time-out", "from": None,
+                     "failing_since": "2026-10-12T06:00:00+00:00"}],
+        "offsite": {"enabled": True, "dir": "/mnt/share", "files": ["noodplan.html"], "error": "Permission denied",
+                    "at": old},
+        "data": {"clusters": [{"name": "NOODPLAN-DATA-MARKER", "nodes": [{"name": "pve50"}], "guests": []}],
+                 "pbs": [], "npm": {"domains": 3}}}))
+    await db.commit()
+    await agen.aclose()
+
+    r = await authed.get("/api/diagnose")
+    assert r.status_code == 200, r.text
+    assert secret not in r.text and "NOODPLAN-DATA-MARKER" not in r.text and "4242" not in r.text
+    n = r.json()["noodplan"]
+    assert n["at"] == "2026-10-12T06:00:00+00:00" and n["tried"] == "2026-10-13T06:00:00+00:00"
+    assert n["failed"]["at"] == "2026-10-13T06:00:00+00:00" and n["failed"]["error"].startswith("ConnectError: 401")
+    assert n["loopt"] is False and n["running"] == {"at": "2026-10-13T06:00:00+00:00", "by": "worker"}
+    assert n["bronnen"] == 4
+    assert [(x["key"], x["covered"], x["from"]) for x in n["bronnen_fout"]] == [
+        ("pbs:2", None, old), ("pve:3", True, None), ("pbs:4", None, None)]
+    assert "***" in n["bronnen_fout"][0]["error"] and n["bronnen_fout"][2]["failing_since"]
+    assert n["offsite"] == {"enabled": True, "at": old, "error": "Permission denied"}
+    assert n["aantallen"]["nodes"] == 1 and n["aantallen"]["domains"] == 3
+    keys = {p["key"] for p in n["problemen"]}
+    assert "bron:pbs:2" in keys and "masker" in keys
+    assert n["masked"] == 1 and n["masked_kinds"] == ["token"]
+
+
+async def test_zonder_noodplan_of_nieuwe_service(authed):
+    d = await _diagnose(authed)
+    assert d["nieuwe_service"] == {"echt": {"on": False, "at": None, "by": None}, "runs": 0, "laatste": []}
+    n = d["noodplan"]
+    assert n["at"] is None and n["failed"] is None and n["bronnen"] == 0 and n["aantallen"] is None
+    assert n["problemen"] == []
+
+
+async def test_ring_van_de_browser(authed):
+    """De laatste fouten en mislukte verzoeken uit de browser: begrensd, het pad zonder querystring, en gemaskeerd met
+    dezelfde bekende geheimen. Alleen in het bestand: niet in de database of in het auditlog."""
+    g = await _group(authed)
+    sid = await _svc(authed, g, "link", "https://plex.lan", name="Plex")
+    secret = "Plex-geheim-wachtwoord-91b2"
+    agen, db = await _db()
+    (await db.get(Service, sid)).secrets = encrypt_json({"username": "admin", "password": secret})
+    await db.commit()
+    await agen.aclose()
+    ring = [{"kind": "api", "at": f"2026-10-17T10:{i % 60:02d}:00.000Z", "method": "GET", "path": f"/api/x/{i}",
+             "status": 503, "msg": f"BROWSER-MARKER {i}"} for i in range(60)]
+    ring += [
+        "geen object",
+        {"kind": "fout", "at": "2026-10-17T11:00:00.000Z", "msg": f"TypeError: login met {secret} mislukte",
+         "waar": "/assets/index-abc.js?v=1:12:5"},
+        {"kind": "belofte", "at": "2026-10-17T11:00:01.000Z", "msg": "x" * 20000 + " einde"},
+        {"kind": "api", "at": "2026-10-17T11:00:02.000Z", "method": "POST",
+         "path": "/api/auth/oidc/callback?code=GEHEIME-CODE-123#frag", "status": True, "msg": "mislukt"},
+        {"kind": "iets anders", "msg": "w" * 900, "extra": "veld"},
+    ]
+    r = await authed.post("/api/diagnose", json={"frontend": 31, "browser": ring})
+    assert r.status_code == 200, r.text
+    assert r.headers["content-disposition"].startswith('attachment; filename="homepage-diagnose-')
+    raw = r.text
+    assert secret not in raw
+    assert "GEHEIME-CODE-123" not in raw and "frag" not in raw and "veld" not in raw
+    d = r.json()
+    assert d["versie"]["frontend_nieuws"] == 31
+    b = d["browser"]
+    assert b["aantal"] == 64 and len(b["regels"]) == diagnose.BROWSER
+    assert b["regels"][0]["msg"] == "BROWSER-MARKER 14"
+    err, prom, api, odd = b["regels"][-4:]
+    assert err == {"kind": "fout", "at": "2026-10-17T11:00:00.000Z", "msg": "TypeError: login met *** mislukte",
+                   "waar": "/assets/index-abc.js"}
+    assert prom["kind"] == "belofte" and prom["msg"] == "[20000 tekens] einde"
+    assert api == {"kind": "api", "at": "2026-10-17T11:00:02.000Z", "msg": "mislukt", "method": "POST",
+                   "path": "/api/auth/oidc/callback", "status": None}
+    assert odd["kind"] == "?" and len(odd["msg"]) <= diagnose.BROWSER_TEXT and odd["at"] is None
+    assert d["gemaskeerd"]["bekend"] >= 1
+
+    # Nergens bewaard: niet in AppState, de tijdlijn of het auditlog (daar alleen hoeveel regels).
+    agen, db = await _db()
+    states = json.dumps([st.value for st in (await db.execute(select(AppState))).scalars()])
+    events = json.dumps([[e.title, e.body] for e in (await db.execute(select(Event))).scalars()])
+    [a] = (await db.execute(select(AuditLog).where(AuditLog.action == "diagnose_download"))).scalars().all()
+    await agen.aclose()
+    for text in (states, events, json.dumps(a.detail)):
+        assert "BROWSER-MARKER" not in text and secret not in text
+    assert a.detail["browser"] == 65 and "browser" in a.detail["sections"]
+
+    # Te veel regels of een onbekend veld: geweigerd, niet half verwerkt.
+    r = await authed.post("/api/diagnose", json={"browser": [{}] * (4 * diagnose.BROWSER + 1)})
+    assert r.status_code == 422
+    assert (await authed.post("/api/diagnose", json={"browser": [], "x": 1})).status_code == 422
+    assert (await authed.post("/api/diagnose", json={"frontend": -1})).status_code == 422
 
 
 # --- geheimen --------------------------------------------------------------------------------------------------

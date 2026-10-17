@@ -255,6 +255,12 @@ test('diagnose: één bestand onder !, zonder wachtwoord', async () => {
   expect(d.versie).toBeTruthy()
   expect(text).not.toContain(PASS)
   expect(text).not.toContain(secret)
+  // Ook wat de browser zelf bijhield: het verkeerde wachtwoord van daarnet was een mislukt verzoek.
+  expect(d.browser.regels.some((r) => r.kind === 'api' && r.method === 'POST' && r.path === '/api/auth/login' &&
+    r.status === 401)).toBe(true)
+  expect(text).not.toContain('fout-wachtwoord-123')
+  expect(d.nieuwe_service.echt.on).toBe(false)
+  expect(d.noodplan).toBeTruthy()
   await win.getByRole('button', { name: 'Sluiten' }).click()
   await expect(win).toHaveCount(0)
 })

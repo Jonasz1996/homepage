@@ -648,8 +648,12 @@ Later, deel 3 (Authentik en gsm):
   beschrijven. Erin: de versies (ook PostgreSQL, TimescaleDB en de databasemigratie), de processen, de
   aandachtslijst, de instellingen-checklist, de fouten per tegel en per achtergrondtaak, webhooks, gsm's,
   zelfherstelregels, installaties van de laatste 7 dagen, cronjobs met een fout, de laatste 50 meldingen,
-  tijdlijnregels en audit-regels, wat de proefmodus zou doen, en de laatste 200 logregels van de API, de worker en de
-  syslog-ontvanger. Elk geheim dat het dashboard bewaart, is gemaskeerd (ook url-gecodeerd en als base64), net als
+  tijdlijnregels en audit-regels, wat de proefmodus zou doen (de nieuwste proeven met hun plan, begrensd), de laatste
+  5 runs van Nieuwe service (stappen, fouten en wat nog te doen is, zonder de invoer of de calls), hoe het laatste
+  noodplan liep (wanneer, waarom het mislukte, welke bronnen mislukten of oud zijn; niet het document), de laatste
+  200 logregels van de API, de worker en de syslog-ontvanger, en de laatste 50 fouten in je browser (niet opgevangen
+  fouten, verworpen beloftes en mislukte API-verzoeken, het pad zonder querystring). Die laatste houdt alleen het
+  tabblad bij (sessionStorage); ze gaan alleen mee met de diagnose en de server bewaart ze niet. Elk geheim dat het dashboard bewaart, is gemaskeerd (ook url-gecodeerd en als base64), net als
   alles wat op een token, sleutel of wachtwoord lijkt. IP-adressen, namen en gebruikersnamen staan er nog in: kijk
   het bestand na voor je het deelt. Vraagt je 2FA-code en staat van buitenaf uit zoals configuraties downloaden.
   De processen houden hun laatste logregels zelf bij, want de gebruiker `homepage` kan journald niet lezen. Wat vlak

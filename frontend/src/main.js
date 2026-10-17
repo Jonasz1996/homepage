@@ -2,8 +2,11 @@ import { mount } from 'svelte'
 import './app.css'
 import App from './App.svelte'
 import { startBackground } from './lib/background.js'
+import { install as watchErrors } from './lib/errorring.js'
 import { startRipples, startTilt } from './lib/fx.js'
 
+// Eerst: de laatste fouten in deze browser bijhouden, voor de diagnose.
+watchErrors(window)
 startBackground(document.getElementById('bg'))
 
 // Na een update bestaan de oude stukjes code niet meer: dan de pagina één keer herladen in plaats van niets te doen.

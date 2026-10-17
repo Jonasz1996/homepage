@@ -86,6 +86,7 @@ def test_welke_routes_van_buitenaf_uit_staan():
         "PATCH /api/apis/calls/{call_id}": "acties", "POST /api/apis/{api_id}/try": "acties",
         "POST /api/apis/bulk": "acties",
         "GET /api/configs/versions/{vid}/download": "downloads", "GET /api/diagnose": "downloads",
+        "POST /api/diagnose": "downloads",
         "GET /api/noodplan/document": "downloads",
         "POST /api/cron/jobs/{job_id}/monitor": "terminal", "POST /api/logs/rollout": "terminal",
         "GET /api/ssh/ready": "terminal", "POST /api/ssh/pin/check": "terminal", "POST /api/ssh/pin": "terminal",
