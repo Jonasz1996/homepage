@@ -2,10 +2,12 @@
 mislukte apt-get update (er is niets geïnstalleerd) draait niets terug."""
 
 import os
+import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
 
 import httpx
+import pytest
 from sqlalchemy import select
 
 from app.models import AppState, Notification, SshHost, UpdateRun
@@ -53,7 +55,7 @@ def _script(tmp_path, tool: str, update_rc: int, install_rc: int, packages=None)
     bin_dir, log = tmp_path / "bin", tmp_path / "calls"
     bin_dir.mkdir(exist_ok=True)
     fake = bin_dir / tool
-    fake.write_text(f'#!/bin/sh\necho "$*" >> {log}\ncase "$1" in update) exit {update_rc};; esac\nexit {install_rc}\n')
+    fake.write_text(f'#!/bin/sh\necho "$*" >> {log}\ncase " $* " in *" update "*) exit {update_rc};; esac\nexit {install_rc}\n')
     fake.chmod(0o755)
     r = subprocess.run(["/bin/sh", "-c", upgrade.script(packages)], env={"PATH": str(bin_dir)}, capture_output=True,
                        text=True, stdin=subprocess.DEVNULL, timeout=30)
@@ -66,7 +68,8 @@ def test_script_zegt_apart_dat_apt_get_update_mislukte(tmp_path):
     # Pakketlijst niet te verversen: een eigen regel en exitcode 99, en er wordt niets geïnstalleerd.
     rc, out, calls = _script(tmp_path, "apt-get", 100, 0, ["openssl"])
     assert rc == upgrade.NOUPDATE_RC and "@@NOUPDATE apt-get" in out.splitlines()
-    assert calls == ["update -q"]
+    # Ook een bron die niet antwoordt (DNS weg) is een fout, geen waarschuwing: zie test_dns_weg_is_een_mislukte_...
+    assert calls == ["-o APT::Update::Error-Mode=any update -q"]
     # Een fout tijdens het installeren: 100 zoals apt-get zelf, zonder die regel.
     rc, out, calls = _script(tmp_path, "apt-get", 0, 100, ["openssl"])
     assert rc == 100 and "@@NOUPDATE" not in out and len(calls) == 2 and "install --only-upgrade openssl" in calls[1]
@@ -78,6 +81,36 @@ def test_script_zegt_apart_dat_apt_get_update_mislukte(tmp_path):
     assert rc == upgrade.NOUPDATE_RC and "@@NOUPDATE apk" in out.splitlines() and calls == ["update -q"]
     rc, out, calls = _script(tmp_path, "apk", 0, 3)
     assert rc == 3 and "@@NOUPDATE" not in out and calls == ["update -q", "upgrade"]
+
+
+@pytest.mark.skipif(not shutil.which("apt-get"), reason="geen apt-get op deze machine")
+def test_dns_weg_is_een_mislukte_apt_get_update(tmp_path):
+    """Met de echte apt-get: een mirror die niet te vinden is (DNS weg), zoals 's nachts. apt-get update meldt dat
+    standaard alleen als waarschuwing (exitcode 0); dan zou het script verder gaan, apt-get install faalt bij het
+    downloaden met 100 en de nachtelijke run draait terug. Het script moet hier zelf stoppen: niets geïnstalleerd."""
+    real = shutil.which("apt-get")
+    d = tmp_path / "apt"
+    for sub in ("state/lists/partial", "cache/archives/partial", "parts", "prefs"):
+        (d / sub).mkdir(parents=True)
+    # .invalid bestaat nooit: geen netwerk nodig, en altijd dezelfde fout.
+    (d / "sources.list").write_text("deb http://mirror.bestaat-niet.invalid/debian bookworm main\n")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    wrap = bin_dir / "apt-get"
+    # De echte apt-get, maar met eigen mappen: niets van deze machine wordt gelezen of veranderd.
+    wrap.write_text(f"""#!/bin/sh
+PATH=/usr/sbin:/usr/bin:/sbin:/bin exec {real} -o Dir::State={d}/state -o Dir::Cache={d}/cache \\
+  -o Dir::Etc::SourceList={d}/sources.list -o Dir::Etc::SourceParts={d}/parts -o Dir::Etc::PreferencesParts={d}/prefs \\
+  -o Dir::State::status=/dev/null -o APT::Sandbox::User=root -o Debug::NoLocking=true -o Acquire::Retries=0 \\
+  -o Acquire::http::Proxy=DIRECT -o Acquire::http::Timeout=10 "$@"
+""")
+    wrap.chmod(0o755)
+    r = subprocess.run(["/bin/sh", "-c", upgrade.script(["openssl"])], env={"PATH": str(bin_dir)},
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120)
+    out = r.stdout + r.stderr
+    assert "mirror.bestaat-niet.invalid" in out, out
+    assert r.returncode == upgrade.NOUPDATE_RC and "@@NOUPDATE apt-get" in r.stdout.splitlines(), out
+    assert upgrade.nothing_installed(r.returncode, "apt-get") == NOTHING
 
 
 def test_alleen_exitcode_en_regel_samen_betekenen_niets_geinstalleerd():

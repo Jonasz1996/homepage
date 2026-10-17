@@ -180,7 +180,7 @@ zegt het venster dat in plaats van "werkt". Dit stel je één keer in:
 8. **Echt uitvoeren**: staat standaard uit, ook na een update van een bestaande installatie. Tot dan werkt alleen de
    proef (maken, opruimen en ongedaan maken weigeren, ! → instellingen zegt "alleen als proef"). Klopt een proef op
    je echte systemen, zet dan bovenaan in het venster **echt uitvoeren** aan; dat vraagt je 2FA-code, kan niet van
-   buitenaf en staat in het auditlog. Uitzetten kan altijd, zonder code.
+   buitenaf en staat in het auditlog. Uitzetten vraagt geen code (van buitenaf kan ook dat niet).
 
 Fase 5, SSH-terminal (knop `>_` in de titelbalk):
 
@@ -295,7 +295,8 @@ Later, deel 1 (tijdlijn, weekrapport en updates):
   Fysieke nodes kunnen geen snapshot: dat moet je bewust kiezen (*toch installeren zonder snapshot*). Optioneel
   *alleen beveiligingsupdates*. Onder *'s nachts*: elke nacht om een gekozen uur de beveiligingsupdates, alleen waar
   een snapshot kan; gaat het mis, dan draait de homepage zelf terug. Mislukt alleen `apt-get update` (mirror of DNS
-  weg), dan is er niets geïnstalleerd: de run mislukt met een melding, maar er wordt niet teruggedraaid. Eigen
+  weg, ook als maar één bron niet antwoordt), dan is er niets geïnstalleerd: de run mislukt met een melding, maar er
+  wordt niet teruggedraaid. Eigen
   snapshots (`hp-upd-…`) van geslaagde installaties, en van runs die niets installeerden, verdwijnen na 7 dagen
   (instelbaar). Het dashboard zelf (zijn eigen CT of VM, herkend aan zijn eigen adressen, MAC-adres en hostname) komt
   nooit 's nachts of samen met andere machines aan de beurt: stopt apt daar halverwege (PostgreSQL of de API

@@ -65,6 +65,9 @@ GUEST_RE = re.compile(r"^pve:(\d+):(lxc|qemu)/(\d+)$")
 # installeren, dus 100 alleen zegt niet of er al iets veranderde. Zo'n run mislukt, maar wordt nooit teruggedraaid
 # (dat zou weggooien wat de machine sinds de snapshot schreef). De snapshot is dan niet nodig ("unused") en gaat weg
 # met het gewone opruimen, zoals die van een geslaagde run.
+# Een mirror die niet antwoordt of DNS die weg is, is voor apt-get update standaard maar een waarschuwing (exitcode 0):
+# dan zou apt-get install pas bij het downloaden mislukken, met 100, en draaide de nachtelijke run toch terug.
+# APT::Update::Error-Mode=any maakt er een fout van (apt 2.2 en nieuwer; een oudere apt negeert de onbekende optie).
 NOUPDATE = "@@NOUPDATE"
 NOUPDATE_RC = 99
 NOUPDATE_TOOLS = ("apt-get", "apk")
@@ -73,7 +76,7 @@ INSTALL = r"""
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none
 O="-y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
 if command -v apt-get >/dev/null 2>&1; then
-  apt-get update -q </dev/null || { echo "@@NOUPDATE apt-get"; exit 99; }
+  apt-get -o APT::Update::Error-Mode=any update -q </dev/null || { echo "@@NOUPDATE apt-get"; exit 99; }
   if [ -n "$PKGS" ]; then
     apt-get $O install --only-upgrade $PKGS </dev/null
   elif command -v pveversion >/dev/null 2>&1 || command -v proxmox-backup-manager >/dev/null 2>&1; then
@@ -977,7 +980,7 @@ def install_summary(packages: list[str] | None, scanned: dict | None, checked_at
         apk = "apk update, dan apk upgrade"
     return (f"{what}; de machine kiest zelf:\n  met apt: {apt}\n  met apk: {apk}\n"
             "  lukt apt-get update (of apk update) niet, bv. mirror of DNS weg, dan stopt het meteen: niets "
-            "geïnstalleerd")
+            "geïnstalleerd (ook als maar één bron niet antwoordt)")
 
 
 async def describe_batch(db: AsyncSession, http: HttpClients, keys: list[tuple[str, str | None]], *,
