@@ -69,18 +69,21 @@ noodplan.md               in een browser en druk het af; noodplan.md is hetzelfd
 
 Bij de laatste kopie: {versions}.
 
-Terugzetten op een nieuwe container (na install.sh):
+Terugzetten op een nieuwe container, als root, na install.sh (dat zet PostgreSQL, TimescaleDB en de code klaar). Na
+een mislukte update in dezelfde container is het homepage-terugzetten.
   cd /opt/homepage/backend
   ../.venv/bin/python -m app.health.selfcheck decrypt /pad/naar/secret.key.enc > /etc/homepage/secret.key
   chown root:homepage /etc/homepage/secret.key && chmod 640 /etc/homepage/secret.key
   systemctl stop homepage-api homepage-worker homepage-syslog
-  sudo -u postgres dropdb homepage && sudo -u postgres createdb -O homepage homepage
-  # Met TimescaleDB (staat standaard aan): {ts_hint}
-  sudo -u postgres psql -d homepage -c "CREATE EXTENSION timescaledb{ts_version}" -c "SELECT timescaledb_pre_restore()"
-  sudo -u postgres pg_restore -d homepage /pad/naar/homepage-JJJJ-MM-DD.dump
-  sudo -u postgres psql -d homepage -c "SELECT timescaledb_post_restore()"
-  # Zonder TimescaleDB: alleen de pg_restore-regel.
+  runuser -u postgres -- dropdb --force --if-exists homepage
+  runuser -u postgres -- createdb -O homepage homepage
+{ts_voor}  runuser -u postgres -- pg_restore -d homepage /pad/naar/homepage-JJJJ-MM-DD.dump 2> /root/pg_restore.log
+{ts_na}  homepage-herstelfouten /root/pg_restore.log    # zonder uitvoer: in orde
+  # De database bijwerken tot de versie van de code, zoals install.sh dat doet:
+  set -a; . /etc/homepage/homepage.env; set +a
+  runuser -u homepage -- env HOMEPAGE_DATABASE_URL="$HOMEPAGE_DATABASE_URL" ../.venv/bin/alembic upgrade head
   systemctl start homepage-api homepage-worker homepage-syslog
+Loopt er iets mis: homepage-diagnose zet alles samen in één bestand.
 """
 
 
@@ -304,21 +307,43 @@ def decrypt_key(blob: dict, passphrase: str) -> bytes:
 
 # --- kopie buiten de container --------------------------------------------------------------------------------
 
+# De stappen voor TimescaleDB, rond pg_restore: de extensie in de versie van de kopie (en welke er hier klaarstaan).
+TS_VOOR = """  # {uitleg} Welke versies hier klaarstaan:
+  runuser -u postgres -- psql -X -c "SELECT version FROM pg_available_extension_versions WHERE name = 'timescaledb'"
+{pakket}  runuser -u postgres -- psql -X -d homepage -c "CREATE EXTENSION timescaledb VERSION '{ts}'" -c "SELECT timescaledb_pre_restore()"
+"""
+TS_NA = """  runuser -u postgres -- psql -X -d homepage -c "SELECT timescaledb_post_restore()"
+"""
+
+
 def readme(versions: dict) -> str:
     """LEESMIJ.txt bij de kopie buiten de container, met de versies van PostgreSQL en TimescaleDB erin: een dump met
-    TimescaleDB zet je terug met dezelfde versie van de extensie, en net die weet je niet meer als de container weg is."""
+    TimescaleDB zet je terug met dezelfde versie van de extensie, en net die weet je niet meer als de container weg is.
+    Dezelfde opdrachten als in homepage-terugzetten (deploy/terugzetten.sh), plus de migraties van install.sh: de code
+    op een nieuwe container is meestal nieuwer dan de kopie."""
     pg, ts = versions.get("postgresql"), versions.get("timescaledb")
     if not pg:
         return README.format(keep=OFFSITE_KEEP_DAYS, versions="versies van PostgreSQL en TimescaleDB onbekend",
-                             ts_hint="dezelfde versie als bij de back-up.", ts_version="")
+                             ts_voor=TS_VOOR.format(
+                                 uitleg="Heeft de kopie TimescaleDB nodig (homepage-dumpinfo /pad/naar/homepage-JJJJ-"
+                                        "MM-DD.dump zegt dan timescaledb),\n  # dan in dezelfde versie als bij de "
+                                        "back-up; anders de regels met timescaledb overslaan.",
+                                 pakket="", ts="<versie>"),
+                             ts_na=TS_NA)
     if not ts:
-        return README.format(keep=OFFSITE_KEEP_DAYS, versions=f"PostgreSQL {pg}, zonder TimescaleDB",
-                             ts_hint="niet bij deze back-up.", ts_version="")
+        return README.format(keep=OFFSITE_KEEP_DAYS, versions=f"PostgreSQL {pg}, zonder TimescaleDB", ts_voor="",
+                             ts_na="")
+    major = pg.split(".")[0]
     return README.format(
         keep=OFFSITE_KEEP_DAYS, versions=f"PostgreSQL {pg} met TimescaleDB {ts}",
-        ts_hint=f"dezelfde versie als bij de back-up, {ts}. Elke versie van TimescaleDB\n  # werkt maar met "
-                f"een paar versies van PostgreSQL: neem bij voorkeur ook PostgreSQL {pg.split('.')[0]}.",
-        ts_version=f" VERSION '{ts}'")
+        ts_voor=TS_VOOR.format(
+            uitleg=f"TimescaleDB in dezelfde versie als bij de back-up, {ts}.",
+            pakket=f"  # Staat {ts} er niet bij: apt install timescaledb-2-{ts}-postgresql-{major} (draait hier een "
+                   f"andere versie van\n  # PostgreSQL, zie pg_lsclusters, dan die in plaats van {major}). Elke versie "
+                   f"van TimescaleDB werkt maar met een paar\n  # versies van PostgreSQL: neem bij voorkeur ook "
+                   f"PostgreSQL {major}.\n",
+            ts=ts),
+        ts_na=TS_NA)
 
 
 def offsite_copy(src: Path, dst: Path, key_blob: dict | None, now: datetime, versions: dict | None = None) -> dict:

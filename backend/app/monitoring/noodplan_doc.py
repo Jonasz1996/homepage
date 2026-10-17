@@ -753,7 +753,8 @@ def _dashboard(value: dict, d: dict) -> list[tuple]:
     enter = [Code(f"pct enter {me.get('vmid')}"), f" op {me.get('node')}"] if me else ["de container"]
     scen = [
         ["Een update liep mis: in de container (", *enter, ") ", Code("homepage-terugzetten --lijst"), ", dan ",
-         Code("homepage-terugzetten"), "."],
+         Code("homepage-terugzetten"), ". Wat er misliep, staat samen in één bestand met ", Code("homepage-diagnose"),
+         "."],
         f"De container is weg: zet {label(me) if me else 'de VM/CT van het dashboard'} terug uit PBS (sectie 5, het "
         "commando staat in de tabel)."
         + (f" Is PBS ook weg: een nieuwe container en de dump uit {dash.get('offsite_dir')} (hieronder)."
