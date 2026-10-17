@@ -26,7 +26,7 @@ from ..models import AppState, AuditLog, Service, Session, SshHost, SshKey, User
 from ..monitoring.checks import HttpClients
 from .. import ssh_pin
 from ..ssh_discovery import apply, discover
-from ..ssh_login import DEFAULTS_KEY, login_for
+from ..ssh_login import DEFAULTS_KEY, geweigerd, login_for, methode, waarom
 from ..security import encrypt, token_id
 
 router = APIRouter(prefix="/api/ssh", tags=["ssh"])
@@ -34,6 +34,7 @@ log = logging.getLogger("homepage.ssh")
 
 IDLE_SECONDS = 30 * 60
 CONNECT_TIMEOUT = 10
+HOSTKEY_WAIT = 120  # zo lang wachten we op Aanvaarden of Weigeren
 KEEPALIVE = 30
 SNIPPETS_KEY = "ssh_snippets"
 clients = HttpClients()
@@ -421,10 +422,17 @@ async def terminal(ws: WebSocket, host_id: int, cols: int = 100, rows: int = 30,
         if not h.host_key:
             # Op het antwoord wachten duurt tot twee minuten: zonder open transactie.
             await db.commit()
-            await _send(ws, t="status", m=f"Hostsleutel ophalen van {h.host}:{h.port}…")
+            # Dit is nog geen aanmelden: wie hier blijft hangen, denkt anders dat we een login-sleutel zoeken.
+            await _send(ws, t="status", m=f"Eerste verbinding: vingerafdruk (hostsleutel) van de server "
+                                          f"{h.host}:{h.port} ophalen, nog voor het aanmelden…")
             server_key = await asyncio.wait_for(asyncssh.get_server_host_key(h.host, h.port), CONNECT_TIMEOUT)
             await _send(ws, t="hostkey", fp=server_key.get_fingerprint("sha256"), alg=server_key.get_algorithm())
-            answer = json.loads(await asyncio.wait_for(ws.receive_text(), 120))
+            try:
+                answer = json.loads(await asyncio.wait_for(ws.receive_text(), HOSTKEY_WAIT))
+            except asyncio.TimeoutError:
+                await _send(ws, t="error", m="Hostsleutel niet bevestigd binnen 2 minuten: verbind opnieuw")
+                await ws.close()
+                return
             if answer.get("t") != "accept":
                 await _send(ws, t="error", m="Hostsleutel niet aanvaard")
                 await ws.close()
@@ -436,7 +444,7 @@ async def terminal(ws: WebSocket, host_id: int, cols: int = 100, rows: int = 30,
 
         # Eigen sleutel of wachtwoord van de host; anders de standaard login. Gebruiker leeg = standaard.
         login = await login_for(db, h)
-        await _send(ws, t="status", m=f"Verbinden met {login.username}@{h.host}…")
+        await _send(ws, t="status", m=f"Verbinden met {login.username}@{h.host} ({methode(login)})…")
         conn = await asyncio.wait_for(asyncssh.connect(
             h.host, port=h.port, username=login.username, keepalive_interval=KEEPALIVE,
             known_hosts=([asyncssh.import_public_key(h.host_key)], [], []),
@@ -451,11 +459,11 @@ async def terminal(ws: WebSocket, host_id: int, cols: int = 100, rows: int = 30,
         await ws.close()
         return
     except asyncssh.PermissionDenied:
-        await _send(ws, t="error", m="Aanmelden geweigerd: controleer gebruiker, sleutel of wachtwoord")
+        await _send(ws, t="error", m=geweigerd(login))
         await ws.close()
         return
     except (OSError, asyncio.TimeoutError, asyncssh.Error) as e:
-        await _send(ws, t="error", m=f"Verbinden mislukt: {getattr(e, 'reason', None) or e or type(e).__name__}")
+        await _send(ws, t="error", m=f"Verbinden mislukt: {waarom(e, h.host, h.port, CONNECT_TIMEOUT)}")
         await ws.close()
         return
     except WebSocketDisconnect:

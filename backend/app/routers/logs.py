@@ -17,7 +17,7 @@ from ..db import get_db, timed_out
 from ..deps import audit, confirm_silence, current_session, current_user, event, recent_auth
 from ..models import LogEntry, LogRule, Session, SshHost, User
 from ..monitoring.webpush import LEVELS
-from ..ssh_login import login_for
+from ..ssh_login import login_for, waarom
 from ..syslog import rollout
 from .monitoring import _aware
 
@@ -278,7 +278,7 @@ async def run_rollout(data: RolloutIn, request: Request, user: User = Depends(re
     except asyncssh.HostKeyNotVerifiable as e:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Hostsleutel klopt niet meer, verbinding geweigerd") from e
     except (OSError, asyncssh.Error, TimeoutError) as e:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"SSH mislukt: {getattr(e, 'reason', None) or e}") from e
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"SSH mislukt: {waarom(e, h.host, h.port)}") from e
     output = (str(result.stdout or "") + str(result.stderr or ""))[-20000:]
     await audit(db, request, user, "syslog_rollout", host=h.name, containers=data.containers,
                 exit_status=result.exit_status)

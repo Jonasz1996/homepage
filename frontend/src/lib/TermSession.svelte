@@ -223,7 +223,9 @@
     <div class="hk card">
       <p>Eerste verbinding met <b>{host.name}</b> ({host.host}). Klopt deze hostsleutel?</p>
       <code class="fp">{hostkey.alg} {hostkey.fp}</code>
-      <p class="hint">Controleer op de server met <code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code>.</p>
+      <p class="hint">Dit is de vingerafdruk van de server zelf, geen login-sleutel. Na Aanvaarden meldt het dashboard
+        aan met de gebruiker en het wachtwoord of de sleutel van deze host (✎), anders met ⚙ standaard.
+        Controleer op de server met <code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code>.</p>
       <div class="row">
         <button class="btn" onclick={() => answer(true)}>Aanvaarden</button>
         <button class="btn alt" onclick={() => answer(false)}>Weigeren</button>

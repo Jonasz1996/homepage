@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 import asyncssh
 
 from .models import SshHost
-from .ssh_login import Login
+from .ssh_login import Login, geweigerd, waarom
 
 CONNECT_TIMEOUT = 15
 
@@ -33,9 +33,9 @@ async def connect(h: SshHost, login: Login, keepalive: int | None = None):
     except asyncssh.HostKeyNotVerifiable as e:
         raise SshFail("Hostsleutel klopt niet meer, verbinding geweigerd") from e
     except asyncssh.PermissionDenied as e:
-        raise SshFail(f"Aanmelden als {login.username} geweigerd: controleer de standaard login (⚙ standaard)") from e
+        raise SshFail(geweigerd(login)) from e
     except (OSError, asyncssh.Error, asyncio.TimeoutError) as e:
-        raise SshFail(f"SSH naar {h.host} mislukt: {getattr(e, 'reason', None) or e or type(e).__name__}") from e
+        raise SshFail(f"SSH naar {h.host} mislukt: {waarom(e, h.host, h.port, CONNECT_TIMEOUT)}") from e
     async with conn:
         yield conn
 

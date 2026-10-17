@@ -24,7 +24,7 @@ from ..db import job_lock
 from ..deps import event
 from ..integrations import IntegrationError, build
 from ..models import AppState, Service, SshHost
-from ..ssh_login import Login, defaults, login_for
+from ..ssh_login import Login, defaults, login_for, waarom
 from .checks import HttpClients
 
 log = logging.getLogger("homepage.worker")
@@ -211,7 +211,7 @@ async def from_ssh(h: SshHost, login: Login) -> list[dict]:
     except asyncssh.HostKeyNotVerifiable:
         return [target(key, h.name, "host", h.service_id, error="Hostsleutel klopt niet meer, verbinding geweigerd")]
     except (OSError, asyncssh.Error, TimeoutError) as e:
-        return [target(key, h.name, "host", h.service_id, error=f"SSH mislukt: {getattr(e, 'reason', None) or e}")]
+        return [target(key, h.name, "host", h.service_id, error=f"SSH mislukt: {waarom(e, h.host, h.port)}")]
     out = []
     for kind, name, packages in parse_output(str(result.stdout or "")):
         if kind == "host":
