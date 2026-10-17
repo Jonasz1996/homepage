@@ -577,6 +577,15 @@ test('nieuwe service: echt uitvoeren aan met 2FA, uit zonder', async () => {
   await expect(win.getByRole('button', { name: 'opruimen', exact: true })).toHaveCount(0)
   await page.keyboard.press('Escape')
   await expect(win).toHaveCount(0)
+  // Aan en uit staan allebei in het auditlog, met een leesbare naam.
+  await menu('Instellingen', 'Beveiliging')
+  const sec = page.getByRole('dialog', { name: 'cat /var/log/auth.log' })
+  await sec.getByRole('tab', { name: 'auditlog' }).click()
+  const rows = sec.locator('tr', { hasText: 'nieuwe service: echt uitvoeren aan/uit' })
+  await expect(rows.filter({ hasText: 'on=true' })).toHaveCount(1)
+  await expect(rows.filter({ hasText: 'on=false' })).toHaveCount(1)
+  await page.keyboard.press('Escape')
+  await expect(sec).toHaveCount(0)
 })
 
 test('nieuwe service op de gsm', async () => {
