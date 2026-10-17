@@ -66,14 +66,33 @@ def geweigerd(login: Login) -> str:
     return f"Aanmelden als {login.username} geweigerd ({methode(login)}): {', '.join(tips)}?"
 
 
-def waarom(e: BaseException, host: str, port: int, timeout: float | None = None) -> str:
+class TcpVolger(asyncssh.SSHClient):
+    """Als client_factory: onthoudt of de TCP-verbinding er kwam. Dan antwoordt de server, ook als het aanmelden
+    daarna te lang duurt, en is een time-out geen firewall."""
+
+    def __init__(self):
+        self.tcp = False
+
+    def __call__(self):
+        return self
+
+    def connection_made(self, conn):
+        self.tcp = True
+
+
+def waarom(e: BaseException, host: str, port: int, timeout: float | None = None, antwoordt: bool = False) -> str:
     """Waarom een SSH-verbinding mislukte, leesbaar. Een time-out heeft zelf geen tekst."""
+    within = f" binnen {timeout:g} s" if timeout else ""
     if isinstance(e, (TimeoutError, asyncio.TimeoutError)):
-        within = f" binnen {timeout:g} s" if timeout else ""
-        return (f"geen antwoord van {host}:{port}{within}. Draait SSH daar, en laat de firewall (bv. OPNsense) "
-                f"de homepage door naar dat IP op poort {port}?")
+        if antwoordt:
+            took = f"langer dan {timeout:g} s" if timeout else "te lang"
+            return (f"{host}:{port} antwoordt, maar het aanmelden duurde {took}. Is de server traag of overbelast, "
+                    "of wacht sshd op DNS (UseDNS) of PAM?")
+        return (f"geen antwoord van {host}:{port}{within}. Staat de machine aan, draait SSH daar, en laat de firewall "
+                f"(bv. OPNsense) de homepage door naar dat IP op poort {port}?")
     if isinstance(e, ConnectionRefusedError):
-        return f"{host}:{port} weigert de verbinding: daar draait geen SSH, of op een andere poort"
+        return (f"{host}:{port} weigert de verbinding: daar draait geen SSH (of op een andere poort), of een firewall "
+                "weigert de homepage")
     if isinstance(e, socket.gaierror):
         return f"de naam {host} is onbekend (DNS): gebruik het IP-adres"
     if isinstance(e, OSError) and e.errno in (errno.EHOSTUNREACH, errno.ENETUNREACH, errno.EHOSTDOWN):

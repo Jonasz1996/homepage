@@ -17,7 +17,7 @@ from ..db import get_db, timed_out
 from ..deps import audit, confirm_silence, current_session, current_user, event, recent_auth
 from ..models import LogEntry, LogRule, Session, SshHost, User
 from ..monitoring.webpush import LEVELS
-from ..ssh_login import login_for, waarom
+from ..ssh_login import TcpVolger, geweigerd, login_for, waarom
 from ..syslog import rollout
 from .monitoring import _aware
 
@@ -266,19 +266,27 @@ async def run_rollout(data: RolloutIn, request: Request, user: User = Depends(re
     login = await login_for(db, h)
     script = rollout.build(s.syslog_target, s.syslog_port, data.containers)
     command = "sh -s" if login.username == "root" else "sudo -n sh -s"
+    tcp, connected = TcpVolger(), False
     try:
         async with asyncio.timeout(600):
             async with asyncssh.connect(
                 h.host, port=h.port, username=login.username,
                 known_hosts=([asyncssh.import_public_key(h.host_key)], [], []),
                 client_keys=[login.key] if login.key else None, password=login.password,
-                agent_path=None, config=None, connect_timeout=10,
+                agent_path=None, config=None, connect_timeout=10, client_factory=tcp,
             ) as conn:
+                connected = True
                 result = await conn.run(command, input=script, check=False)
     except asyncssh.HostKeyNotVerifiable as e:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Hostsleutel klopt niet meer, verbinding geweigerd") from e
+    except asyncssh.PermissionDenied as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, geweigerd(login)) from e
     except (OSError, asyncssh.Error, TimeoutError) as e:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"SSH mislukt: {waarom(e, h.host, h.port)}") from e
+        if connected and isinstance(e, TimeoutError):
+            why = "verbonden, maar de uitrol liep langer dan 10 min"
+        else:
+            why = waarom(e, h.host, h.port, 10, tcp.tcp)
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"SSH mislukt: {why}") from e
     output = (str(result.stdout or "") + str(result.stderr or ""))[-20000:]
     await audit(db, request, user, "syslog_rollout", host=h.name, containers=data.containers,
                 exit_status=result.exit_status)

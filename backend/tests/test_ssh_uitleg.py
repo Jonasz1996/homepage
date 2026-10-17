@@ -13,17 +13,24 @@ import pytest
 
 from app import ssh_exec
 from app.models import SshHost
+from app.monitoring import updates
 from app.routers import ssh as ssh_router
 from app.ssh_login import Login, geweigerd, methode, waarom
 
-from .test_ssh import WS, _cookie, sshd  # noqa: F401 (fixture)
+from .test_ssh import WS, Server, _cookie, sshd  # noqa: F401 (fixture)
 
 
 def test_waarom_heeft_altijd_een_reden():
     t = waarom(asyncio.TimeoutError(), "192.168.0.105", 22, 10)
-    assert t.startswith("geen antwoord van 192.168.0.105:22 binnen 10 s.") and "firewall" in t and "poort 22" in t
+    assert t.startswith("geen antwoord van 192.168.0.105:22 binnen 10 s. Staat de machine aan")
+    assert "firewall" in t and "poort 22" in t
     assert waarom(TimeoutError(), "h", 2222).startswith("geen antwoord van h:2222. ")
-    assert "weigert de verbinding" in waarom(ConnectionRefusedError(111, "Connect call failed"), "h", 22)
+    # De server antwoordde (TCP lukte), alleen het aanmelden duurde te lang: dan is het geen firewall.
+    t = waarom(TimeoutError(), "192.168.0.105", 22, 10, antwoordt=True)
+    assert t.startswith("192.168.0.105:22 antwoordt, maar het aanmelden duurde langer dan 10 s.")
+    assert "firewall" not in t
+    t = waarom(ConnectionRefusedError(111, "Connect call failed"), "h", 22)
+    assert "weigert de verbinding" in t and "of een firewall weigert de homepage" in t
     assert "is onbekend (DNS)" in waarom(socket.gaierror(-2, "Name or service not known"), "ct.lan", 22)
     for no in (errno.EHOSTUNREACH, errno.ENETUNREACH):
         assert "niet bereikbaar (geen route)" in waarom(OSError(no, "Connect call failed"), "10.9.9.9", 22)
@@ -115,8 +122,9 @@ async def test_geen_antwoord_zegt_ip_poort_en_firewall(authed, monkeypatch):
     await ws.open()
     await ws.json()
     err = await ws.json()
-    assert err == {"t": "error", "m": "Verbinden mislukt: geen antwoord van 127.0.0.1:22 binnen 0.2 s. Draait SSH "
-                                      "daar, en laat de firewall (bv. OPNsense) de homepage door naar dat IP op poort 22?"}
+    assert err == {"t": "error", "m": "Verbinden mislukt: geen antwoord van 127.0.0.1:22 binnen 0.2 s. Staat de "
+                                      "machine aan, draait SSH daar, en laat de firewall (bv. OPNsense) de homepage "
+                                      "door naar dat IP op poort 22?"}
 
 
 async def test_niet_bevestigd_is_geen_netwerkfout(authed, sshd, monkeypatch):  # noqa: F811
@@ -150,3 +158,104 @@ async def test_ssh_exec_zegt_waarom(monkeypatch):
         async with ssh_exec.connect(h, Login("root", None, "pw", own=True)):
             pass
     assert str(e.value).startswith("Aanmelden als root geweigerd (wachtwoord van deze host): klopt het wachtwoord")
+
+
+async def test_typen_of_vergroten_bij_de_kaart_is_geen_antwoord(authed, sshd):  # noqa: F811
+    """Vroeger telde elk bericht als antwoord: vergroten was Weigeren, en een toets liet de verbinding crashen."""
+    hid = await _host(authed, sshd["port"], password="goed")
+    ws = WS(f"/api/ssh/ws/{hid}", _cookie(authed))
+    await ws.open()
+    await ws.json()
+    assert (await ws.json())["t"] == "hostkey"
+    await ws.send_text({"t": "r", "c": 120, "r": 40})
+    await ws.send_bytes(b"yes\r")
+    await ws.to_app.put({"type": "websocket.receive", "text": "geen json"})
+    await ws.send_text([1, 2])
+    await ws.send_text({"t": "accept"})
+    assert (await ws.json())["m"].startswith("Verbinden met root@127.0.0.1")
+    assert (await ws.json())["t"] == "ready"
+    await ws.close()
+
+
+class Disc(asyncssh.SSHServer):
+    """Sluit meteen met "no more auth methods" (code 14): asyncssh maakt daar PermissionDenied van, al bij de
+    hostsleutel en dus voor we onze gegevens stuurden."""
+
+    def connection_made(self, conn):
+        asyncio.get_running_loop().call_soon(conn.disconnect, 14, "no more auth methods")
+
+
+async def test_geweigerd_bij_de_hostsleutel_crasht_niet(authed):
+    srv = await asyncssh.create_server(Disc, "127.0.0.1", 0, server_host_keys=[asyncssh.generate_private_key("ssh-ed25519")])
+    try:
+        hid = await _host(authed, srv.sockets[0].getsockname()[1], password="x")
+        ws = WS(f"/api/ssh/ws/{hid}", _cookie(authed))
+        await ws.open()
+        await ws.json()
+        err = await ws.json()
+        assert err == {"t": "error", "m": "Verbinden mislukt: no more auth methods"}
+        await asyncio.wait_for(ws.task, 5)
+    finally:
+        srv.close()
+
+
+class Slow(Server):
+    async def validate_password(self, username, password):
+        await asyncio.sleep(2)
+        return False
+
+
+@pytest.fixture
+async def slow_sshd():
+    key = asyncssh.generate_private_key("ssh-ed25519")
+    srv = await asyncssh.create_server(Slow, "127.0.0.1", 0, server_host_keys=[key],
+                                       process_factory=lambda p: p.exit(0))
+    yield {"port": srv.sockets[0].getsockname()[1], "host_key": key.export_public_key().decode()}
+    srv.close()
+
+
+async def test_traag_aanmelden_is_geen_firewall(authed, slow_sshd, monkeypatch):
+    monkeypatch.setattr(ssh_router, "CONNECT_TIMEOUT", 0.5)
+    hid = await _host(authed, slow_sshd["port"], password="goed")
+    ws = WS(f"/api/ssh/ws/{hid}", _cookie(authed))
+    await ws.open()
+    await ws.json()
+    await ws.json()
+    await ws.send_text({"t": "accept"})
+    await ws.json()
+    err = await ws.json()
+    assert err["m"].startswith(f"Verbinden mislukt: 127.0.0.1:{slow_sshd['port']} antwoordt, maar het aanmelden "
+                               "duurde langer dan 0.5 s.")
+
+    # Hetzelfde via ssh_exec (cron, apt, diff, ...), waar de hostsleutel al bekend is.
+    monkeypatch.setattr(ssh_exec, "CONNECT_TIMEOUT", 0.5)
+    h = SshHost(name="ct", host="127.0.0.1", port=slow_sshd["port"], host_key=slow_sshd["host_key"])
+    with pytest.raises(ssh_exec.SshFail) as e:
+        async with ssh_exec.connect(h, Login("root", None, "goed")):
+            pass
+    assert "antwoordt, maar het aanmelden duurde langer dan 0.5 s" in str(e.value)
+
+
+def _sleeping(process):
+    async def run():
+        await asyncio.sleep(5)
+        process.exit(0)
+    return run()
+
+
+@pytest.fixture
+async def busy_sshd():
+    key = asyncssh.generate_private_key("ssh-ed25519")
+    srv = await asyncssh.create_server(Server, "127.0.0.1", 0, server_host_keys=[key], process_factory=_sleeping)
+    yield {"port": srv.sockets[0].getsockname()[1], "host_key": key.export_public_key().decode()}
+    srv.close()
+
+
+async def test_updates_traag_script_en_fout_wachtwoord(busy_sshd, monkeypatch):
+    monkeypatch.setattr(updates, "SSH_TIMEOUT", 0.5)
+    h = SshHost(id=7, name="pve50", host="127.0.0.1", port=busy_sshd["port"], host_key=busy_sshd["host_key"],
+                updates="host")
+    [t] = await updates.from_ssh(h, Login("root", None, "goed"))
+    assert t["error"] == "SSH mislukt: verbonden, maar het nakijken liep langer dan 0 min"
+    [t] = await updates.from_ssh(h, Login("root", None, "fout", own=True))
+    assert t["error"].startswith("Aanmelden als root geweigerd (wachtwoord van deze host): klopt het wachtwoord")

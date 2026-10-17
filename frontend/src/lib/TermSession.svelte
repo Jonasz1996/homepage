@@ -53,16 +53,18 @@
         try { await requestReauth(); connect() } catch { term.write(red('Bevestiging geannuleerd')); setState('fout') }
       }
       else if (m.t === 'error' && m.m.startsWith('buiten:')) { term.write(red(outsideMessage(m.m))); setState('fout'); signalOutside(m.m) }
-      else if (m.t === 'error') { term.write(red(m.m)); setState('fout') }
+      else if (m.t === 'error') { hostkey = null; term.write(red(m.m)); setState('fout') }
       else if (m.t === 'closed') { term.write('\r\n' + dim(m.m)); setState('gesloten') }
     }
     ws.onclose = () => {
       if (sock !== ws) return
+      hostkey = null
       if (phase === 'verbonden' || phase === 'verbinden') { term.write('\r\n' + dim('Verbinding gesloten')); setState('gesloten') }
     }
   }
 
   function answer(ok) {
+    if (ws?.readyState !== 1) { term.write(red('Verbinding al gesloten: verbind opnieuw')); hostkey = null; return }
     ws.send(JSON.stringify({ t: ok ? 'accept' : 'reject' }))
     term.write(dim(ok ? `Hostsleutel ${hostkey.fp} aanvaard en bewaard.` : 'Hostsleutel geweigerd.'))
     hostkey = null
