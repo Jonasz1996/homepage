@@ -294,6 +294,32 @@ db_verbindingen() {
   fi
 }
 
+# pg_dump van <database> naar <bestand>, eerst naar <bestand>.tmp. De diensten staan dan stil, de achtergrondtaken van
+# TimescaleDB (comprimeren, opruimen) niet: vervangen ze een chunk net als pg_dump begint, dan stopt het met "relation
+# ... does not exist". Dat is pech met het moment, dus nog eens, tot 3 keer (zoals homepage-backup.sh). Elke andere
+# fout meteen.
+kopie_maken() {
+  local db=$1 f=$2 poging fout
+  for poging in 1 2 3; do
+    if fout=$(runuser -u postgres -- pg_dump -Fc -f "$f.tmp" "$db" 2>&1); then
+      [ -z "$fout" ] || printf '%s\n' "$fout" >&2
+      mv "$f.tmp" "$f"
+      return
+    fi
+    case "$fout" in
+      *'relation "'*'" does not exist'*|*"could not open relation with OID"*|*"cache lookup failed for relation"*) ;;
+      *) break ;;
+    esac
+    if [ "$poging" -lt 3 ]; then
+      printf '%s\nEen tabel veranderde tijdens de kopie (TimescaleDB), opnieuw.\n' "$fout" >&2
+      sleep "${KOPIE_WACHT:-5}"
+    fi
+  done
+  printf '%s\n' "$fout" >&2
+  rm -f "$f.tmp"
+  return 1
+}
+
 # Wacht tot PostgreSQL verbindingen aanneemt (hoogstens 30 s).
 pg_klaar() {
   for _ in $(seq 30); do
@@ -512,8 +538,7 @@ $((NODIG >> 20)) MB nodig. Wat plaats inneemt: du -sh $BK/* /var/lib/postgresql"
   systemctl stop homepage-api homepage-worker homepage-syslog
   if [ -z "$ZELFDE" ]; then
     DUMP="$BK/voor-update-$(date +%Y%m%d-%H%M%S).dump"
-    if ! runuser -u postgres -- sh -c "pg_dump -Fc homepage > '$DUMP.tmp' && mv '$DUMP.tmp' '$DUMP'"; then
-      rm -f "$DUMP.tmp"
+    if ! kopie_maken homepage "$DUMP"; then
       afbreken "Kopie van de database mislukt."
     fi
     echo "Kopie van de database: $DUMP"

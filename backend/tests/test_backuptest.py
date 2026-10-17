@@ -100,6 +100,57 @@ def test_weigert_de_echte_database(tmp_path):
     assert r.returncode == 2 and "andere" in r.stderr and not (tmp_path / sc.RESTORE_FILE).exists()
 
 
+# Wat pg_dump zegt als de compressie van TimescaleDB een chunk vervangt tussen zijn lijst en zijn LOCK TABLE (zo in
+# de CI gezien, met TimescaleDB 2.30 op PostgreSQL 17).
+VERDWENEN = 'pg_dump: error: query failed: ERROR:  relation "_timescaledb_internal._hyper_1_1_chunk" does not exist'
+
+
+def nep_pg_dump(d: Path, fouten: list[str]) -> Path:
+    """Een pg_dump die eerst een half bestand schrijft (na -f) en dan de volgende fout uit de lijst geeft; zijn de
+    fouten op, dan een dump. Hoe vaak het liep, staat in d/pg_dump.n."""
+    d.mkdir(exist_ok=True)
+    (d / "pg_dump.fouten").write_text("".join(f"{f}\n" for f in fouten))
+    (d / "pg_dump").write_text(f"""#!/bin/sh
+n=$(( $(cat "{d}/pg_dump.n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "{d}/pg_dump.n"
+while [ $# -gt 0 ]; do [ "$1" = -f ] && f=$2; shift; done
+echo half > "$f"
+fout=$(sed -n "${{n}}p" "{d}/pg_dump.fouten")
+[ -z "$fout" ] || {{ echo "$fout" >&2; exit 1; }}
+echo dump > "$f"
+""")
+    (d / "pg_dump").chmod(0o755)
+    return d
+
+
+@pytest.mark.parametrize("fouten, ok, keer", [
+    ([VERDWENEN, VERDWENEN], True, 3),
+    ([VERDWENEN] * 3, False, 3),
+    (["pg_dump: error: could not write to output file: No space left on device"], False, 1),
+])
+def test_back_up_opnieuw_als_timescaledb_een_chunk_vervangt(tmp_path, fouten, ok, keer):
+    """De achtergrondtaken van TimescaleDB lopen door tijdens de nachtelijke dump: een chunk die net verdween is pech
+    met het moment (nog eens, tot 3 keer), elke andere fout niet."""
+    fake = nep_pg_dump(tmp_path / "bin", fouten)
+    (fake / "psql").write_text("#!/bin/sh\nexit 0\n")
+    (fake / "systemctl").write_text("#!/bin/sh\necho active\n")
+    for f in ("psql", "systemctl"):
+        (fake / f).chmod(0o755)
+    bk = tmp_path / "bk"
+    bk.mkdir()
+    r = subprocess.run(["sh", str(DEPLOY / "homepage-backup.sh")], capture_output=True, text=True, timeout=30,
+                       env={**os.environ, "PATH": f"{fake}:{os.environ['PATH']}", "BACKUP_DIR": str(bk),
+                            "BACKUP_WACHT": "0"})
+    assert (r.returncode == 0) == ok, r.stderr
+    assert (fake / "pg_dump.n").read_text().strip() == str(keer)
+    dumps = list(bk.iterdir())
+    if ok:
+        assert len(dumps) == 1 and dumps[0].read_text() == "dump\n" and re.fullmatch(r"homepage-[\d-]+\.dump", dumps[0].name)
+        assert r.stderr.count("opnieuw") == 2
+    else:
+        assert dumps == [] and fouten[-1] in r.stderr
+        assert r.stderr.count("opnieuw") == keer - 1
+
+
 # --- met PostgreSQL ---------------------------------------------------------------------------------------------
 
 def _major(exe: Path | str) -> int:

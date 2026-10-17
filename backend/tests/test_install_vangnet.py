@@ -17,6 +17,7 @@ import pytest
 from sqlalchemy.engine import make_url
 
 from .conftest import TEST_DB
+from .test_backuptest import VERDWENEN, nep_pg_dump
 from .test_install_lan import SCRIPT, _functie
 
 pytestmark = pytest.mark.skipif(shutil.which("bash") is None or shutil.which("python3") is None,
@@ -314,3 +315,39 @@ def test_api_niet_na_een_update_zegt_hoe_terug(tmp_path):
     assert "Of terug naar de vorige versie: homepage-terugzetten." in r.stdout
     # De kopie en haar versie blijven, de code ook.
     assert dump.exists() and Path(f"{dump}.versie").exists()
+
+
+# --- de kopie van voor een update (en van voor het terugzetten) ------------------------------------------------------
+
+def _uit(script: str, naam: str) -> str:
+    lines = (Path(SCRIPT_PATH()).parent / script).read_text().splitlines()
+    start = lines.index(f"{naam}() {{")
+    return "\n".join(lines[start:lines.index("}", start) + 1])
+
+
+@pytest.mark.parametrize("script, vooraf", [("install.sh", ""), ("terugzetten.sh", 'pg() { runuser -u postgres -- "$@"; }')])
+@pytest.mark.parametrize("fouten, ok, keer", [
+    ([VERDWENEN], True, 2),
+    ([VERDWENEN] * 3, False, 3),
+    (["pg_dump: error: schijf vol"], False, 1),
+])
+def test_kopie_opnieuw_als_timescaledb_een_chunk_vervangt(tmp_path, script, vooraf, fouten, ok, keer):
+    """De diensten staan stil tijdens de kopie, de achtergrondtaken van TimescaleDB niet: zoals homepage-backup.sh."""
+    fake = nep_pg_dump(tmp_path / "bin", fouten)
+    _fake(fake, runuser='#!/bin/sh\n[ "$1" = -u ] && shift 2\n[ "$1" = -- ] && shift\nexec "$@"\n')
+    f = tmp_path / "voor-update.dump"
+    r = _bash("\n".join(["set -euo pipefail", vooraf, _uit(script, "kopie_maken"),
+                          f'if kopie_maken homepage {shlex.quote(str(f))}; then echo gelukt; else echo mislukt; fi']),
+              {**os.environ, "PATH": f"{fake}:{os.environ['PATH']}", "KOPIE_WACHT": "0"})
+    assert r.stdout.strip() == ("gelukt" if ok else "mislukt"), r.stderr
+    assert (fake / "pg_dump.n").read_text().strip() == str(keer)
+    assert not f.with_name(f.name + ".tmp").exists()
+    assert (f.read_text() == "dump\n") if ok else not f.exists()
+    assert r.stderr.count("opnieuw") == keer - 1 and (ok or fouten[-1] in r.stderr)
+
+
+def test_kopie_overal_met_kopie_maken():
+    install, terug = (Path(SCRIPT_PATH()).parent / s for s in ("install.sh", "terugzetten.sh"))
+    assert 'kopie_maken homepage "$DUMP"' in install.read_text() and 'kopie_maken "$DB" "$SAFE"' in terug.read_text()
+    # Dezelfde functie, op hoe ze postgres worden na.
+    assert _uit("install.sh", "kopie_maken").replace("runuser -u postgres --", "pg") == _uit("terugzetten.sh", "kopie_maken")

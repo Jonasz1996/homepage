@@ -76,7 +76,7 @@ een mislukte update in dezelfde container is het homepage-terugzetten.
   chown root:homepage /etc/homepage/secret.key && chmod 640 /etc/homepage/secret.key
   systemctl stop homepage-api homepage-worker homepage-syslog
   runuser -u postgres -- dropdb --force --if-exists homepage
-  runuser -u postgres -- createdb -O homepage homepage
+  runuser -u postgres -- createdb -T template0 -O homepage homepage
 {ts_voor}  runuser -u postgres -- pg_restore -d homepage /pad/naar/homepage-JJJJ-MM-DD.dump 2> /root/pg_restore.log
 {ts_na}  homepage-herstelfouten /root/pg_restore.log    # zonder uitvoer: in orde
   # De database bijwerken tot de versie van de code, zoals install.sh dat doet:

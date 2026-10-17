@@ -116,7 +116,8 @@ fi
 
 # Terugzetten, met dezelfde eigenaar als de echte database.
 OWNER=$(q -d "$LIVE" -c "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database()")
-if ! e=$(createdb -O "${OWNER:-postgres}" "$TEST" 2>&1); then
+# Uit template0, zoals pg_restore het wil: in template1 kan TimescaleDB al staan (in een andere versie).
+if ! e=$(createdb -T template0 -O "${OWNER:-postgres}" "$TEST" 2>&1); then
   klaar 0 "testdatabase aanmaken mislukt: $e"
 fi
 # Of de dump TimescaleDB nodig heeft, zegt homepage-dumpinfo (net als bij homepage-terugzetten).

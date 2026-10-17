@@ -23,7 +23,7 @@ DEPLOY = BACKEND.parent / "deploy"
 SCRIPT = (DEPLOY / "terugzetten.sh").read_text().splitlines()
 pytestmark = pytest.mark.skipif(TEST_DB.startswith("sqlite"), reason="productie draait op PostgreSQL")
 
-FUNCTIES = ("say", "warn", "pg", "q", "qp", "afbreken", "onderbroken", "plaats", "voorbereiden", "bewaren",
+FUNCTIES = ("say", "warn", "pg", "q", "qp", "afbreken", "onderbroken", "plaats", "voorbereiden", "kopie_maken", "bewaren",
             "db_terugzetten", "herstel_uitleg", "bij_fout", "uitvoeren")
 DIENSTEN = "homepage-api homepage-worker homepage-syslog"
 
@@ -168,7 +168,7 @@ async def test_terugzetten_met_timescaledb_en_een_grote_dump(tmp_path):
             pytest.skip("TimescaleDB staat niet op deze server")
         # Zoals een echte database: een hypertable met chunks, en zoveel tabellen dat de inhoudstafel ruim groter is
         # dan de buffer van een pipe (64 kB).
-        o.sql("CREATE EXTENSION timescaledb", *VOOR,
+        o.sql("CREATE EXTENSION IF NOT EXISTS timescaledb", *VOOR,
               "CREATE TABLE metingen (ts timestamptz NOT NULL, v int)",
               "SELECT create_hypertable('metingen', 'ts', chunk_time_interval => INTERVAL '1 day')",
               "INSERT INTO metingen SELECT now() - n * INTERVAL '1 day', n FROM generate_series(1, 10) n",
@@ -211,7 +211,7 @@ async def test_voorbereiden_weigert_voor_er_iets_stilvalt(tmp_path):
     async with aparte_database("tz_weiger") as url:
         o = Omgeving(tmp_path, url, _pgbin(url))
         ts = o.ts_beschikbaar()
-        o.sql(*(["CREATE EXTENSION timescaledb"] if ts else []), *VOOR)
+        o.sql(*(["CREATE EXTENSION IF NOT EXISTS timescaledb"] if ts else []), *VOOR)
         o.maak_dump()
         o.sql(*NA)
         good = o.dump.read_bytes()
@@ -263,7 +263,7 @@ async def test_fout_na_het_weggooien_zegt_hoe_het_terug_moet(tmp_path):
     async with aparte_database("tz_weg") as url:
         o = Omgeving(tmp_path, url, _pgbin(url))
         ts = o.ts_beschikbaar()
-        o.sql(*(["CREATE EXTENSION timescaledb"] if ts else []), *VOOR)
+        o.sql(*(["CREATE EXTENSION IF NOT EXISTS timescaledb"] if ts else []), *VOOR)
         o.maak_dump({"timescaledb": ts} if ts else None)
         o.sql(*NA)
         kapot = tmp_path / "kapot.sh"

@@ -103,7 +103,7 @@ voorbereiden() {
     # geïnstalleerd?
     proef="${DB}_terugzetten_proef"
     pg dropdb --if-exists --force "$proef"
-    pg createdb "$proef"
+    pg createdb -T template0 "$proef"
     if ! e=$(pg psql -XAtq -v ON_ERROR_STOP=1 -d "$proef" -c "CREATE EXTENSION timescaledb VERSION '$TS'" 2>&1); then
       pg dropdb --if-exists --force "$proef" || true
       wel=$(qp -c "SELECT string_agg(version, ', ' ORDER BY version) FROM pg_available_extension_versions
@@ -144,6 +144,32 @@ voorbereiden() {
   fi
 }
 
+# pg_dump van <database> naar <bestand>, eerst naar <bestand>.tmp. De diensten staan dan stil, de achtergrondtaken van
+# TimescaleDB (comprimeren, opruimen) niet: vervangen ze een chunk net als pg_dump begint, dan stopt het met "relation
+# ... does not exist". Dat is pech met het moment, dus nog eens, tot 3 keer (zoals homepage-backup.sh). Elke andere
+# fout meteen.
+kopie_maken() {
+  local db=$1 f=$2 poging fout
+  for poging in 1 2 3; do
+    if fout=$(pg pg_dump -Fc -f "$f.tmp" "$db" 2>&1); then
+      [ -z "$fout" ] || printf '%s\n' "$fout" >&2
+      mv "$f.tmp" "$f"
+      return
+    fi
+    case "$fout" in
+      *'relation "'*'" does not exist'*|*"could not open relation with OID"*|*"cache lookup failed for relation"*) ;;
+      *) break ;;
+    esac
+    if [ "$poging" -lt 3 ]; then
+      printf '%s\nEen tabel veranderde tijdens de kopie (TimescaleDB), opnieuw.\n' "$fout" >&2
+      sleep "${KOPIE_WACHT:-5}"
+    fi
+  done
+  printf '%s\n' "$fout" >&2
+  rm -f "$f.tmp"
+  return 1
+}
+
 # De database van nu bewaren als voor-terugzetten-*.dump, met haar versies ernaast (om ze zelf terug te zetten, zie
 # herstel_uitleg). Deed een vorige poging dat al (SAFE), dan is de database al (deels) teruggezet: die kopie is de
 # goede.
@@ -154,7 +180,7 @@ bewaren() {
     return
   fi
   SAFE="$BK/voor-terugzetten-$(date +%Y%m%d-%H%M%S).dump"
-  pg sh -c "pg_dump -Fc '$DB' > '$SAFE.tmp' && mv '$SAFE.tmp' '$SAFE'"
+  kopie_maken "$DB" "$SAFE"
   printf 'commit=%s\nversie=%s\ntimescaledb=%s\n' "$NU_COMMIT" "$NU" "$TS_NU" > "$SAFE.versie"
   echo "$SAFE"
   # Alleen deze kopie blijft staan.
@@ -175,7 +201,8 @@ db_terugzetten() {
   fi
   STAP=weg
   pg dropdb --force --if-exists "$DB"
-  pg createdb -O "$EIGENAAR" "$DB"
+  # Uit template0, zoals pg_restore het wil: in template1 kan TimescaleDB al staan (in een andere versie).
+  pg createdb -T template0 -O "$EIGENAAR" "$DB"
   if [ -n "$TS" ]; then
     q -c "CREATE EXTENSION timescaledb VERSION '$TS'" -c "SELECT timescaledb_pre_restore()" >/dev/null \
       || afbreken "TimescaleDB $TS klaarzetten mislukt."
@@ -200,7 +227,7 @@ herstel_uitleg() {
   ts=$(sed -n 's/^timescaledb=//p' "$SAFE.versie" 2>/dev/null | tail -1 || true)
   commit=$(sed -n 's/^commit=//p' "$SAFE.versie" 2>/dev/null | tail -1 || true)
   echo "  runuser -u postgres -- dropdb --force --if-exists $DB"
-  echo "  runuser -u postgres -- createdb -O $EIGENAAR $DB"
+  echo "  runuser -u postgres -- createdb -T template0 -O $EIGENAAR $DB"
   [ -z "$ts" ] || echo "  runuser -u postgres -- psql -X -d $DB -c \"CREATE EXTENSION timescaledb VERSION '$ts'\"" \
     "-c \"SELECT timescaledb_pre_restore()\""
   echo "  runuser -u postgres -- pg_restore -d $DB $SAFE 2> /root/pg_restore.log"
