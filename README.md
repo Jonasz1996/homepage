@@ -438,7 +438,8 @@ Later, deel 3 (Authentik en gsm):
     versleuteld met een wachtzin die nergens bewaard wordt (scrypt + AES-GCM). Koppel er een NAS-share, PBS-opslag of
     USB-schijf aan, bv. `pct set <id> -mp0 /mnt/nas/homepage,mp=/mnt/homepage-backup` en
     `chown homepage: /mnt/homepage-backup` in de container, daarna `systemctl restart homepage-worker`. Terugzetten
-    staat in `LEESMIJ.txt` in die map, met de versies van PostgreSQL en TimescaleDB van de laatste kopie. Verandert
+    staat in `LEESMIJ.txt` in die map, met de versies van PostgreSQL en TimescaleDB van de laatste kopie (de extensie
+    komt terug in die versie) en daarna de migraties zoals install.sh ze draait. Verandert
     `secret.key` (bv. na een herinstallatie), stel dan de wachtzin opnieuw in: tot dan meldt de zelfcontrole dat de
     sleutel in de kopie verouderd is. Staat de kopie uit, dan stelt **!** ze voor; zit de CT al in een back-up van
     PBS, dan zitten de dumps en `secret.key` daar ook in en mag je dat punt negeren
@@ -642,7 +643,8 @@ Later, deel 3 (Authentik en gsm):
   alles wat op een token, sleutel of wachtwoord lijkt. IP-adressen, namen en gebruikersnamen staan er nog in: kijk
   het bestand na voor je het deelt. Vraagt je 2FA-code en staat van buitenaf uit zoals configuraties downloaden.
   De processen houden hun laatste logregels zelf bij, want de gebruiker `homepage` kan journald niet lezen. Wat vlak
-  voor een crash gebeurde, staat soms alleen in journald: `journalctl -u homepage-worker -n 200` als root
+  voor een crash gebeurde, staat soms alleen in journald: `journalctl -u homepage-worker -n 200` als root. Start het
+  dashboard zelf niet meer: `homepage-diagnose` in de container (zie Bijwerken)
 - **effecten** zoals in aiverslag: een achtergrond van punten en 0/1 die voor de muis wijken, een ripple op elke knop,
   bliksem en vonken bij een geslaagde actie (herstarten, wekken), een vuurbal met flits en schudden bij verwijderen
   en uitloggen, en een bliksem op het belletje als er een nieuwe storing binnenkomt. Uit te zetten met `Ctrl+K` →
@@ -972,7 +974,12 @@ Zo verloopt een update:
 2. is er niet genoeg plaats in `/var/backups/homepage` voor een kopie van de database, dan stopt het hier
 3. de diensten stoppen en het script maakt een kopie van de database (`voor-update-*.dump`, de laatste 2 blijven staan)
 4. het schakelt over op de nieuwe venv en frontend (de vorige blijven staan) en werkt de database bij
-5. de diensten starten weer
+5. het kijkt na of PostgreSQL genoeg verbindingen toelaat voor de diensten (`max_connections`, voor de pools uit
+   `HOMEPAGE_DB_POOL_*` plus wat marge). Is het te weinig, dan zet het die hoger en herstart het PostgreSQL, maar
+   alleen als de database in de container zelf draait; anders waarschuwt het
+6. de diensten starten weer, en het kijkt na of ze blijven draaien: de API via `/api/ping`, de worker en de
+   syslog-ontvanger zonder herstarten. Voor een dienst die niet draait, toont het het commando voor journald;
+   reageert de API niet, dan eindigt het script met een fout (de nieuwe versie blijft staan)
 
 Mislukt de kopie of het bijwerken van de database (of al iets daarvoor), dan wordt de update netjes afgebroken: de
 vorige versie van de code, de bibliotheken en de frontend komt terug, de database is niet veranderd (alle migraties
@@ -981,6 +988,16 @@ update opnieuw uit. Pas als de database bijgewerkt is, onthoudt het de nieuwe ve
 Een onderbroken update (Ctrl+C, de SSH-verbinding valt weg) wordt net zo afgebroken; was de database op dat moment
 al bijgewerkt, dan blijft de nieuwe versie staan en starten de diensten (voer de update dan nog eens uit).
 
+Alles wat het script toont, staat ook in `/var/log/homepage/install-<datum>.log` (de 10 nieuwste blijven).
+
+Loopt er iets mis, ook als het dashboard zelf niet start: `homepage-diagnose` in de container schrijft alles om het
+na te gaan in één bestand, `/root/homepage-diagnose-<datum>.txt` (alleen voor root leesbaar): de versies, de status
+en de laatste 100 regels uit journald van de drie diensten, PostgreSQL en nginx, `/api/ping` en `/api/healthz`,
+schijf en geheugen, PostgreSQL (`max_connections`, verbindingen, `alembic_version`), de back-ups en kopieën van voor
+een update, en het laatste install-log. Gemaskeerd zijn de waarden in `homepage.env` met SECRET, KEY, TOKEN of PASS
+in de naam, `secret.key`, de setup-code en wat in de logs op een token, sleutel of wachtwoord lijkt. IP-adressen,
+namen en gebruikersnamen staan er nog in: kijk het bestand na voor je het deelt.
+
 Na de update toont het dashboard één keer wat er nieuw is en wat je zelf moet instellen (later: `Ctrl+K` →
 "wat is er nieuw").
 
@@ -988,10 +1005,15 @@ Na de update toont het dashboard één keer wat er nieuw is en wat je zelf moet 
 van vlak voor die update en met de bibliotheken die die versie had (de venv van daarvoor blijft daarvoor staan). Wat
 sinds die update in het dashboard veranderde, gaat verloren; de database van daarvoor wordt eerst nog bewaard als
 `voor-terugzetten-*.dump` (alleen de laatste blijft staan). `homepage-terugzetten --lijst` toont welke kopieën er
-zijn. Stopt het terugzetten halverwege, bijvoorbeeld omdat de frontend niet gebouwd kon worden, los de fout op en
-voer het opnieuw uit. Het werkt vanaf de tweede update met deze versie van het script. Het keurt een teruggezette
-database af bij elke fout van `pg_restore` behalve de onschuldige over de extensie timescaledb
-(`homepage-herstelfouten`), en toont die fouten.
+zijn. Voor het iets stopt, kijkt het na wat kan mislukken: is de kopie leesbaar, is TimescaleDB hier geïnstalleerd
+in de versie van de kopie (die staat ernaast in `.versie`; bij een oudere kopie de versie die nu draait), en is er
+genoeg plaats. Zo niet, dan weigert het en is er niets veranderd. Stopt het terugzetten toch halverwege,
+bijvoorbeeld omdat de frontend niet gebouwd kon worden, dan zegt het hoe het erbij staat: is de database al weg,
+waar staat de bewaarde kopie en hoe zet je die zelf terug (met `runuser`). Zolang de database nog die van nu is,
+starten de diensten weer. Los de fout op en voer het opnieuw uit: het gaat verder met dezelfde bewaarde kopie. Het
+werkt vanaf de tweede update met deze versie van het script. Het keurt een teruggezette database af bij elke fout
+van `pg_restore` behalve de onschuldige over de extensie timescaledb (`homepage-herstelfouten`), en toont die
+fouten.
 
 Een release maken (voor `stabiel`): een tag `vX.Y.Z` op `main`, bv. `git tag v1.1.0 && git push origin v1.1.0`.
 
