@@ -290,8 +290,14 @@ Later, deel 1 (tijdlijn, weekrapport en updates):
   apt of is een service down, dan krijg je een melding en zet *terugdraaien* de machine terug naar de snapshot.
   Fysieke nodes kunnen geen snapshot: dat moet je bewust kiezen (*toch installeren zonder snapshot*). Optioneel
   *alleen beveiligingsupdates*. Onder *'s nachts*: elke nacht om een gekozen uur de beveiligingsupdates, alleen waar
-  een snapshot kan; gaat het mis, dan draait de homepage zelf terug. Eigen snapshots (`hp-upd-…`) van geslaagde
-  installaties verdwijnen na 7 dagen (instelbaar)
+  een snapshot kan; gaat het mis, dan draait de homepage zelf terug. Mislukt alleen `apt-get update` (mirror of DNS
+  weg), dan is er niets geïnstalleerd: de run mislukt met een melding, maar er wordt niet teruggedraaid. Eigen
+  snapshots (`hp-upd-…`) van geslaagde installaties, en van runs die niets installeerden, verdwijnen na 7 dagen
+  (instelbaar). Het dashboard zelf (zijn eigen CT of VM, herkend aan zijn eigen adressen, MAC-adres en hostname) komt
+  nooit 's nachts of samen met andere machines aan de beurt: stopt apt daar halverwege (PostgreSQL of de API
+  herstart), dan is er niemand meer om te melden of terug te draaien. Werk het apart bij in de console van de
+  container (`apt update && apt upgrade`), het dashboard zelf met `deploy/bootstrap.sh`. Alleen die machine aanvinken
+  kan ook; de proef zegt dan wat er mis kan gaan
 - **zelfherstel** (in het mini dashboard van een service): "als Plex 3 checks na elkaar down is, herstart CT 105".
   Acties: de knoppen van de integraties (Proxmox herstart of start een VM/CT, Portainer herstart een container) of
   via SSH `systemctl restart` / `docker restart`. Hoogstens 2 keer per uur (instelbaar tot 5), minstens 10 minuten
@@ -611,7 +617,8 @@ Later, deel 3 (Authentik en gsm):
     (`pct snapshot` via SSH op de node, of de Proxmox-API), het apt- of apk-commando (het volledige script staat
     erbij), welke services daarna nagekeken worden en hoe terugdraaien gaat. In `apt` → 's nachts tonen *proef van
     vannacht* en *wat zou er opgeruimd worden* wat de volgende nachtelijke run en het volgende opruimen zouden doen,
-    ook welke machines de nachtelijke run overslaat (fysieke machines en nodes, daar kan geen snapshot)
+    ook welke machines de nachtelijke run overslaat (fysieke machines en nodes, daar kan geen snapshot, en het
+    dashboard zelf)
   - **zelfherstel** (mini dashboard): per regel en in het formulier. Elke voorwaarde (aan, N× down, onderhoud,
     wachttijd, limiet per uur) en de call of het commando. De proef kijkt ook: via de Proxmox-API of de VM/CT nog
     bestaat en of een herstart een start wordt, in Portainer of de container nog bestaat, en via SSH of `sudo -n`

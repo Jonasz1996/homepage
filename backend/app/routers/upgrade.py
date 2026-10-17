@@ -50,8 +50,10 @@ def run_out(r: UpdateRun, output: bool = False) -> dict:
            "security_only": r.security_only, "snapshot": r.snapshot, "exit_code": r.exit_code,
            "reboot_needed": r.reboot_needed, "checks": r.checks, "error": r.error, "created_at": r.created_at,
            "started_at": r.started_at, "finished_at": r.finished_at, "rolled_back_at": r.rolled_back_at,
-           "can_rollback": bool(r.snapshot and r.snapshot.get("name") and not r.snapshot.get("removed_at")
-                                and r.status in ("ok", "fout", "services_down", "terugdraaien_mislukt"))}
+           # Niet bij een run die niets installeerde (apt-get update mislukte): terug zou alleen weggooien wat de
+           # machine sinds de snapshot schreef.
+           "can_rollback": (upgrade.needs_snapshot(r.snapshot)
+                            and r.status in ("ok", "fout", "services_down", "terugdraaien_mislukt"))}
     if output:
         out["output"] = r.output or ""
     return out
@@ -61,10 +63,9 @@ def run_out(r: UpdateRun, output: bool = False) -> dict:
 async def plans(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """Per machine uit het overzicht: kan installeren, en kan er een snapshot vooraf?"""
     st = await db.get(AppState, UPDATES_KEY)
-    out = {}
-    for t in (st.value.get("targets", []) if st else []):
-        out[t["key"]] = upgrade.plan_out(await upgrade.plan_for(db, t["key"], t["name"]))
-    return out
+    plans_ = [await upgrade.plan_for(db, t["key"], t["name"]) for t in (st.value.get("targets", []) if st else [])]
+    await upgrade.mark_self(db, plans_)
+    return {p.key: upgrade.plan_out(p) for p in plans_}
 
 
 @router.get("/runs")
@@ -103,7 +104,9 @@ async def _targets(db: AsyncSession, targets: list[str]) -> tuple[list[tuple[str
 async def install(body: InstallIn, request: Request, user: User = Depends(recent_auth),
                   db: AsyncSession = Depends(get_db)):
     keys, unknown = await _targets(db, body.targets)
-    runs, refused = await upgrade.create_runs(db, keys, body.security_only, body.snapshot, "manueel", user.id)
+    # Het dashboard zelf alleen als het de enige gekozen machine is (zie upgrade.mark_self).
+    runs, refused = await upgrade.create_runs(db, keys, body.security_only, body.snapshot, "manueel", user.id,
+                                              alone=len(dict.fromkeys(body.targets)) == 1)
     refused += unknown
     if runs:
         await audit(db, request, user, "updates_install", targets=[r.target_name for r in runs],
@@ -127,7 +130,7 @@ async def install(body: InstallIn, request: Request, user: User = Depends(recent
 async def install_proef(body: InstallIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     keys, unknown = await _targets(db, body.targets)
     return await upgrade.describe_batch(db, clients, keys, security_only=body.security_only, snapshot=body.snapshot,
-                                        trigger="manueel", refused=unknown)
+                                        trigger="manueel", refused=unknown, alone=len(dict.fromkeys(body.targets)) == 1)
 
 
 async def _rollback_run(db: AsyncSession, run_id: int) -> UpdateRun:

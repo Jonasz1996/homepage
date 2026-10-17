@@ -112,6 +112,8 @@
   let shown = $derived((data?.targets || []).filter((t) => !onlyOpen || t.count || t.error))
   let chosen = $derived(Object.keys(picked).filter((k) => picked[k]))
   let installable = $derived(shown.filter((t) => t.count && plans[t.key]?.can))
+  // "alles" laat het dashboard zelf weg: dat kan alleen apart (de server weigert het samen met andere machines).
+  let bulk = $derived(installable.filter((t) => !plans[t.key]?.self))
 </script>
 
 <Modal title="apt list --upgradable" {onclose} wide>
@@ -135,8 +137,8 @@
 
     {#if installable.length}
       <div class="inst">
-        <label class="chk"><input type="checkbox" checked={installable.every((t) => picked[t.key])}
-               onchange={(e) => { for (const t of installable) picked[t.key] = e.currentTarget.checked }} /> alles</label>
+        <label class="chk"><input type="checkbox" checked={bulk.length > 0 && bulk.every((t) => picked[t.key])}
+               onchange={(e) => { for (const t of bulk) picked[t.key] = e.currentTarget.checked }} /> alles</label>
         <label class="chk" title="Proxmox-snapshot vooraf, zodat je met één klik terug kan"><input type="checkbox" bind:checked={snapshot} /> snapshot vooraf</label>
         <label class="chk"><input type="checkbox" bind:checked={secOnly} /> alleen beveiligingsupdates</label>
         <span class="go">
@@ -161,7 +163,8 @@
           {#if t.count && p?.can}<input type="checkbox" class="pick" bind:checked={picked[t.key]} aria-label="{t.name} kiezen" />{/if}
           <button class="hd" onclick={() => (open[t.key] = !open[t.key])} disabled={!t.count}>
             <span class="nm"><b>{t.name}</b><small>{KIND[t.kind] || t.kind}{t.node ? ` op ${t.node}` : ''}{t.vmid ? ` · ${t.vmid}` : ''}</small>
-              {#if t.count && p?.can}<small class="snap" class:no={!p.snapshot} title={p.nosnap || ''}>{p.snapshot ? '◉ snapshot kan' : '○ geen snapshot'}</small>{/if}</span>
+              {#if t.count && p?.can}<small class="snap" class:no={!p.snapshot} title={p.nosnap || ''}>{p.snapshot ? '◉ snapshot kan' : '○ geen snapshot'}</small>{/if}
+              {#if p?.self}<small class="self" title={p.self}>het dashboard zelf: alleen apart, nooit 's nachts</small>{/if}</span>
             {#if t.error}<span class="msg">{t.error}</span>
             {:else}
               <span class="cnt" class:zero={!t.count}>{t.count ? `${t.count}${t.kind === 'docker' ? ' verouderd' : ''}` : 'bijgewerkt'}</span>
@@ -199,7 +202,7 @@
             <td><b>{r.name}</b>{#if r.trigger === 'auto'}<small class="m"> · 's nachts</small>{/if}{#if r.security_only}<small class="m"> · beveiliging</small>{/if}</td>
             <td>{when(r.started_at || r.created_at)}</td>
             <td class="st-{r.status}">{STATUS[r.status] || r.status}{#if r.reboot_needed && r.status === 'ok'}<small class="m"> · herstart nodig</small>{/if}</td>
-            <td><small>{r.snapshot?.name || (r.snapshot ? '…' : 'geen')}{r.snapshot?.removed_at ? ' (opgeruimd)' : ''}</small></td>
+            <td><small>{r.snapshot?.name || (r.snapshot ? '…' : 'geen')}{r.snapshot?.removed_at ? ' (opgeruimd)' : r.snapshot?.unused ? ' (niet nodig)' : ''}</small></td>
             <td class="acts">{#if r.can_rollback}<button class="mini danger" onclick={(e) => { e.stopPropagation(); rollback(r) }}>terugdraaien</button>
               <button class="mini" title="tonen wat terugdraaien zou doen" onclick={(e) => { e.stopPropagation(); proefRollback(r) }}>proef</button>{/if}</td>
           </tr>
@@ -225,7 +228,9 @@
       <label>om <input type="number" min="0" max="23" bind:value={cfg.hour} /> uur</label>
       <p class="hint small">Alleen op containers en VM's waar een snapshot kan (nooit op een fysieke node), alleen de pakketten die als
         beveiligingsupdate gemarkeerd zijn, één machine na de andere. Is een gekoppelde service daarna down of faalt apt, dan
-        draait de homepage zelf terug naar de snapshot en krijg je een melding.</p>
+        draait de homepage zelf terug naar de snapshot en krijg je een melding. Mislukt alleen apt-get update (mirror of
+        DNS weg), dan is er niets geïnstalleerd: een melding, maar niet terugdraaien. De container van het dashboard zelf
+        komt 's nachts nooit aan de beurt.</p>
       <label class="chk"><input type="checkbox" bind:checked={cfg.proef} /> alleen proef (niets installeren, alleen noteren wat er zou gebeuren)</label>
       <label>eigen snapshots van geslaagde installaties opruimen na <input type="number" min="1" max="90" bind:value={cfg.keep_days} /> dagen</label>
       <label class="chk"><input type="checkbox" bind:checked={cfg.cleanup_proef} /> snapshots opruimen: alleen proef</label>
@@ -278,6 +283,7 @@
   .nm small { color: var(--dim); font-size: 11.5px }
   .snap { margin-left: 8px; color: var(--ok) !important }
   .snap.no { color: var(--muted) !important }
+  .self { margin-left: 8px; color: var(--mid) !important }
   .why { font-size: 12px; color: var(--muted); margin: 0 12px 6px }
   .msg { color: var(--err); font-size: 12px; text-align: right }
   .cnt { color: var(--text-h); font-size: 12.5px }

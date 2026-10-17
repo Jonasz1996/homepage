@@ -15,11 +15,14 @@ opruimen zou doen, zonder het te doen. Ze bouwen hun commando's en calls met dez
 """
 
 import asyncio
+import ipaddress
 import logging
 import re
 import shlex
+import socket
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 import asyncssh
@@ -27,6 +30,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .. import proef
+from ..config import get_settings
 from ..deps import event, notify
 from ..integrations import IntegrationError, build
 from ..models import AppState, Service, SshHost, UpdateRun
@@ -56,12 +60,20 @@ ROLLBACK_TIMEOUT = 900
 NO_SECURITY = "geen beveiligingsupdates meer open"
 PKG_RE = re.compile(r"^[a-z0-9][a-z0-9+.\-]*(:[a-z0-9]+)?$")
 GUEST_RE = re.compile(r"^pve:(\d+):(lxc|qemu)/(\d+)$")
+# Lukt het verversen van de pakketlijst niet (mirror of DNS weg), dan is er nog niets geïnstalleerd. Dat zegt het
+# script met een eigen regel én een eigen exitcode: apt-get stopt zelf met 0 of 100, ook bij een fout tijdens het
+# installeren, dus 100 alleen zegt niet of er al iets veranderde. Zo'n run mislukt, maar wordt nooit teruggedraaid
+# (dat zou weggooien wat de machine sinds de snapshot schreef). De snapshot is dan niet nodig ("unused") en gaat weg
+# met het gewone opruimen, zoals die van een geslaagde run.
+NOUPDATE = "@@NOUPDATE"
+NOUPDATE_RC = 99
+NOUPDATE_TOOLS = ("apt-get", "apk")
 
 INSTALL = r"""
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none
 O="-y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
 if command -v apt-get >/dev/null 2>&1; then
-  apt-get update -q </dev/null || exit 100
+  apt-get update -q </dev/null || { echo "@@NOUPDATE apt-get"; exit 99; }
   if [ -n "$PKGS" ]; then
     apt-get $O install --only-upgrade $PKGS </dev/null
   elif command -v pveversion >/dev/null 2>&1 || command -v proxmox-backup-manager >/dev/null 2>&1; then
@@ -71,7 +83,8 @@ if command -v apt-get >/dev/null 2>&1; then
   fi
   rc=$?
 elif command -v apk >/dev/null 2>&1; then
-  apk update -q </dev/null && apk upgrade </dev/null
+  apk update -q </dev/null || { echo "@@NOUPDATE apk"; exit 99; }
+  apk upgrade </dev/null
   rc=$?
 else
   echo "Geen apt of apk op deze machine"
@@ -92,6 +105,8 @@ class Plan:
     why: str | None = None           # waarom installeren niet kan
     nosnap: str | None = None        # waarom er geen snapshot kan
     extra_hosts: set[str] = field(default_factory=set)
+    guest: SshHost | None = None     # de SSH-host van de CT zelf (bij pct exec), als die er is
+    me: str | None = None            # waarom dit het dashboard zelf is (mark_self)
 
     @property
     def can(self) -> bool:
@@ -110,6 +125,7 @@ async def plan_for(db: AsyncSession, key: str, name: str | None = None) -> Plan:
         guest = (await db.execute(select(SshHost).where(SshHost.source.like(f"pve:%:lxc/{p.vmid}")))).scalars().first()
         if guest:
             p.extra_hosts.add(guest.host.lower())
+            p.guest = guest
     elif m := re.fullmatch(r"ssh:(\d+)", key):
         h = await db.get(SshHost, int(m[1]))
         if h is None:
@@ -141,7 +157,168 @@ async def plan_for(db: AsyncSession, key: str, name: str | None = None) -> Plan:
 
 
 def plan_out(p: Plan) -> dict:
-    return {"can": p.can, "why": p.why, "snapshot": (p.snap or {}).get("kind"), "nosnap": p.nosnap}
+    return {"can": p.can, "why": p.why, "snapshot": (p.snap or {}).get("kind"), "nosnap": p.nosnap, "self": p.me}
+
+
+# --- het dashboard zelf ----------------------------------------------------------------------------------------------
+# Updates op de container (of VM) van het dashboard zelf: stopt apt halverwege, dan is er niemand meer om te melden of
+# terug te draaien. Daarom nooit 's nachts en nooit samen met andere machines. Alleen bewust, als enige machine, en
+# dan zegt de proef dat het beter anders kan.
+
+# AppState van het noodplan (monitoring/noodplan.py importeert via restoretest deze module: hier als tekst).
+NOODPLAN_KEY = "noodplan"
+SELF_RISK = ("stopt apt halverwege (PostgreSQL of de API herstart, of PostgreSQL raakt kapot), dan breekt de run af "
+             "en is er niemand meer om te melden of terug te draaien")
+SELF_HOW = ("werk het apart bij: de pakketten in de console van de container (Proxmox → de CT → Console, of pct enter "
+            "<vmid> op de node: apt update && apt upgrade), het dashboard zelf met deploy/bootstrap.sh")
+_MAC = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
+
+
+@dataclass(frozen=True)
+class Me:
+    """Wat dit proces zelf van zijn container weet: de adressen en MAC-adressen van zijn netwerkkaarten, het IP dat
+    install.sh invulde (syslog_target) en de hostname. Dat telt eerst; wat een machine over zichzelf meldt, komt pas
+    daarna (en kan alleen een machine extra overslaan, nooit het dashboard doorlaten)."""
+    ips: frozenset[str] = frozenset()
+    macs: frozenset[str] = frozenset()
+    hostname: str | None = None
+
+
+def _ip(x) -> str | None:
+    try:
+        return str(ipaddress.ip_address(str(x).strip().strip("[]").split("/")[0]))
+    except ValueError:
+        return None
+
+
+def own_ips(fib: Path = Path("/proc/net/fib_trie"), inet6: Path = Path("/proc/net/if_inet6")) -> set[str]:
+    """De adressen van de eigen netwerkkaarten: IPv4 uit de routetabel van de kernel (de regels "/32 host LOCAL"),
+    IPv6 met scope global. In een LXC ziet het proces zo alleen zijn eigen netwerk. Zonder loopback."""
+    out = set()
+    try:
+        lines = fib.read_text().splitlines()
+    except OSError:
+        lines = []
+    for before, line in zip(lines, lines[1:]):
+        if line.strip().startswith("/32 host LOCAL") and (m := re.search(r"\|-- (\S+)", before)):
+            out.add(m[1])
+    try:
+        for line in inet6.read_text().splitlines():
+            f = line.split()
+            if len(f) >= 4 and len(f[0]) == 32 and f[3] == "00":
+                out.add(str(ipaddress.IPv6Address(int(f[0], 16))))
+    except (OSError, ValueError):
+        pass
+    return {ip for x in out if (ip := _ip(x)) and not ipaddress.ip_address(ip).is_loopback}
+
+
+def own_macs(net: Path = Path("/sys/class/net")) -> set[str]:
+    out = set()
+    try:
+        for d in net.iterdir():
+            try:
+                mac = (d / "address").read_text().strip().lower()
+            except OSError:
+                continue
+            if _MAC.match(mac) and mac != "00:00:00:00:00:00":
+                out.add(mac)
+    except OSError:
+        pass
+    return out
+
+
+def me() -> Me:
+    ips = own_ips()
+    if (t := _ip(get_settings().syslog_target)) and not ipaddress.ip_address(t).is_loopback:
+        ips.add(t)
+    return Me(frozenset(ips), frozenset(own_macs()), socket.gethostname().split(".")[0].lower() or None)
+
+
+@dataclass
+class SelfInfo:
+    me: Me
+    # (lxc|qemu, vmid) → waarom het de VM/CT van het dashboard is, volgens het noodplan
+    guests: dict[tuple[str, int], str] = field(default_factory=dict)
+    # VM's en CT's waarvan het noodplan de MAC-adressen kent, en geen ervan is van het dashboard
+    others: set[tuple[str, int]] = field(default_factory=set)
+
+
+async def whoami(db: AsyncSession) -> SelfInfo:
+    """Wie het dashboard is: de eigen adressen (me), plus welke VM/CT dat is volgens het laatste noodplan (het MAC-adres
+    uit de config in Proxmox, of het IP). Leest alleen de database."""
+    out = SelfInfo(me())
+    st = await db.get(AppState, NOODPLAN_KEY)
+    data = (st.value or {}).get("data") if st and isinstance(st.value, dict) else None
+    for c in (data or {}).get("clusters") or []:
+        for g in c.get("guests") or []:
+            try:
+                key = (str(g.get("type")), int(g.get("vmid")))
+            except (TypeError, ValueError):
+                continue
+            macs = {str(n.get("mac") or "").lower() for n in g.get("nets") or [] if isinstance(n, dict)} - {""}
+            ip = _ip(g.get("ip")) if g.get("ip") else None
+            if mine := sorted(macs & out.me.macs):
+                out.guests[key] = f"het MAC-adres {mine[0]} van {key[0]} {key[1]} is dat van het dashboard"
+            elif ip and ip in out.me.ips:
+                out.guests[key] = f"{key[0]} {key[1]} heeft {ip}, een adres van het dashboard"
+            elif macs:
+                out.others.add(key)
+    return out
+
+
+def _host_is_me(host: str | None, port: int | None, ctx: SelfInfo) -> str | None:
+    h = (host or "").strip().lower()
+    if not h:
+        return None
+    if ip := _ip(h):
+        if ipaddress.ip_address(ip).is_loopback:
+            # Op een andere poort kan het een doorgestuurde poort naar een andere machine zijn.
+            return f"{h}:22 is het dashboard zelf" if (port or 22) == 22 else None
+        return f"{ip} is een adres van het dashboard" if ip in ctx.me.ips else None
+    if h == "localhost":
+        return "localhost:22 is het dashboard zelf" if (port or 22) == 22 else None
+    if ctx.me.hostname and h.split(".")[0] == ctx.me.hostname:
+        return f"{h} is de hostname van het dashboard"
+    return None
+
+
+def is_me(plan: Plan, ctx: SelfInfo) -> str | None:
+    """Waarom deze machine het dashboard zelf is, of None. Eerst wat het dashboard van zichzelf weet (eigen adressen,
+    hostname), dan het noodplan."""
+    if plan.host is None:
+        return None
+    if plan.vmid is not None:
+        # Een container op een node (pct exec): de SSH-host van die CT, het noodplan, of zijn hostname uit de scan.
+        key = ("lxc", plan.vmid)
+        if plan.guest and (why := _host_is_me(plan.guest.host, plan.guest.port, ctx)):
+            return why
+        if key in ctx.guests:
+            return ctx.guests[key]
+        if key not in ctx.others and ctx.me.hostname and plan.name.strip().lower() == ctx.me.hostname:
+            return f"CT {plan.vmid} heet {plan.name}, zoals de hostname van het dashboard"
+        return None
+    if why := _host_is_me(plan.host.host, plan.host.port, ctx):
+        return why
+    if g := GUEST_RE.match(plan.host.source or ""):
+        return ctx.guests.get((g[2], int(g[3])))
+    return None
+
+
+async def mark_self(db: AsyncSession, plans: list[Plan], ctx: SelfInfo | None = None) -> SelfInfo:
+    ctx = ctx or await whoami(db)
+    for p in plans:
+        p.me = is_me(p, ctx)
+    return ctx
+
+
+def self_refusal(plan: Plan) -> str:
+    return (f"het dashboard zelf ({plan.me}): nooit 's nachts of samen met andere machines, want {SELF_RISK}. Kies "
+            f"alleen deze machine, of beter: {SELF_HOW}")
+
+
+def self_warning(plan: Plan) -> str:
+    return (f"{plan.name} is het dashboard zelf ({plan.me}). Dit kan, maar {SELF_RISK}: na een herstart staat de run "
+            f"op 'onderbroken door herstart' en weet niemand hoe het afliep. Beter: {SELF_HOW}.")
 
 
 async def settings(db: AsyncSession) -> dict:
@@ -167,6 +344,19 @@ def security_packages(updates_state: dict | None, key: str) -> list[str]:
 def run_packages(updates_state: dict | None, key: str, security_only: bool) -> list[str] | None:
     """Wat een run installeert: None = alles wat openstaat; een lege lijst = niets te doen (NO_SECURITY)."""
     return security_packages(updates_state, key) if security_only else None
+
+
+def nothing_installed(rc: int | None, tool: str | None) -> str | None:
+    """De fout als alleen het verversen van de pakketlijst mislukte (eigen exitcode én eigen regel van het script),
+    anders None."""
+    if rc == NOUPDATE_RC and tool in NOUPDATE_TOOLS:
+        return f"{tool} update mislukte, er is niets geïnstalleerd"
+    return None
+
+
+def needs_snapshot(snap: dict | None) -> bool:
+    """Kan deze snapshot nog dienen om terug te draaien? Niet als hij al weg is, of als de run niets installeerde."""
+    return bool(snap and snap.get("name") and not snap.get("removed_at") and not snap.get("unused"))
 
 
 # --- bouwstenen: dezelfde commando's en calls voor het echte werk en voor de proef ----------------
@@ -217,10 +407,13 @@ def auto_targets(updates_state: dict | None) -> list[tuple[str, str]]:
             if t.get("security") and not t.get("error")]
 
 
-async def refusal(db: AsyncSession, plan: Plan, snapshot: bool) -> dict | None:
-    """Waarom er voor deze machine geen run kan komen, of None als het kan."""
+async def refusal(db: AsyncSession, plan: Plan, snapshot: bool, alone: bool = True) -> dict | None:
+    """Waarom er voor deze machine geen run kan komen, of None als het kan. alone: deze machine bewust als enige,
+    manueel (nooit 's nachts); alleen zo mag het dashboard zelf (plan.me, zie mark_self)."""
     if not plan.can:
         return {"key": plan.key, "name": plan.name, "why": plan.why}
+    if plan.me and not alone:
+        return {"key": plan.key, "name": plan.name, "why": self_refusal(plan), "self": True}
     if not plan.snap and snapshot:
         return {"key": plan.key, "name": plan.name, "why": plan.nosnap or "geen snapshot mogelijk", "nosnap": True}
     busy = (await db.execute(select(UpdateRun.id).where(UpdateRun.target == plan.key,
@@ -403,16 +596,23 @@ async def execute(maker: async_sessionmaker, run_id: int, http: HttpClients, pac
     async with maker() as db:
         r = await db.get(UpdateRun, run_id)
         plan = await plan_for(db, r.target, r.target_name)
+        await mark_self(db, [plan])
         want_snap = r.snapshot is not None
+        # 's Nachts nooit het dashboard zelf (create_runs weigerde het al; hier nog eens, voor als het intussen
+        # een ander adres kreeg).
+        if plan.can and plan.me and r.trigger == "auto":
+            plan.why = self_refusal(plan)
         r.status, r.started_at = "snapshot" if want_snap else "installeren", datetime.now(timezone.utc)
         await db.commit()
     if not plan.can:
         await rn.save(force=True, status="fout", error=plan.why, finished_at=datetime.now(timezone.utc))
         return "fout"
+    if plan.me:
+        rn.say(f"let op: {self_warning(plan)}")
     async with maker() as db:
         login = await login_for(db, plan.host, await defaults(db))
     snap = None
-    status, error, rc, reboot = "fout", None, None, False
+    status, error, rc, reboot, noupdate = "fout", None, None, False, None
     try:
         async with connect(plan.host, login, keepalive=30) as conn:
             if want_snap:
@@ -427,6 +627,9 @@ async def execute(maker: async_sessionmaker, run_id: int, http: HttpClients, pac
                     async for line in proc.stdout:
                         if line.startswith("@@REBOOT"):
                             reboot = True
+                            continue
+                        if line.startswith(NOUPDATE):
+                            noupdate = line[len(NOUPDATE):].strip()
                             continue
                         if line.strip():
                             rn.say(line)
@@ -444,7 +647,13 @@ async def execute(maker: async_sessionmaker, run_id: int, http: HttpClients, pac
                       finished_at=datetime.now(timezone.utc))
         await _finish(maker, run_id, plan, "fout", error)
         return "fout"
-    if rc != 0:
+    if why := nothing_installed(rc, noupdate):
+        # Niets veranderd: niet terugdraaien (ook niet 's nachts), de snapshot is niet nodig.
+        status, error, checks = "fout", why, None
+        rn.say(f"✗ {why}: niet terugdraaien" + (f", snapshot {snap['name']} is niet nodig" if snap else ""))
+        if snap:
+            snap["unused"] = True
+    elif rc != 0:
         status, error = "fout", f"apt stopte met exitcode {rc}"
         checks = None
     else:
@@ -457,7 +666,7 @@ async def execute(maker: async_sessionmaker, run_id: int, http: HttpClients, pac
     if reboot:
         rn.say("herstart nodig om alles te laden (kernel of bibliotheken)")
     await rn.save(force=True, status=status, error=error, exit_code=rc, reboot_needed=reboot, checks=checks,
-                  finished_at=datetime.now(timezone.utc))
+                  finished_at=datetime.now(timezone.utc), **({"snapshot": snap} if snap else {}))
     await _finish(maker, run_id, plan, status, error)
     return status
 
@@ -466,7 +675,7 @@ async def _finish(maker: async_sessionmaker, run_id: int, plan: Plan, status: st
     async with maker() as db:
         r = await db.get(UpdateRun, run_id)
         auto = r.trigger == "auto"
-        can_back = bool(r.snapshot and r.snapshot.get("name"))
+        can_back = needs_snapshot(r.snapshot)
         if status == "ok":
             event(db, "updates", f"{r.target_name}: updates geïnstalleerd"
                   + (" (snapshot " + r.snapshot["name"] + ")" if can_back else ""),
@@ -526,17 +735,24 @@ async def rollback(maker: async_sessionmaker, run_id: int, http: HttpClients) ->
     return "teruggedraaid"
 
 
+def cleanable(status: str, snap: dict | None) -> bool:
+    """Mag de snapshot van een run na keep_days weg? Van een geslaagde of teruggedraaide run, en van een run die niets
+    installeerde (apt-get update mislukte). Van een andere mislukte run niet: daar kan je nog terug willen."""
+    return status in ("ok", "teruggedraaid") or (status == "fout" and bool((snap or {}).get("unused")))
+
+
 async def cleanup_todo(db: AsyncSession, keep_days: int, now: datetime | None = None) -> list[tuple[int, dict, str]]:
     """De eigen snapshots die nu weg mogen: (run, snapshot, machine)."""
     cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=keep_days)
     # Al opgeruimde snapshots meteen in SQL overslaan (JSON_EXTRACT op SQLite, ->> op PostgreSQL). Vaste volgorde:
     # de proef toont ze zoals het opruimen ze afwerkt.
-    runs = (await db.execute(select(UpdateRun).where(UpdateRun.status.in_(("ok", "teruggedraaid")),
+    runs = (await db.execute(select(UpdateRun).where(UpdateRun.status.in_(("ok", "teruggedraaid", "fout")),
                                                       UpdateRun.finished_at < cutoff,
                                                       UpdateRun.snapshot["removed_at"].as_string().is_(None))
                              .order_by(UpdateRun.id))).scalars().all()
     return [(r.id, dict(r.snapshot), r.target_name) for r in runs
-            if r.snapshot and r.snapshot.get("name", "").startswith(SNAP_PREFIX) and not r.snapshot.get("removed_at")]
+            if r.snapshot and r.snapshot.get("name", "").startswith(SNAP_PREFIX) and not r.snapshot.get("removed_at")
+            and cleanable(r.status, r.snapshot)]
 
 
 async def cleanup_snapshots(maker: async_sessionmaker, http: HttpClients) -> int:
@@ -599,13 +815,22 @@ async def mark_interrupted(db: AsyncSession, triggers: tuple[str, ...]) -> int:
     return len(runs)
 
 
+def _alone(keys: list, trigger: str, alone: bool | None) -> bool:
+    """Eén machine, manueel: alleen dan mag het dashboard zelf. 's Nachts nooit."""
+    return trigger != "auto" and (len(keys) == 1 if alone is None else alone)
+
+
 async def create_runs(db: AsyncSession, keys: list[tuple[str, str | None]], security_only: bool, snapshot: bool,
-                      trigger: str, user_id: int | None) -> tuple[list[UpdateRun], list[dict]]:
-    """Runs aanmaken voor (sleutel, naam); wat niet kan komt terug met de reden."""
+                      trigger: str, user_id: int | None, alone: bool | None = None) -> tuple[list[UpdateRun], list[dict]]:
+    """Runs aanmaken voor (sleutel, naam); wat niet kan komt terug met de reden. alone: de vraag ging over één
+    machine (standaard: als er één sleutel is)."""
     runs, refused = [], []
-    for key, name in keys:
-        plan = await plan_for(db, key, name)
-        if why := await refusal(db, plan, snapshot):
+    alone = _alone(keys, trigger, alone)
+    plans = [await plan_for(db, key, name) for key, name in keys]
+    await mark_self(db, plans)
+    for plan in plans:
+        key = plan.key
+        if why := await refusal(db, plan, snapshot, alone):
             refused.append(why)
             continue
         r = UpdateRun(target=key, target_name=plan.name, trigger=trigger, security_only=security_only, status="wacht",
@@ -640,12 +865,15 @@ async def run_batch(maker: async_sessionmaker, http: HttpClients, run_ids: list[
         if auto_rollback and status in ("fout", "services_down"):
             async with maker() as db:
                 r = await db.get(UpdateRun, rid)
-                has_snap = bool(r.snapshot and r.snapshot.get("name"))
+                # Een snapshot van een run die niets installeerde (apt-get update mislukte): niet terug.
+                has_snap = needs_snapshot(r.snapshot)
+                unused = bool(r.snapshot and r.snapshot.get("unused"))
                 name, err = r.target_name, r.error
             back = await rollback(maker, rid, http) if has_snap else None
             async with maker() as db:
                 notify(db, f"Nachtelijke updates op {name} mislukt" + (", teruggedraaid" if back == "teruggedraaid" else ""),
-                       err, level="err" if back != "teruggedraaid" else "warn", source="updates")
+                       (err or "") + ("\nNiet teruggedraaid: er is niets veranderd. De volgende nacht opnieuw." if unused else ""),
+                       level="err" if back != "teruggedraaid" else "warn", source="updates")
                 await db.commit()
 
 
@@ -741,18 +969,21 @@ def install_summary(packages: list[str] | None, scanned: dict | None, checked_at
     if packages:
         what = f"alleen de beveiligingsupdates ({len(packages)}) uit de scan van {_local(checked_at)}"
         apt = f"apt-get update, dan apt-get install --only-upgrade {_pkgs(packages)}"
-        apk = "apk update && apk upgrade (alles: apk kent geen lijst met beveiligingsupdates)"
+        apk = "apk update, dan apk upgrade (alles: apk kent geen lijst met beveiligingsupdates)"
     else:
         what = (f"alle openstaande ({scanned.get('count', 0)}) uit de scan van {_local(checked_at)}" if scanned else
                 "alle openstaande (deze machine staat niet in de laatste scan)")
         apt = "apt-get update, dan apt-get dist-upgrade op een Proxmox-node of PBS, anders apt-get upgrade --with-new-pkgs"
-        apk = "apk update && apk upgrade"
-    return f"{what}; de machine kiest zelf:\n  met apt: {apt}\n  met apk: {apk}"
+        apk = "apk update, dan apk upgrade"
+    return (f"{what}; de machine kiest zelf:\n  met apt: {apt}\n  met apk: {apk}\n"
+            "  lukt apt-get update (of apk update) niet, bv. mirror of DNS weg, dan stopt het meteen: niets "
+            "geïnstalleerd")
 
 
 async def describe_batch(db: AsyncSession, http: HttpClients, keys: list[tuple[str, str | None]], *,
                          security_only: bool, snapshot: bool, trigger: str, title: str | None = None,
-                         refused: list[dict] = (), warnings: list[str] = (), now: datetime | None = None) -> dict:
+                         refused: list[dict] = (), warnings: list[str] = (), now: datetime | None = None,
+                         alone: bool | None = None) -> dict:
     """Proef van create_runs + run_batch: per machine de snapshot, apt, de services nakijken en terugdraaien, in de
     volgorde van de echte run. Leest de database en vraagt voor een snapshot via de API hooguit de node op
     (GET /cluster/resources); maakt geen runs aan en verstuurt niets. refused: wat de aanroeper zelf al weigerde."""
@@ -764,10 +995,13 @@ async def describe_batch(db: AsyncSession, http: HttpClients, keys: list[tuple[s
     cfg = await settings(db)
     d = await defaults(db)
     name, desc = snap_name(now), snap_desc(now)
-    items, out_refused, skipped = [], [], []
-    for key, nm in keys:
-        plan = await plan_for(db, key, nm)
-        if why := await refusal(db, plan, snapshot):
+    items, out_refused, skipped, notes = [], [], [], list(warnings)
+    alone = _alone(keys, trigger, alone)
+    plans = [await plan_for(db, key, nm) for key, nm in keys]
+    await mark_self(db, plans)
+    for plan in plans:
+        key = plan.key
+        if why := await refusal(db, plan, snapshot, alone):
             out_refused.append(why)
             extra = ""
             if why.get("nosnap"):
@@ -831,10 +1065,12 @@ async def describe_batch(db: AsyncSession, http: HttpClients, keys: list[tuple[s
                                         on_fail=stop + " (het token heeft VM.Snapshot nodig)",
                                         note=(f"de echte run stopt hier: {it['px_error']}" if it["px_gone"] else
                                               "de naam krijgt het tijdstip van de echte run")))
+        nothing = f"mislukt alleen {NOUPDATE_TOOLS[0]} update, dan is er niets geïnstalleerd en wordt er niet teruggedraaid"
         if auto:
-            on_fail = f"run mislukt; de homepage draait zelf terug naar de snapshot en stuurt een melding {failed}"
+            on_fail = (f"run mislukt; de homepage draait zelf terug naar de snapshot en stuurt een melding {failed} "
+                       f"({nothing})")
         elif snap:
-            on_fail = f"run mislukt en een melding {failed}; terugdraaien kan met de knop"
+            on_fail = f"run mislukt en een melding {failed}; terugdraaien kan met de knop ({nothing})"
         else:
             on_fail = f"run mislukt en een melding {failed}; terugdraaien kan niet: geen snapshot"
         t = scanned.get(plan.key)
@@ -857,7 +1093,8 @@ async def describe_batch(db: AsyncSession, http: HttpClients, keys: list[tuple[s
             checks.append(proef.check(f"{n}: gekoppelde services", None, "geen gevonden: na de updates wordt niets nagekeken"))
         if snap:
             c = rollback_call(snap)
-            when = ("als apt mislukt of een service down blijft: automatisch" if auto else
+            when = ("als de installatie mislukt of een service down blijft: automatisch (niet als alleen apt-get "
+                    "update mislukt: dan is er niets geïnstalleerd)" if auto else
                     "als jij terug wil: met de knop terugdraaien in apt → installaties")
             bad = f"run 'terugdraaien mislukt' en een melding 'Terugdraaien van {n} mislukt'"
             if c["via"] == "ssh":
@@ -868,7 +1105,7 @@ async def describe_batch(db: AsyncSession, http: HttpClients, keys: list[tuple[s
                                         data=c["data"], wait=f"tot de Proxmox-taak klaar is, max. {ROLLBACK_TIMEOUT // 60} min",
                                         when=when, on_fail=bad + " (het token heeft VM.Snapshot.Rollback nodig)"))
 
-    notes = list(warnings)
+    notes += [self_warning(it["plan"]) for it in items if it["plan"].me]
     if items:
         if not auto:
             after.append("in het auditlog: updates installeren")
@@ -880,7 +1117,8 @@ async def describe_batch(db: AsyncSession, http: HttpClients, keys: list[tuple[s
                      "zijn down'")
         after.append("de updates opnieuw scannen: SSH en apt-get update op alle opgevolgde machines")
         if snapshot:
-            after.append(f"de snapshot van een geslaagde run wordt na {cfg['keep_days']} dagen opgeruimd")
+            after.append(f"de snapshot van een geslaagde run (of van een run die niets installeerde) wordt na "
+                         f"{cfg['keep_days']} dagen opgeruimd")
         notes.append(f"De pakketten komen uit de scan van {_local(state.get('checked_at'))}; de echte run kijkt vlak "
                      "voor elke machine opnieuw in de laatste scan.")
         if len(items) > 1:
@@ -983,11 +1221,12 @@ async def describe_cleanup(db: AsyncSession, http: HttpClients, now: datetime | 
         s = r.snapshot or {}
         if r.id in ids or not str(s.get("name") or "").startswith(SNAP_PREFIX) or s.get("removed_at"):
             continue
-        if r.status in ("ok", "teruggedraaid"):
+        if cleanable(r.status, s):
             why = (f"nog geen {keep} dagen oud: gaat weg na {_local(r.finished_at + timedelta(days=keep))}"
                    if r.finished_at else "de run is nog niet klaar")
         elif r.status in DONE:
-            why = f"run '{r.status}': alleen snapshots van geslaagde runs worden opgeruimd"
+            why = (f"run '{r.status}': alleen snapshots van geslaagde runs (en van runs die niets installeerden) "
+                   "worden opgeruimd")
         else:
             why = "de run loopt nog"
         skipped.append(proef.skip(f"{s['name']} van {r.target_name}", why))
