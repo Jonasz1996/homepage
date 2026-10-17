@@ -65,9 +65,11 @@ GUEST_RE = re.compile(r"^pve:(\d+):(lxc|qemu)/(\d+)$")
 # installeren, dus 100 alleen zegt niet of er al iets veranderde. Zo'n run mislukt, maar wordt nooit teruggedraaid
 # (dat zou weggooien wat de machine sinds de snapshot schreef). De snapshot is dan niet nodig ("unused") en gaat weg
 # met het gewone opruimen, zoals die van een geslaagde run.
-# Een mirror die niet antwoordt of DNS die weg is, is voor apt-get update standaard maar een waarschuwing (exitcode 0):
-# dan zou apt-get install pas bij het downloaden mislukken, met 100, en draaide de nachtelijke run toch terug.
-# APT::Update::Error-Mode=any maakt er een fout van (apt 2.2 en nieuwer; een oudere apt negeert de onbekende optie).
+# Een mirror die niet antwoordt of DNS die weg is, is voor apt-get update maar een waarschuwing (exitcode 0): apt werkt
+# dan met de pakketlijst van de vorige keer, en één bron die even plat ligt (Docker, Plex, ...) houdt zo niet alle
+# updates tegen. Het downloaden zou dan pas mislukken, met 100, en de nachtelijke run draaide terug. Daarom eerst alleen
+# downloaden (--download-only, hetzelfde commando): mislukt dat, dan is er nog niets veranderd ("@@NOUPDATE apt-get
+# download"). Pas daarna installeert hetzelfde commando uit wat al gedownload is.
 NOUPDATE = "@@NOUPDATE"
 NOUPDATE_RC = 99
 NOUPDATE_TOOLS = ("apt-get", "apk")
@@ -76,14 +78,16 @@ INSTALL = r"""
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none
 O="-y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
 if command -v apt-get >/dev/null 2>&1; then
-  apt-get -o APT::Update::Error-Mode=any update -q </dev/null || { echo "@@NOUPDATE apt-get"; exit 99; }
+  apt-get update -q </dev/null || { echo "@@NOUPDATE apt-get"; exit 99; }
   if [ -n "$PKGS" ]; then
-    apt-get $O install --only-upgrade $PKGS </dev/null
+    set -- install --only-upgrade $PKGS
   elif command -v pveversion >/dev/null 2>&1 || command -v proxmox-backup-manager >/dev/null 2>&1; then
-    apt-get $O dist-upgrade </dev/null
+    set -- dist-upgrade
   else
-    apt-get $O upgrade --with-new-pkgs </dev/null
+    set -- upgrade --with-new-pkgs
   fi
+  apt-get $O --download-only "$@" </dev/null || { echo "@@NOUPDATE apt-get download"; exit 99; }
+  apt-get $O "$@" </dev/null
   rc=$?
 elif command -v apk >/dev/null 2>&1; then
   apk update -q </dev/null || { echo "@@NOUPDATE apk"; exit 99; }
@@ -350,11 +354,14 @@ def run_packages(updates_state: dict | None, key: str, security_only: bool) -> l
 
 
 def nothing_installed(rc: int | None, tool: str | None) -> str | None:
-    """De fout als alleen het verversen van de pakketlijst mislukte (eigen exitcode én eigen regel van het script),
-    anders None."""
-    if rc == NOUPDATE_RC and tool in NOUPDATE_TOOLS:
-        return f"{tool} update mislukte, er is niets geïnstalleerd"
-    return None
+    """De fout als het script stopte voor er iets geïnstalleerd werd (eigen exitcode én eigen regel van het script:
+    "apt-get", "apk" of "apt-get download"), anders None."""
+    name, _, step = (tool or "").partition(" ")
+    if rc != NOUPDATE_RC or name not in NOUPDATE_TOOLS or step not in ("", "download"):
+        return None
+    if step == "download":
+        return "downloaden van de pakketten mislukte (mirror of DNS weg?), er is niets geïnstalleerd"
+    return f"{name} update mislukte, er is niets geïnstalleerd"
 
 
 def needs_snapshot(snap: dict | None) -> bool:
@@ -971,16 +978,17 @@ def install_summary(packages: list[str] | None, scanned: dict | None, checked_at
     """Wat het installatiescript doet, leesbaar. Welke tak het neemt, kiest de machine zelf: apt als die er is, anders apk."""
     if packages:
         what = f"alleen de beveiligingsupdates ({len(packages)}) uit de scan van {_local(checked_at)}"
-        apt = f"apt-get update, dan apt-get install --only-upgrade {_pkgs(packages)}"
+        apt = f"apt-get update, dan apt-get install --only-upgrade {_pkgs(packages)} (eerst alleen downloaden)"
         apk = "apk update, dan apk upgrade (alles: apk kent geen lijst met beveiligingsupdates)"
     else:
         what = (f"alle openstaande ({scanned.get('count', 0)}) uit de scan van {_local(checked_at)}" if scanned else
                 "alle openstaande (deze machine staat niet in de laatste scan)")
-        apt = "apt-get update, dan apt-get dist-upgrade op een Proxmox-node of PBS, anders apt-get upgrade --with-new-pkgs"
+        apt = ("apt-get update, dan apt-get dist-upgrade op een Proxmox-node of PBS, anders apt-get upgrade "
+               "--with-new-pkgs (eerst alleen downloaden)")
         apk = "apk update, dan apk upgrade"
     return (f"{what}; de machine kiest zelf:\n  met apt: {apt}\n  met apk: {apk}\n"
-            "  lukt apt-get update (of apk update) niet, bv. mirror of DNS weg, dan stopt het meteen: niets "
-            "geïnstalleerd (ook als maar één bron niet antwoordt)")
+            "  lukt apt-get update (of apk update) of het downloaden niet, bv. mirror of DNS weg, dan stopt het "
+            "meteen: niets geïnstalleerd")
 
 
 async def describe_batch(db: AsyncSession, http: HttpClients, keys: list[tuple[str, str | None]], *,
@@ -1068,7 +1076,8 @@ async def describe_batch(db: AsyncSession, http: HttpClients, keys: list[tuple[s
                                         on_fail=stop + " (het token heeft VM.Snapshot nodig)",
                                         note=(f"de echte run stopt hier: {it['px_error']}" if it["px_gone"] else
                                               "de naam krijgt het tijdstip van de echte run")))
-        nothing = f"mislukt alleen {NOUPDATE_TOOLS[0]} update, dan is er niets geïnstalleerd en wordt er niet teruggedraaid"
+        nothing = (f"mislukt {NOUPDATE_TOOLS[0]} update of het downloaden, dan is er niets geïnstalleerd en wordt er "
+                   "niet teruggedraaid")
         if auto:
             on_fail = (f"run mislukt; de homepage draait zelf terug naar de snapshot en stuurt een melding {failed} "
                        f"({nothing})")
@@ -1096,8 +1105,8 @@ async def describe_batch(db: AsyncSession, http: HttpClients, keys: list[tuple[s
             checks.append(proef.check(f"{n}: gekoppelde services", None, "geen gevonden: na de updates wordt niets nagekeken"))
         if snap:
             c = rollback_call(snap)
-            when = ("als de installatie mislukt of een service down blijft: automatisch (niet als alleen apt-get "
-                    "update mislukt: dan is er niets geïnstalleerd)" if auto else
+            when = ("als de installatie mislukt of een service down blijft: automatisch (niet als apt-get update of "
+                    "het downloaden mislukt: dan is er niets geïnstalleerd)" if auto else
                     "als jij terug wil: met de knop terugdraaien in apt → installaties")
             bad = f"run 'terugdraaien mislukt' en een melding 'Terugdraaien van {n} mislukt'"
             if c["via"] == "ssh":

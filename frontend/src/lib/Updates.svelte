@@ -228,8 +228,8 @@
       <label>om <input type="number" min="0" max="23" bind:value={cfg.hour} /> uur</label>
       <p class="hint small">Alleen op containers en VM's waar een snapshot kan (nooit op een fysieke node), alleen de pakketten die als
         beveiligingsupdate gemarkeerd zijn, één machine na de andere. Is een gekoppelde service daarna down of faalt apt, dan
-        draait de homepage zelf terug naar de snapshot en krijg je een melding. Mislukt alleen apt-get update (mirror of
-        DNS weg), dan is er niets geïnstalleerd: een melding, maar niet terugdraaien. De container van het dashboard zelf
+        draait de homepage zelf terug naar de snapshot en krijg je een melding. Mislukt apt-get update of het downloaden
+        (mirror of DNS weg), dan is er niets geïnstalleerd: een melding, maar niet terugdraaien. De container van het dashboard zelf
         komt 's nachts nooit aan de beurt.</p>
       <label class="chk"><input type="checkbox" bind:checked={cfg.proef} /> alleen proef (niets installeren, alleen noteren wat er zou gebeuren)</label>
       <label>eigen snapshots van geslaagde installaties opruimen na <input type="number" min="1" max="90" bind:value={cfg.keep_days} /> dagen</label>

@@ -294,9 +294,9 @@ Later, deel 1 (tijdlijn, weekrapport en updates):
   apt of is een service down, dan krijg je een melding en zet *terugdraaien* de machine terug naar de snapshot.
   Fysieke nodes kunnen geen snapshot: dat moet je bewust kiezen (*toch installeren zonder snapshot*). Optioneel
   *alleen beveiligingsupdates*. Onder *'s nachts*: elke nacht om een gekozen uur de beveiligingsupdates, alleen waar
-  een snapshot kan; gaat het mis, dan draait de homepage zelf terug. Mislukt alleen `apt-get update` (mirror of DNS
-  weg, ook als maar één bron niet antwoordt), dan is er niets geïnstalleerd: de run mislukt met een melding, maar er
-  wordt niet teruggedraaid. Eigen
+  een snapshot kan; gaat het mis, dan draait de homepage zelf terug. Mislukt `apt-get update` of het downloaden (mirror of
+  DNS weg; de pakketten worden eerst alleen gedownload), dan is er niets geïnstalleerd: de run mislukt met een
+  melding, maar er wordt niet teruggedraaid. Eigen
   snapshots (`hp-upd-…`) van geslaagde installaties, en van runs die niets installeerden, verdwijnen na 7 dagen
   (instelbaar). Het dashboard zelf (zijn eigen CT of VM, herkend aan zijn eigen adressen, MAC-adres en hostname) komt
   nooit 's nachts of samen met andere machines aan de beurt: stopt apt daar halverwege (PostgreSQL of de API

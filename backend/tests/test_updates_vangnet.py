@@ -18,6 +18,7 @@ from app.monitoring.noodplan import STATE_KEY as NOODPLAN_KEY
 from .test_upgrade_herstel import Node, _db, _host, _maker_from, _t, _updates_state, _wait
 
 NOTHING = "apt-get update mislukte, er is niets geïnstalleerd"
+DOWNLOAD = "downloaden van de pakketten mislukte (mirror of DNS weg?), er is niets geïnstalleerd"
 # De echte upgrade.me (conftest vervangt die in elke test door een lege Me()).
 REAL_ME = upgrade.me
 NO_HTTP = HttpClients(httpx.MockTransport(lambda r: httpx.Response(404)))
@@ -25,7 +26,8 @@ NO_HTTP = HttpClients(httpx.MockTransport(lambda r: httpx.Response(404)))
 
 class Apt(Node):
     """Nep-node waar apt kan mislukken zoals het echte script het meldt.
-    mode: ok | update (apt-get update mislukt) | install (installeren mislukt, exit 100) | rc99 (exit 99 zonder regel)
+    mode: ok | update (apt-get update mislukt) | download (alleen downloaden mislukt) | install (installeren mislukt,
+    exit 100) | rc99 (exit 99 zonder regel)
     | marker100 (de regel, maar exit 100)."""
 
     def __init__(self):
@@ -36,26 +38,30 @@ class Apt(Node):
         cmd = proc.command or ""
         if "apt-get" in cmd and self.mode != "ok":
             self.commands.append(cmd)
-            if self.mode in ("update", "marker100", "rc99"):
+            if self.mode in ("update", "marker100", "rc99", "download"):
                 proc.stdout.write("Err:1 http://deb.debian.org/debian bookworm InRelease\n")
                 proc.stdout.write("E: Failed to fetch http://deb.debian.org/debian/dists/bookworm/InRelease\n")
             else:
                 proc.stdout.write("Setting up openssl (3.0.15-1) ...\ndpkg: error processing package openssl\n")
             if self.mode in ("update", "marker100"):
                 proc.stdout.write("@@NOUPDATE apt-get\n")
-            proc.exit({"update": 99, "rc99": 99, "marker100": 100, "install": 100}[self.mode])
+            if self.mode == "download":
+                proc.stdout.write("@@NOUPDATE apt-get download\n")
+            proc.exit({"update": 99, "rc99": 99, "marker100": 100, "install": 100, "download": 99}[self.mode])
             return
         await super().handle(proc)
 
 
 # --- het script zelf ---------------------------------------------------------------------------------------------
 
-def _script(tmp_path, tool: str, update_rc: int, install_rc: int, packages=None) -> tuple[int, str, list[str]]:
+def _script(tmp_path, tool: str, update_rc: int, install_rc: int, packages=None, download_rc: int = 0
+            ) -> tuple[int, str, list[str]]:
     """Het echte installatiescript, met een nep-apt-get of nep-apk als enige programma op het PATH."""
     bin_dir, log = tmp_path / "bin", tmp_path / "calls"
     bin_dir.mkdir(exist_ok=True)
     fake = bin_dir / tool
-    fake.write_text(f'#!/bin/sh\necho "$*" >> {log}\ncase " $* " in *" update "*) exit {update_rc};; esac\nexit {install_rc}\n')
+    fake.write_text(f'#!/bin/sh\necho "$*" >> {log}\ncase " $* " in *" update "*) exit {update_rc};; '
+                    f'*" --download-only "*) exit {download_rc};; esac\nexit {install_rc}\n')
     fake.chmod(0o755)
     r = subprocess.run(["/bin/sh", "-c", upgrade.script(packages)], env={"PATH": str(bin_dir)}, capture_output=True,
                        text=True, stdin=subprocess.DEVNULL, timeout=30)
@@ -64,17 +70,24 @@ def _script(tmp_path, tool: str, update_rc: int, install_rc: int, packages=None)
     return r.returncode, r.stdout, calls
 
 
-def test_script_zegt_apart_dat_apt_get_update_mislukte(tmp_path):
+def test_script_zegt_apart_dat_er_nog_niets_geinstalleerd_is(tmp_path):
     # Pakketlijst niet te verversen: een eigen regel en exitcode 99, en er wordt niets geïnstalleerd.
     rc, out, calls = _script(tmp_path, "apt-get", 100, 0, ["openssl"])
-    assert rc == upgrade.NOUPDATE_RC and "@@NOUPDATE apt-get" in out.splitlines()
-    # Ook een bron die niet antwoordt (DNS weg) is een fout, geen waarschuwing: zie test_dns_weg_is_een_mislukte_...
-    assert calls == ["-o APT::Update::Error-Mode=any update -q"]
-    # Een fout tijdens het installeren: 100 zoals apt-get zelf, zonder die regel.
+    assert rc == upgrade.NOUPDATE_RC and "@@NOUPDATE apt-get" in out.splitlines() and calls == ["update -q"]
+    # Downloaden mislukt (mirror of DNS weg, een bron die apt-get update alleen als waarschuwing meldde): ook dan is er
+    # nog niets geïnstalleerd, en het echte installeren begint niet.
+    rc, out, calls = _script(tmp_path, "apt-get", 0, 0, ["openssl"], download_rc=100)
+    assert rc == upgrade.NOUPDATE_RC and "@@NOUPDATE apt-get download" in out.splitlines()
+    assert len(calls) == 2 and "--download-only install --only-upgrade openssl" in calls[1]
+    # Een fout tijdens het installeren: 100 zoals apt-get zelf, zonder die regel. Hetzelfde commando, eerst alleen
+    # downloaden.
     rc, out, calls = _script(tmp_path, "apt-get", 0, 100, ["openssl"])
-    assert rc == 100 and "@@NOUPDATE" not in out and len(calls) == 2 and "install --only-upgrade openssl" in calls[1]
+    assert rc == 100 and "@@NOUPDATE" not in out and len(calls) == 3
+    assert calls[1].endswith("--download-only install --only-upgrade openssl")
+    assert calls[2].endswith(" install --only-upgrade openssl") and "--download-only" not in calls[2]
     rc, out, calls = _script(tmp_path, "apt-get", 0, 0)
-    assert rc == 0 and "@@NOUPDATE" not in out and "upgrade --with-new-pkgs" in calls[1]
+    assert rc == 0 and "@@NOUPDATE" not in out and calls[1].endswith("--download-only upgrade --with-new-pkgs")
+    assert calls[2].endswith(" upgrade --with-new-pkgs") and "--download-only" not in calls[2]
     # apk: hetzelfde voor apk update; apk upgrade geeft zijn eigen exitcode door.
     os.remove(tmp_path / "bin" / "apt-get")
     rc, out, calls = _script(tmp_path, "apk", 1, 0)
@@ -84,33 +97,36 @@ def test_script_zegt_apart_dat_apt_get_update_mislukte(tmp_path):
 
 
 @pytest.mark.skipif(not shutil.which("apt-get"), reason="geen apt-get op deze machine")
-def test_dns_weg_is_een_mislukte_apt_get_update(tmp_path):
-    """Met de echte apt-get: een mirror die niet te vinden is (DNS weg), zoals 's nachts. apt-get update meldt dat
-    standaard alleen als waarschuwing (exitcode 0); dan zou het script verder gaan, apt-get install faalt bij het
-    downloaden met 100 en de nachtelijke run draait terug. Het script moet hier zelf stoppen: niets geïnstalleerd."""
+def test_downloaden_mislukt_met_de_echte_apt_get(tmp_path):
+    """Met de echte apt-get, in eigen mappen: de pakketlijst lukt, maar het pakket zelf is niet te halen, zoals een
+    mirror die 's nachts wegvalt (of DNS weg, met de pakketlijst van de vorige keer). Zonder eerst alleen te downloaden
+    mislukte apt-get upgrade met 100 en draaide de nachtelijke run terug, terwijl er niets geïnstalleerd was."""
     real = shutil.which("apt-get")
     d = tmp_path / "apt"
-    for sub in ("state/lists/partial", "cache/archives/partial", "parts", "prefs"):
+    for sub in ("state/lists/partial", "cache/archives/partial", "parts", "prefs", "repo"):
         (d / sub).mkdir(parents=True)
-    # .invalid bestaat nooit: geen netwerk nodig, en altijd dezelfde fout.
-    (d / "sources.list").write_text("deb http://mirror.bestaat-niet.invalid/debian bookworm main\n")
+    fields = "Architecture: all\nMaintainer: x <x@example.org>\nDescription: test\n"
+    # Versie 1 staat erop, versie 2 staat in de lijst van de bron, maar het .deb-bestand ontbreekt.
+    (d / "status").write_text("Package: hp-test\nStatus: install ok installed\nVersion: 1\n" + fields + "\n")
+    (d / "repo" / "Packages").write_text("Package: hp-test\nVersion: 2\nFilename: ./hp-test_2_all.deb\nSize: 1000\n"
+                                         f"SHA256: {'0' * 64}\n" + fields + "\n")
+    (d / "sources.list").write_text(f"deb [trusted=yes] file:{d / 'repo'} ./\n")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     wrap = bin_dir / "apt-get"
-    # De echte apt-get, maar met eigen mappen: niets van deze machine wordt gelezen of veranderd.
+    # Niets van deze machine wordt gelezen of veranderd; dpkg komt er niet aan te pas (het downloaden mislukt eerst).
     wrap.write_text(f"""#!/bin/sh
 PATH=/usr/sbin:/usr/bin:/sbin:/bin exec {real} -o Dir::State={d}/state -o Dir::Cache={d}/cache \\
   -o Dir::Etc::SourceList={d}/sources.list -o Dir::Etc::SourceParts={d}/parts -o Dir::Etc::PreferencesParts={d}/prefs \\
-  -o Dir::State::status=/dev/null -o APT::Sandbox::User=root -o Debug::NoLocking=true -o Acquire::Retries=0 \\
-  -o Acquire::http::Proxy=DIRECT -o Acquire::http::Timeout=10 "$@"
+  -o Dir::State::status={d}/status -o APT::Sandbox::User=root -o Debug::NoLocking=true "$@"
 """)
     wrap.chmod(0o755)
-    r = subprocess.run(["/bin/sh", "-c", upgrade.script(["openssl"])], env={"PATH": str(bin_dir)},
+    r = subprocess.run(["/bin/sh", "-c", upgrade.script(None)], env={"PATH": str(bin_dir)},
                        capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120)
     out = r.stdout + r.stderr
-    assert "mirror.bestaat-niet.invalid" in out, out
-    assert r.returncode == upgrade.NOUPDATE_RC and "@@NOUPDATE apt-get" in r.stdout.splitlines(), out
-    assert upgrade.nothing_installed(r.returncode, "apt-get") == NOTHING
+    assert "hp-test" in out and "Failed to fetch" in out, out
+    assert r.returncode == upgrade.NOUPDATE_RC and "@@NOUPDATE apt-get download" in r.stdout.splitlines(), out
+    assert upgrade.nothing_installed(r.returncode, "apt-get download") == DOWNLOAD
 
 
 def test_alleen_exitcode_en_regel_samen_betekenen_niets_geinstalleerd():
@@ -118,6 +134,9 @@ def test_alleen_exitcode_en_regel_samen_betekenen_niets_geinstalleerd():
     assert upgrade.nothing_installed(99, "apk") == "apk update mislukte, er is niets geïnstalleerd"
     # 100 kan apt-get zelf geven, ook halverwege het installeren; 99 zonder de regel (apk met 99 fouten) ook niet.
     assert upgrade.nothing_installed(100, "apt-get") is None
+    assert upgrade.nothing_installed(99, "apt-get download") == DOWNLOAD
+    assert upgrade.nothing_installed(100, "apt-get download") is None
+    assert upgrade.nothing_installed(99, "apt-get iets") is None and upgrade.nothing_installed(99, "dnf") is None
     assert upgrade.nothing_installed(99, None) is None and upgrade.nothing_installed(99, "rm -rf") is None
 
 
@@ -192,8 +211,14 @@ async def test_apt_get_update_mislukt_snachts_niet_terugdraaien(authed, monkeypa
     assert titles == [("Nachtelijke updates op plex mislukt",
                        f"{NOTHING}\nNiet teruggedraaid: er is niets veranderd. De volgende nacht opnieuw.")]
 
+    # Alleen het downloaden mislukt: ook niets veranderd, niet terugdraaien.
+    node.mode = "download"
+    run = await night(6)
+    assert run["status"] == "fout" and run["error"] == DOWNLOAD and run["snapshot"]["unused"] is True
+    assert not any("pct rollback" in c for c in node.commands)
+
     # Exit 99 zonder de regel, of de regel met exit 100: gewoon mislukt, dus terug naar de snapshot.
-    for day, mode in ((6, "rc99"), (7, "marker100"), (8, "install")):
+    for day, mode in ((7, "rc99"), (8, "marker100"), (9, "install")):
         node.mode = mode
         run = await night(day)
         assert run["status"] == "teruggedraaid", (mode, run)
@@ -203,9 +228,9 @@ async def test_apt_get_update_mislukt_snachts_niet_terugdraaien(authed, monkeypa
     # De proef van vannacht zegt het ook.
     p = await upgrade.describe_auto(db, NO_HTTP)
     inst = next(s for s in p["steps"] if s["call"].startswith("alleen de beveiligingsupdates"))
-    assert "lukt apt-get update (of apk update) niet" in inst["call"] and "niet teruggedraaid" in inst["on_fail"]
+    assert "lukt apt-get update (of apk update) of het downloaden niet" in inst["call"] and "niet teruggedraaid" in inst["on_fail"]
     back = next(s for s in p["steps"] if s["call"].startswith("pct rollback"))
-    assert "niet als alleen apt-get update mislukt" in back["when"]
+    assert "niet als apt-get update of het downloaden mislukt" in back["when"]
     await agen.aclose()
 
 
