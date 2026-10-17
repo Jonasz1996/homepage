@@ -42,9 +42,9 @@ class _Echo(BaseHTTPRequestHandler):
         pass
 
 
-def _free_port() -> int:
+def _free_port(host: str = "127.0.0.1") -> int:
     with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
+        s.bind((host, 0))
         return s.getsockname()[1]
 
 
@@ -100,26 +100,37 @@ def _running(tmp: Path, host: str = "127.0.0.1", **kw):
     """nginx met de configuratie uit deploy/ (render) voor de echo-server; geeft de poort."""
     echo = ThreadingHTTPServer(("127.0.0.1", 0), _Echo)
     threading.Thread(target=echo.serve_forever, daemon=True).start()
-    port = _free_port()
-    conf = render(tmp, port, echo.server_address[1], host=host, **kw)
-    test = subprocess.run([NGINX, "-t", "-p", str(tmp), "-c", str(conf)], capture_output=True, text=True)
-    assert test.returncode == 0, test.stderr
-    proc = subprocess.Popen([NGINX, "-p", str(tmp), "-c", str(conf)], stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL)
+    proc = None
     try:
-        for _ in range(100):
-            try:
-                socket.create_connection((host, port), timeout=0.2).close()
+        # Een vrije poort op het adres zelf. Tussen het kiezen en de start van nginx kan een ander socket (bv. een
+        # verbinding van een vorige test vanaf dat adres) ze nog nemen: dan een andere poort, tot 5 keer.
+        for poging in range(5):
+            port = _free_port(host)
+            conf = render(tmp, port, echo.server_address[1], host=host, **kw)
+            test = subprocess.run([NGINX, "-t", "-p", str(tmp), "-c", str(conf)], capture_output=True, text=True)
+            assert test.returncode == 0, test.stderr
+            log = tmp / "error.log"
+            log.unlink(missing_ok=True)
+            proc = subprocess.Popen([NGINX, "-p", str(tmp), "-c", str(conf)], stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
+            for _ in range(100):
+                try:
+                    socket.create_connection((host, port), timeout=0.2).close()
+                    break
+                except OSError:
+                    if proc.poll() is not None:
+                        break
+                    time.sleep(0.05)
+            if proc.poll() is None:
                 break
-            except OSError:
-                if proc.poll() is not None:
-                    log = tmp / "error.log"
-                    pytest.fail(f"nginx startte niet: {log.read_text() if log.exists() else ''}")
-                time.sleep(0.05)
+            text = log.read_text() if log.exists() else ""
+            if "Address already in use" not in text or poging == 4:
+                pytest.fail(f"nginx startte niet: {text}")
         yield port
     finally:
-        proc.terminate()
-        proc.wait(10)
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            proc.wait(10)
         echo.shutdown()
         echo.server_close()
 
