@@ -7,7 +7,8 @@
   // Eén run van een nieuwe service (maken, opruimen of ongedaan maken), stap per stap. Loopt hij nog, dan kijkt dit
   // elke 1,5 s opnieuw. undo: bij een run die halverwege stopte de knoppen om weg te halen wat hij al maakte.
   // onfinish(run): de run is klaar of gestopt. onundo(run): ongedaan maken is gestart (dat is een nieuwe run).
-  let { run: start, undo = false, onfinish = null, onundo = null } = $props()
+  // echt: "echt uitvoeren" staat aan; anders alleen de proef van ongedaan maken.
+  let { run: start, undo = false, echt = false, onfinish = null, onundo = null } = $props()
 
   let run = $state(untrack(() => start))
   let stop = null
@@ -98,8 +99,10 @@
   {#if undo && run.can_undo}
     <div class="btns">
       <button class="mini" disabled={busy} onclick={undoProef}>proef van ongedaan maken</button>
-      {#if plan?.steps?.length}<button class="mini x" disabled={busy} onclick={undoRun}>ongedaan maken</button>{/if}
+      {#if plan?.steps?.length && echt}<button class="mini x" disabled={busy} onclick={undoRun}>ongedaan maken</button>{/if}
     </div>
+    {#if plan?.steps?.length && !echt}<p class="hint small">Echt uitvoeren staat uit: zet het bovenaan aan om dit echt
+      ongedaan te maken.</p>{/if}
     {#if note}<p class="hint small">{note}</p>{/if}
     {#if error}<p class="err">{error}</p>{/if}
     {#if plan}<ProefPlan {plan} onclose={() => (plan = null)} />{/if}

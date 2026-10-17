@@ -9,7 +9,8 @@
   // Tabblad "maken": één formulier voor proxy host, certificaat, DNS, tegel en back-up. Eerst de proef (die verandert
   // niets), dan uitvoeren met precies dat plan (de server weigert als er intussen iets veranderde).
   // opties: GET /nieuweservice/opties (null zolang die laadt). ondone: een nieuwe service is klaar (de tegels herladen).
-  let { opties = null, groups = [], ondone = null, onclose } = $props()
+  // echt: "echt uitvoeren" staat aan; anders alleen de proef.
+  let { opties = null, groups = [], echt = false, ondone = null, onclose } = $props()
 
   const blank = () => ({
     name: '', ip: '', port: '', scheme: 'http', exposure: 'publiek', cert: 'auto', acl: '', p443: false, protect: '',
@@ -119,7 +120,7 @@
     <p class="done">Klaar: {run.fqdn} werkt. <a href={link} target="_blank" rel="noopener noreferrer">{link}</a></p>
   {/if}
   {#key run.id}
-    <RunSteps {run} undo={run.kind === 'maken'} onfinish={(r) => { run = r; finished(r) }} onundo={(r) => (run = r)} />
+    <RunSteps {run} undo={run.kind === 'maken'} {echt} onfinish={(r) => { run = r; finished(r) }} onundo={(r) => (run = r)} />
   {/key}
   {#if run.status !== 'bezig'}
     <div class="btns">
@@ -235,8 +236,10 @@
   {#if plan && changed}<p class="hint small w">Gewijzigd na de proef: doe de proef opnieuw.</p>{/if}
   <div class="btns">
     <button class="mini" disabled={busy} onclick={() => proef()}>proef</button>
-    {#if plan?.kan && !changed}<button class="mini ok" disabled={busy} onclick={go}>uitvoeren</button>{/if}
+    {#if plan?.kan && !changed && echt}<button class="mini ok" disabled={busy} onclick={go}>uitvoeren</button>{/if}
   </div>
+  {#if plan?.kan && !changed && !echt}<p class="hint small">Echt uitvoeren staat uit: dit was alleen de proef. Zet het
+    bovenaan aan om het echt te maken.</p>{/if}
   {#if plan && !plan.kan && plan.waarom?.length}
     <div class="no">Kan niet:
       <ul>{#each plan.waarom as w, i (i)}<li>{w}</li>{/each}</ul>

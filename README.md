@@ -177,6 +177,10 @@ zegt het venster dat in plaats van "werkt". Dit stel je één keer in:
    het ergste; zet de Docker-naam van NPM bij `npm_names` (API-beheer, NPM). Een toegangslijst is niet nodig als alle
    namen via de tunnel gaan zonder wildcard; wijst er één (of `*.jbogaert.be`) naar je thuis-IP, dan wel.
 7. **Van buitenaf**: niets; het volgt ⚿ → van buitenaf → acties.
+8. **Echt uitvoeren**: staat standaard uit, ook na een update van een bestaande installatie. Tot dan werkt alleen de
+   proef (maken, opruimen en ongedaan maken weigeren, ! → instellingen zegt "alleen als proef"). Klopt een proef op
+   je echte systemen, zet dan bovenaan in het venster **echt uitvoeren** aan; dat vraagt je 2FA-code, kan niet van
+   buitenaf en staat in het auditlog. Uitzetten kan altijd, zonder code.
 
 Fase 5, SSH-terminal (knop `>_` in de titelbalk):
 

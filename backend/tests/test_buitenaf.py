@@ -102,6 +102,8 @@ def test_welke_routes_van_buitenaf_uit_staan():
         "POST /api/nieuweservice/opruimen/proef": "acties", "POST /api/nieuweservice/opruimen": "acties",
         "POST /api/nieuweservice/runs/{run_id}/ongedaan/proef": "acties",
         "POST /api/nieuweservice/runs/{run_id}/ongedaan": "acties",
+        # Echt uitvoeren aan of uit: van buitenaf geen van beide, zoals de runs zelf.
+        "PUT /api/nieuweservice/echt": "acties",
     }
     ws = {r.path for r in _routes() if isinstance(r, WebSocketRoute)}
     assert ws == {"/api/ssh/ws/{host_id}", "/api/cron/ws/run/{job_id}", "/api/cron/ws/tail/{target}"}
@@ -118,6 +120,10 @@ async def test_nieuwe_service_van_buitenaf_uit(authed):
                        ("/api/nieuweservice/runs/ns-x/ongedaan", {"plan_hash": "0" * 16})):
         r = await authed.post(path, json=body, headers=CF)
         assert r.status_code == 403 and r.json()["detail"] == "buiten:acties", (path, r.text)
+    for on in (True, False):
+        r = await authed.put("/api/nieuweservice/echt", json={"on": on}, headers=CF)
+        assert r.status_code == 403 and r.json()["detail"] == "buiten:acties", r.text
+    assert (await authed.get("/api/nieuweservice/echt", headers=CF)).json()["on"] is False
     assert (await authed.get("/api/nieuweservice/domein", headers=CF)).json() == {"domain": None}
     assert (await authed.get("/api/nieuweservice/runs", headers=CF)).json() == {"runs": [], "busy": None}
 

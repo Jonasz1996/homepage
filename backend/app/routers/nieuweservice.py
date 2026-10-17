@@ -1,7 +1,8 @@
 """Nieuwe service in één keer, en een service opruimen (het werk zelf staat in nieuweservice.py).
 
 Elke actie heeft een proef (gewoon ingelogd) en een echte run (verse 2FA, de hash van de proef). De run loopt in de
-achtergrond; de browser vraagt de stand op met GET /runs/{id}.
+achtergrond; de browser vraagt de stand op met GET /runs/{id}. Echte runs pas als "echt uitvoeren" aan staat (PUT
+/echt, aanzetten vraagt een verse 2FA); tot dan werkt alleen de proef.
 """
 
 import asyncio
@@ -116,6 +117,11 @@ class HashIn(BaseModel):
     plan_hash: str = Field(pattern=HASH)
 
 
+class EchtIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    on: bool
+
+
 # --- hulpjes -------------------------------------------------------------------------------------------------------
 
 async def _runs(db: AsyncSession) -> list[dict]:
@@ -128,6 +134,15 @@ async def _run(db: AsyncSession, run_id: str) -> dict:
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Run niet gevonden")
     return ns.effective(run)
+
+
+async def _real_on(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> None:
+    """Een echte run kan pas als "echt uitvoeren" aan staat. Vóór de 2FA-vraag: aanzetten gaat apart."""
+    if not (await ns.real(db))["on"]:
+        raise HTTPException(status.HTTP_409_CONFLICT, ns.REAL_OFF)
+
+
+REAL = Depends(_real_on)
 
 
 def _accept(plan: ns.Plan, plan_hash: str, empty: str) -> None:
@@ -224,6 +239,27 @@ async def get_run(run_id: str, user: User = Depends(current_user), db: AsyncSess
     return ns.run_out(await _run(db, run_id))
 
 
+@router.get("/echt")
+async def echt(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    return await ns.real(db)
+
+
+@router.put("/echt", dependencies=[outside.guard("acties")])
+async def put_echt(body: EchtIn, request: Request, sess: Session = Depends(current_session),
+                   user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Echt uitvoeren aan (verse 2FA, zoals een run zelf) of uit (altijd, zonder 2FA). Van buitenaf allebei uit, zoals
+    de runs. In het auditlog."""
+    was = (await ns.real(db))["on"]
+    if body.on and not was:
+        await recent_auth(sess, user)
+    if body.on == was:
+        return await ns.real(db)
+    out = await ns.set_real(db, body.on, user)
+    await audit(db, request, user, "nieuwe_service_echt", on=body.on)
+    await db.commit()
+    return out
+
+
 @router.get("/losse-dns")
 async def losse_dns(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """Records die dit dashboard maakte en waarvan NPM de naam niet meer kent (als het tabblad opruimen opengaat)."""
@@ -239,7 +275,7 @@ async def proef(body: NieuwIn, request: Request, user: User = Depends(current_us
     return await _proef_audit(db, request, user, "maken", plan, body.model_dump(mode="json"))
 
 
-@router.post("/maken", status_code=status.HTTP_202_ACCEPTED, dependencies=[outside.guard("acties")])
+@router.post("/maken", status_code=status.HTTP_202_ACCEPTED, dependencies=[outside.guard("acties"), REAL])
 async def maken(body: NieuwRun, request: Request, user: User = Depends(recent_auth),
                 db: AsyncSession = Depends(get_db)):
     plan = await ns.plan_create(db, integrations_router.clients, body, at_run=True, who=user.username)
@@ -256,7 +292,7 @@ async def opruimen_proef(body: OpruimIn, request: Request, user: User = Depends(
     return await _proef_audit(db, request, user, "opruimen", plan, body.model_dump(mode="json"))
 
 
-@router.post("/opruimen", status_code=status.HTTP_202_ACCEPTED, dependencies=[outside.guard("acties")])
+@router.post("/opruimen", status_code=status.HTTP_202_ACCEPTED, dependencies=[outside.guard("acties"), REAL])
 async def opruimen(body: OpruimRun, request: Request, sess: Session = Depends(current_session),
                    user: User = Depends(recent_auth), db: AsyncSession = Depends(get_db)):
     plan = await _cleanup_plan(db, body, user.username)
@@ -281,7 +317,8 @@ async def ongedaan_proef(run_id: str, request: Request, user: User = Depends(cur
     return await _proef_audit(db, request, user, "ongedaan", plan, {"run": run["id"]})
 
 
-@router.post("/runs/{run_id}/ongedaan", status_code=status.HTTP_202_ACCEPTED, dependencies=[outside.guard("acties")])
+@router.post("/runs/{run_id}/ongedaan", status_code=status.HTTP_202_ACCEPTED,
+             dependencies=[outside.guard("acties"), REAL])
 async def ongedaan(run_id: str, body: HashIn, request: Request, sess: Session = Depends(current_session),
                    user: User = Depends(recent_auth), db: AsyncSession = Depends(get_db)):
     run, plan = await _undo_plan(db, request, run_id, user.username)
