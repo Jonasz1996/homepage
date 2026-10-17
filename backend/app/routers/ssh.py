@@ -397,8 +397,9 @@ async def watch_session(ws: WebSocket, db: AsyncSession) -> None:
             return
 
 
-async def _hostkey_answer(ws: WebSocket) -> bool:
-    """Wacht op Aanvaarden of Weigeren. Typen of het venster vergroten terwijl de kaart open staat, is geen antwoord."""
+async def _hostkey_answer(ws: WebSocket, size: list[int]) -> bool:
+    """Wacht op Aanvaarden of Weigeren. Typen of het venster vergroten terwijl de kaart open staat, is geen antwoord;
+    een nieuwe grootte onthouden we wel voor de shell."""
     while True:
         m = await ws.receive()
         if m["type"] == "websocket.disconnect":
@@ -409,6 +410,9 @@ async def _hostkey_answer(ws: WebSocket) -> bool:
             continue
         if isinstance(d, dict) and d.get("t") in ("accept", "reject"):
             return d["t"] == "accept"
+        if isinstance(d, dict) and d.get("t") == "r":
+            with contextlib.suppress(KeyError, TypeError, ValueError):
+                size[:] = [int(d["c"]), int(d["r"])]
 
 
 @router.websocket("/ws/{host_id}")
@@ -434,7 +438,7 @@ async def terminal(ws: WebSocket, host_id: int, cols: int = 100, rows: int = 30,
     # Eigen sleutel of wachtwoord van de host; anders de standaard login. Gebruiker leeg = standaard.
     login = await login_for(db, h)
     tcp = TcpVolger()
-    fetched = False
+    size = [cols, rows]
     try:
         # Eerste keer: hostsleutel tonen en laten bevestigen (zoals ssh het zelf vraagt).
         if not h.host_key:
@@ -444,10 +448,9 @@ async def terminal(ws: WebSocket, host_id: int, cols: int = 100, rows: int = 30,
             await _send(ws, t="status", m=f"Eerste verbinding: vingerafdruk (hostsleutel) van de server "
                                           f"{h.host}:{h.port} ophalen, nog voor het aanmelden…")
             server_key = await asyncio.wait_for(asyncssh.get_server_host_key(h.host, h.port), CONNECT_TIMEOUT)
-            fetched = True
             await _send(ws, t="hostkey", fp=server_key.get_fingerprint("sha256"), alg=server_key.get_algorithm())
             try:
-                accepted = await asyncio.wait_for(_hostkey_answer(ws), HOSTKEY_WAIT)
+                accepted = await asyncio.wait_for(_hostkey_answer(ws, size), HOSTKEY_WAIT)
             except asyncio.TimeoutError:
                 await _send(ws, t="error", m="Hostsleutel niet bevestigd binnen 2 minuten: verbind opnieuw")
                 await ws.close()
@@ -456,10 +459,16 @@ async def terminal(ws: WebSocket, host_id: int, cols: int = 100, rows: int = 30,
                 await _send(ws, t="error", m="Hostsleutel niet aanvaard")
                 await ws.close()
                 return
+            # Tijdens de vraag kan de host gewijzigd (✎), verwijderd of de standaard login ingesteld zijn: opnieuw lezen.
+            if await db.get(SshHost, host_id, populate_existing=True) is None:
+                await _send(ws, t="error", m="Host intussen verwijderd")
+                await ws.close()
+                return
             h.host_key = server_key.export_public_key().decode().strip()
             db.add(AuditLog(user_id=user.id, action="ssh_hostkey_accepted", ip=ip,
                             detail={"name": h.name, "fp": server_key.get_fingerprint("sha256")}))
             await db.commit()
+            login = await login_for(db, h)
 
         await _send(ws, t="status", m=f"Verbinden met {login.username}@{h.host} ({methode(login)})…")
         conn = await asyncio.wait_for(asyncssh.connect(
@@ -482,7 +491,7 @@ async def terminal(ws: WebSocket, host_id: int, cols: int = 100, rows: int = 30,
         await ws.close()
         return
     except (OSError, asyncio.TimeoutError, asyncssh.Error) as e:
-        why = waarom(e, h.host, h.port, CONNECT_TIMEOUT, antwoordt=fetched or tcp.tcp)
+        why = waarom(e, h.host, h.port, CONNECT_TIMEOUT, antwoordt=tcp.tcp)
         await _send(ws, t="error", m=f"Verbinden mislukt: {why}")
         await ws.close()
         return
@@ -495,7 +504,7 @@ async def terminal(ws: WebSocket, host_id: int, cols: int = 100, rows: int = 30,
     await db.commit()
 
     async with conn:
-        proc = await conn.create_process(term_type="xterm-256color", term_size=(max(10, cols), max(4, rows)),
+        proc = await conn.create_process(term_type="xterm-256color", term_size=(max(10, size[0]), max(4, size[1])),
                                          encoding=None, stderr=asyncssh.STDOUT)
         await _send(ws, t="ready")
 

@@ -171,10 +171,72 @@ async def test_typen_of_vergroten_bij_de_kaart_is_geen_antwoord(authed, sshd):  
     await ws.send_bytes(b"yes\r")
     await ws.to_app.put({"type": "websocket.receive", "text": "geen json"})
     await ws.send_text([1, 2])
+    await ws.send_text({"t": "r", "c": "x"})
     await ws.send_text({"t": "accept"})
     assert (await ws.json())["m"].startswith("Verbinden met root@127.0.0.1")
     assert (await ws.json())["t"] == "ready"
+    # De grootte van tijdens de vraag geldt voor de shell (de WS ging open met 80x24).
+    assert b"welkom root 120x40" in await ws.read_until(b"welkom")
     await ws.close()
+
+
+async def test_login_ingesteld_terwijl_de_kaart_open_staat(authed, sshd):  # noqa: F811
+    """De kaart zegt: na Aanvaarden met de login van de host of ⚙ standaard. Wie die nu pas invult, moet erin."""
+    hid = await _host(authed, sshd["port"])
+    ws = WS(f"/api/ssh/ws/{hid}", _cookie(authed))
+    await ws.open()
+    await ws.json()
+    assert (await ws.json())["t"] == "hostkey"
+    assert (await authed.put("/api/ssh/defaults", json={"username": "root", "password": "goed"})).status_code == 200
+    await ws.send_text({"t": "accept"})
+    assert (await ws.json())["m"] == "Verbinden met root@127.0.0.1 (wachtwoord uit ⚙ standaard)…"
+    assert (await ws.json())["t"] == "ready"
+    await ws.close()
+
+    # Hetzelfde met een eigen wachtwoord via ✎.
+    hid = await _host(authed, sshd["port"])
+    assert (await authed.put("/api/ssh/defaults", json={"username": "root", "password": ""})).status_code == 200
+    ws = WS(f"/api/ssh/ws/{hid}", _cookie(authed))
+    await ws.open()
+    await ws.json()
+    assert (await ws.json())["t"] == "hostkey"
+    r = await authed.patch(f"/api/ssh/hosts/{hid}", json={"name": "ct", "host": "127.0.0.1", "port": sshd["port"],
+                                                         "password": "goed"})
+    assert r.status_code == 200, r.text
+    await ws.send_text({"t": "accept"})
+    assert (await ws.json())["m"] == "Verbinden met root@127.0.0.1 (wachtwoord van deze host)…"
+    assert (await ws.json())["t"] == "ready"
+    await ws.close()
+
+
+async def test_host_verwijderd_terwijl_de_kaart_open_staat(authed, sshd):  # noqa: F811
+    hid = await _host(authed, sshd["port"], password="goed")
+    ws = WS(f"/api/ssh/ws/{hid}", _cookie(authed))
+    await ws.open()
+    await ws.json()
+    assert (await ws.json())["t"] == "hostkey"
+    assert (await authed.delete(f"/api/ssh/hosts/{hid}")).status_code in (200, 204)
+    await ws.send_text({"t": "accept"})
+    assert await ws.json() == {"t": "error", "m": "Host intussen verwijderd"}
+    await asyncio.wait_for(ws.task, 5)
+
+
+async def test_hostsleutel_gelukt_maar_daarna_geen_tcp_is_wel_netwerk(authed, sshd, monkeypatch):  # noqa: F811
+    """Tussen de hostsleutel en Aanvaarden kan de machine weggevallen zijn: dan geen "antwoordt, maar"."""
+    async def hangt(*a, **kw):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(ssh_router, "CONNECT_TIMEOUT", 0.3)
+    hid = await _host(authed, sshd["port"], password="goed")
+    ws = WS(f"/api/ssh/ws/{hid}", _cookie(authed))
+    await ws.open()
+    await ws.json()
+    assert (await ws.json())["t"] == "hostkey"
+    monkeypatch.setattr(ssh_router.asyncssh, "connect", hangt)
+    await ws.send_text({"t": "accept"})
+    await ws.json()
+    err = await ws.json()
+    assert err["m"].startswith(f"Verbinden mislukt: geen antwoord van 127.0.0.1:{sshd['port']} binnen 0.3 s.")
 
 
 class Disc(asyncssh.SSHServer):
