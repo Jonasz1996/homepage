@@ -3,6 +3,7 @@
   import { api, poll, withReauth } from './api.js'
   import { AREA, FIX_LABEL } from './attention.js'
   import { CHANGELOG } from './changelog.js'
+  import { entries as browserErrors } from './errorring.js'
   import Modal from './Modal.svelte'
   import Tabs from './Tabs.svelte'
 
@@ -41,7 +42,8 @@
     dl = true
     saved = ''
     try {
-      const d = await withReauth(() => api(`/diagnose?frontend=${latestNews}`))
+      // Met de laatste fouten en mislukte verzoeken uit deze browser (de server maskeert ze en bewaart ze niet).
+      const d = await withReauth(() => api('/diagnose', { method: 'POST', body: { frontend: latestNews, browser: browserErrors() } }))
       const a = document.createElement('a')
       a.href = URL.createObjectURL(new Blob([JSON.stringify(d, null, 1)], { type: 'application/json' }))
       a.download = d.bestand || 'homepage-diagnose.json'
@@ -79,7 +81,7 @@
   <Tabs items={tabs} bind:value={tab}>
     {#snippet extra()}
       <button class="mini" disabled={dl} onclick={diagnose}
-              title="Eén bestand voor een foutmelding: versies, de checklist, fouten per integratie en de laatste 200 logregels van API, worker en syslog. Wachtwoorden, tokens en sleutels zijn gemaskeerd, IP-adressen en namen niet. Vraagt je 2FA-code.">{dl ? 'bezig…' : 'diagnose ↓'}</button>
+              title="Eén bestand voor een foutmelding: versies, de checklist, fouten per integratie, de laatste 200 logregels van API, worker en syslog, en de laatste fouten in deze browser. Wachtwoorden, tokens en sleutels zijn gemaskeerd, IP-adressen en namen niet. Vraagt je 2FA-code.">{dl ? 'bezig…' : 'diagnose ↓'}</button>
     {/snippet}
   </Tabs>
   {#if error}<p class="err">{error}</p>{/if}

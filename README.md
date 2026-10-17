@@ -177,6 +177,10 @@ zegt het venster dat in plaats van "werkt". Dit stel je één keer in:
    het ergste; zet de Docker-naam van NPM bij `npm_names` (API-beheer, NPM). Een toegangslijst is niet nodig als alle
    namen via de tunnel gaan zonder wildcard; wijst er één (of `*.jbogaert.be`) naar je thuis-IP, dan wel.
 7. **Van buitenaf**: niets; het volgt ⚿ → van buitenaf → acties.
+8. **Echt uitvoeren**: staat standaard uit, ook na een update van een bestaande installatie. Tot dan werkt alleen de
+   proef (maken, opruimen en ongedaan maken weigeren, ! → instellingen zegt "alleen als proef"). Klopt een proef op
+   je echte systemen, zet dan bovenaan in het venster **echt uitvoeren** aan; dat vraagt je 2FA-code, kan niet van
+   buitenaf en staat in het auditlog. Uitzetten vraagt geen code (van buitenaf kan ook dat niet).
 
 Fase 5, SSH-terminal (knop `>_` in de titelbalk):
 
@@ -290,8 +294,15 @@ Later, deel 1 (tijdlijn, weekrapport en updates):
   apt of is een service down, dan krijg je een melding en zet *terugdraaien* de machine terug naar de snapshot.
   Fysieke nodes kunnen geen snapshot: dat moet je bewust kiezen (*toch installeren zonder snapshot*). Optioneel
   *alleen beveiligingsupdates*. Onder *'s nachts*: elke nacht om een gekozen uur de beveiligingsupdates, alleen waar
-  een snapshot kan; gaat het mis, dan draait de homepage zelf terug. Eigen snapshots (`hp-upd-…`) van geslaagde
-  installaties verdwijnen na 7 dagen (instelbaar)
+  een snapshot kan; gaat het mis, dan draait de homepage zelf terug. Mislukt `apt-get update` of het downloaden (mirror of
+  DNS weg; de pakketten worden eerst alleen gedownload), dan is er niets geïnstalleerd: de run mislukt met een
+  melding, maar er wordt niet teruggedraaid. Eigen
+  snapshots (`hp-upd-…`) van geslaagde installaties, en van runs die niets installeerden, verdwijnen na 7 dagen
+  (instelbaar). Het dashboard zelf (zijn eigen CT of VM, herkend aan zijn eigen adressen, MAC-adres en hostname) komt
+  nooit 's nachts of samen met andere machines aan de beurt: stopt apt daar halverwege (PostgreSQL of de API
+  herstart), dan is er niemand meer om te melden of terug te draaien. Werk het apart bij in de console van de
+  container (`apt update && apt upgrade`), het dashboard zelf met `deploy/bootstrap.sh`. Alleen die machine aanvinken
+  kan ook; de proef zegt dan wat er mis kan gaan
 - **zelfherstel** (in het mini dashboard van een service): "als Plex 3 checks na elkaar down is, herstart CT 105".
   Acties: de knoppen van de integraties (Proxmox herstart of start een VM/CT, Portainer herstart een container) of
   via SSH `systemctl restart` / `docker restart`. Hoogstens 2 keer per uur (instelbaar tot 5), minstens 10 minuten
@@ -612,7 +623,8 @@ Later, deel 3 (Authentik en gsm):
     (`pct snapshot` via SSH op de node, of de Proxmox-API), het apt- of apk-commando (het volledige script staat
     erbij), welke services daarna nagekeken worden en hoe terugdraaien gaat. In `apt` → 's nachts tonen *proef van
     vannacht* en *wat zou er opgeruimd worden* wat de volgende nachtelijke run en het volgende opruimen zouden doen,
-    ook welke machines de nachtelijke run overslaat (fysieke machines en nodes, daar kan geen snapshot)
+    ook welke machines de nachtelijke run overslaat (fysieke machines en nodes, daar kan geen snapshot, en het
+    dashboard zelf)
   - **zelfherstel** (mini dashboard): per regel en in het formulier. Elke voorwaarde (aan, N× down, onderhoud,
     wachttijd, limiet per uur) en de call of het commando. De proef kijkt ook: via de Proxmox-API of de VM/CT nog
     bestaat en of een herstart een start wordt, in Portainer of de container nog bestaat, en via SSH of `sudo -n`
@@ -638,8 +650,12 @@ Later, deel 3 (Authentik en gsm):
   beschrijven. Erin: de versies (ook PostgreSQL, TimescaleDB en de databasemigratie), de processen, de
   aandachtslijst, de instellingen-checklist, de fouten per tegel en per achtergrondtaak, webhooks, gsm's,
   zelfherstelregels, installaties van de laatste 7 dagen, cronjobs met een fout, de laatste 50 meldingen,
-  tijdlijnregels en audit-regels, wat de proefmodus zou doen, en de laatste 200 logregels van de API, de worker en de
-  syslog-ontvanger. Elk geheim dat het dashboard bewaart, is gemaskeerd (ook url-gecodeerd en als base64), net als
+  tijdlijnregels en audit-regels, wat de proefmodus zou doen (de nieuwste proeven met hun plan, begrensd), de laatste
+  5 runs van Nieuwe service (stappen, fouten en wat nog te doen is, zonder de invoer of de calls), hoe het laatste
+  noodplan liep (wanneer, waarom het mislukte, welke bronnen mislukten of oud zijn; niet het document), de laatste
+  200 logregels van de API, de worker en de syslog-ontvanger, en de laatste 50 fouten in je browser (niet opgevangen
+  fouten, verworpen beloftes en mislukte API-verzoeken, het pad zonder querystring). Die laatste houdt alleen het
+  tabblad bij (sessionStorage); ze gaan alleen mee met de diagnose en de server bewaart ze niet. Elk geheim dat het dashboard bewaart, is gemaskeerd (ook url-gecodeerd en als base64), net als
   alles wat op een token, sleutel of wachtwoord lijkt. IP-adressen, namen en gebruikersnamen staan er nog in: kijk
   het bestand na voor je het deelt. Vraagt je 2FA-code en staat van buitenaf uit zoals configuraties downloaden.
   De processen houden hun laatste logregels zelf bij, want de gebruiker `homepage` kan journald niet lezen. Wat vlak

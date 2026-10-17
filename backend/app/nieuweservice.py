@@ -51,6 +51,11 @@ from .monitoring.engine import active
 log = logging.getLogger("homepage.nieuweservice")
 
 STATE_KEY = "nieuwe_service"        # {"runs": [run, ...]}, nieuwste eerst
+# Echt uitvoeren (maken, opruimen, ongedaan maken) staat standaard uit, ook op een bestaande installatie: tot Jonas
+# het zelf aanzet nadat een proef op zijn echte systemen klopte. {"on": bool, "at": iso, "by": gebruiker}
+REAL_KEY = "nieuwe_service_echt"
+REAL_OFF = ("Echt uitvoeren staat uit: maken, opruimen en ongedaan maken lopen alleen als proef. Klopt een proef op je "
+            "echte systemen, zet het dan aan in Beheer → Nieuwe service (vraagt je 2FA-code).")
 KEEP_RUNS = 30
 LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")   # één DNS-label, zoals een wildcardcertificaat dekt
 COMMENT = "homepage: nieuwe service"
@@ -1786,6 +1791,22 @@ async def options(db: AsyncSession, clients) -> dict:
                                 "pbs": stores.get(j.get("storage")) == "pbs" and not j.get("dumpdir")
                                 and not coverage._on(j.get("all", 0)) and coverage._on(j.get("enabled", 1))})
     return out
+
+
+# --- echt uitvoeren --------------------------------------------------------------------------------------------------
+
+async def real(db: AsyncSession) -> dict:
+    """Mag een run echt iets veranderen? Zonder rij: nee."""
+    st = await db.get(AppState, REAL_KEY)
+    v = st.value if st and isinstance(st.value, dict) else {}
+    return {"on": v.get("on") is True, "at": v.get("at"), "by": v.get("by")}
+
+
+async def set_real(db: AsyncSession, on: bool, user: User) -> dict:
+    """De aanroeper vraagt een verse 2FA om het aan te zetten, schrijft de audit en commit."""
+    st = await ensure_state(db, REAL_KEY, {})
+    st.value = {"on": on, "at": _now(), "by": user.username}
+    return await real(db)
 
 
 # --- runs -------------------------------------------------------------------------------------------------------------
