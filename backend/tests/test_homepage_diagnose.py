@@ -148,5 +148,7 @@ def test_diagnose_met_postgresql(tmp_path):
     assert re.search(rf"\$ runuser -u postgres -- psql -X -d {url.database} -c SHOW max_connections\n"
                      rf" max_connections \n-+\n +{max_conn}\n", blok), blok
     assert "verbindingen" in blok and "alembic_version" in blok
+    # Het wachtwoord van de testdatabase lekt niet: niet in een url en niet als PGPASSWORD. Niet als los woord
+    # zoeken: in CI is het "postgres", en dat woord staat er terecht (runuser -u postgres, de gebruikersnaam).
     if url.password:
-        assert url.password not in text
+        assert f":{url.password}@" not in text and "PGPASSWORD" not in text
