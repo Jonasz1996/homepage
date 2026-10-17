@@ -51,7 +51,7 @@
     <p class="hint">Proxmox bevragen… Alle tegels tegelijk; een Proxmox die niet antwoordt, geeft na 8 s een time-out.</p>
   {:else}
     {#each data.errors as e}<p class="e">{e.service}: {e.error}</p>{/each}
-    {#if data.errors.length}
+    {#if data.errors.some((e) => e.kind !== 'node')}
       <p class="hint small">Adres of token aanpassen: hangt de tegel aan een API, dan in API-beheer bij die API, anders via
         ✎ bewerken → klik op de Proxmox-tegel. url = het IP van een node (bv. <code>https://192.168.0.50:8006</code>),
         insecure <code>true</code>, geheimen <code>username</code> = token-id (<code>homepage@pve!dashboard</code>) en
@@ -62,8 +62,8 @@
         ✎ bewerken → Integratie en API aan je Proxmox-API als ze iets van Proxmox moeten tonen.</p>
     {/if}
     {#if !data.items.length}
-      <p class="hint">{#if data.errors.length}Geen enkele Proxmox antwoordde, zie hierboven.
-        {:else if data.asked}Proxmox gaf geen nodes of machines terug.
+      <p class="hint">{#if data.asked && !data.answered}Geen enkele Proxmox antwoordde, zie hierboven.
+        {:else if data.asked}Proxmox gaf geen nodes of machines terug{data.errors.length ? ' voor deze tegels, zie hierboven' : ''}.
         {:else}Nog geen Proxmox om te bevragen. Voeg een tegel van type <b>proxmox</b> toe met een API-token, of koppel er
         een aan je Proxmox-API.{/if}</p>
     {/if}

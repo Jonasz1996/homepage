@@ -115,6 +115,8 @@ class Traag:
         if request.url.host == "oud.example":
             await asyncio.sleep(self.wacht)
             raise httpx.ConnectTimeout("geen antwoord", request=request)
+        if request.headers.get("authorization", "").endswith("=oud-geheim"):
+            return httpx.Response(401, json={"data": None})
         return self.pve(request)
 
 
@@ -140,7 +142,8 @@ async def test_discover_alles_tegelijk_en_elke_proxmox_een_keer(authed):
     assert fake.calls == {("pve50.jbogaert.be", "PVEAPIToken=homepage@pve!dash=geheim"): 1,
                           ("oud.example", "PVEAPIToken=homepage@pve!dash=geheim"): 1,
                           ("oud.example", "PVEAPIToken=homepage@pve!ander=geheim2"): 1}
-    assert found["asked"] == 3 and found["skipped"] == ["Kali"]
+    assert found["asked"] == 3 and found["answered"] == 1 and found["skipped"] == ["Kali"]
+    assert {e["kind"] for e in found["errors"]} == {"verbinding"}
     errors = {e["service"]: e["error"] for e in found["errors"]}
     assert set(errors) == {"oud1 (en oud2)", "oud3"}
     assert errors["oud3"].startswith("Time-out: https://oud.example antwoordt niet binnen 8 s")
@@ -148,6 +151,47 @@ async def test_discover_alles_tegelijk_en_elke_proxmox_een_keer(authed):
     by = {i["name"]: i for i in found["items"]}
     assert set(by) == {"pve50", "vaultwarden", "oud", "opnsense", "zonder-agent"}
     assert all(i["source"].startswith(f"pve:{cluster}:") for i in found["items"])
+    await db.close()
+
+
+async def test_discover_oud_geheim_sleurt_een_werkende_tegel_niet_mee(authed):
+    """Zelfde adres en token-id, maar een oud geheim (of geen insecure) op de tegel met het laagste id: die vraagt
+    apart en krijgt zijn eigen fout; de tegel met het goede geheim vindt alles, zoals vroeger."""
+    g = await _group(authed)
+    oud = await _svc(authed, g, "proxmox", "https://pve50.jbogaert.be", name="oud",
+                     secrets={"username": "homepage@pve!dash", "password": "oud-geheim"})
+    goed = await _svc(authed, g, "proxmox", "https://pve50.jbogaert.be", name="goed",
+                      secrets={"username": "homepage@pve!dash", "password": "geheim"})
+    await _svc(authed, g, "proxmox", "https://pve50.jbogaert.be", config={"insecure": True}, name="insecure",
+               secrets={"username": "homepage@pve!dash", "password": "geheim"})
+    db = await _db()
+    found = await discover(db, HttpClients(httpx.MockTransport(Traag())))
+    assert found["asked"] == 3 and found["answered"] == 2
+    assert [(e["service"], e["error"][:9]) for e in found["errors"]] == [("oud", "Geweigerd")]
+    assert found["items"] and all(i["source"].startswith(f"pve:{goed}:") for i in found["items"])
+    assert not any(i["source"].startswith(f"pve:{oud}:") for i in found["items"])
+    await db.close()
+
+
+async def test_discover_api_zonder_token_en_node_die_niet_bestaat(authed):
+    """Een tegel aan een API zonder token: een fout bij die API (niet "koppel aan je API"). Een tegel met een node die
+    niet in de cluster staat (andere nodenamen na een nieuwe cluster): zeggen welke nodes er wel zijn."""
+    g = await _group(authed)
+    r = await authed.post("/api/apis", json={"name": "Nieuwe cluster", "category": "Proxmox en back-up",
+                                             "kind": "proxmox", "url": "https://pve50.jbogaert.be", "config": {}})
+    assert r.status_code == 201, r.text
+    tile = await _svc(authed, g, "link", "https://pve50.jbogaert.be", name="cluster")
+    assert (await authed.post(f"/api/apis/{r.json()['id']}/tiles", json={"service_ids": [tile]})).json()["changed"] == 1
+    await _svc(authed, g, "proxmox", "https://pve50.jbogaert.be", config={"node": "pve99"}, name="proxmox99",
+               secrets={"username": "homepage@pve!dash", "password": "geheim"})
+    db = await _db()
+    found = await discover(db, HttpClients(httpx.MockTransport(Traag())))
+    assert found["skipped"] == [] and found["items"] == [] and found["answered"] == 1
+    errors = {e["service"]: e for e in found["errors"]}
+    assert errors["cluster"]["kind"] == "verbinding" and "Nieuwe cluster" in errors["cluster"]["error"]
+    assert "heeft nog geen token" in errors["cluster"]["error"]
+    assert errors["proxmox99"]["kind"] == "node"
+    assert errors["proxmox99"]["error"].startswith("node pve99 staat niet in deze cluster (wel: pve50)")
     await db.close()
 
 
@@ -165,8 +209,9 @@ async def test_discover_node_tegels_aan_een_api(authed):
     fake = Traag()
     db = await _db()
     found = await discover(db, HttpClients(httpx.MockTransport(fake)))
-    assert sum(fake.calls.values()) == 1 and found["asked"] == 1 and not found["errors"]
-    # Alles staat op pve50: het komt van de tegel pve50, niets van pve51.
+    assert sum(fake.calls.values()) == 1 and found["asked"] == 1
+    # Alles staat op pve50: het komt van de tegel pve50, niets van pve51 (die node kent de nep-cluster niet).
+    assert [(e["service"], e["kind"]) for e in found["errors"]] == [("pve51", "node")]
     assert found["items"] and all(i["source"].startswith(f"pve:{n50}:") for i in found["items"])
     await db.close()
 

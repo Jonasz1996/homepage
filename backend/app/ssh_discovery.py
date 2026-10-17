@@ -75,21 +75,35 @@ async def _guest_ip(integ, node: str, kind: str, vmid: int, running: bool) -> tu
 
 
 def _bron(services, clients) -> tuple[dict[tuple, list], list[dict], list[str]]:
-    """Wat ⟳ pve bevraagt: elke Proxmox (adres en token) één keer, met de tegels die hem gebruiken. Hangen vijf
-    node-tegels aan dezelfde API, dan één vraag in plaats van vijf time-outs. Tegels zonder token: apart."""
+    """Wat ⟳ pve bevraagt: elke vraag (adres, token met geheim, en dezelfde client: insecure of niet) één keer, met
+    de tegels die ze stellen. Hangen vijf node-tegels aan dezelfde API, dan één vraag in plaats van vijf time-outs;
+    een tegel met een oud geheim op hetzelfde adres vraagt apart, zodat hij een werkende tegel niet meesleurt.
+    Tegels zonder token en zonder API: apart (namen). Hangt een tegel aan een API zonder token: een fout bij die API."""
     groups: dict[tuple, list] = {}
-    errors, skipped = [], []
+    errors, skipped, leeg = [], [], {}
     for svc in services:
         try:
             integ = build(svc, clients)
         except IntegrationError as e:
-            errors.append({"service": svc.name, "error": str(e)})
+            errors.append({"service": svc.name, "error": str(e), "kind": "verbinding"})
             continue
-        if not (integ.secrets.get("username") and integ.secrets.get("password")):
-            skipped.append(svc.name)
+        user, secret = integ.secrets.get("username"), integ.secrets.get("password")
+        if not (user and secret):
+            api = svc.__dict__.get("api") if svc.api_id else None
+            if api is None:
+                skipped.append(svc.name)
+            else:
+                leeg.setdefault(api.name, []).append(svc.name)
             continue
-        groups.setdefault((integ.base, integ.secrets["username"]), []).append((svc, integ))
+        groups.setdefault((integ.base, user, secret, id(integ.client)), []).append((svc, integ))
+    for api, names in leeg.items():
+        errors.append({"service": _namen(names), "kind": "verbinding",
+                       "error": f"de API {api} in API-beheer heeft nog geen token (username en password)"})
     return groups, errors, skipped
+
+
+def _namen(names: list[str]) -> str:
+    return names[0] + (f" (en {', '.join(names[1:])})" if len(names) > 1 else "")
 
 
 async def _vraag(integ) -> tuple[list, list]:
@@ -120,8 +134,7 @@ async def discover(db: AsyncSession, clients) -> dict:
         if isinstance(answers[k], BaseException):
             if not isinstance(answers[k], IntegrationError):
                 raise answers[k]
-            names = [svc.name for svc, _ in groups[k]]
-            errors.append({"service": names[0] + (f" (en {', '.join(names[1:])})" if len(names) > 1 else ""),
+            errors.append({"service": _namen([svc.name for svc, _ in groups[k]]), "kind": "verbinding",
                            "error": _fout(groups[k][0][1], answers[k])})
 
     items, seen, todo = [], set(), []
@@ -132,6 +145,13 @@ async def discover(db: AsyncSession, clients) -> dict:
             continue
         res, status = answers[key]
         node_filter = integ.config.get("node")
+        if node_filter:
+            nodes = sorted({r.get("node") for r in res or [] if r.get("type") == "node" and r.get("node")})
+            if nodes and node_filter not in nodes:
+                # Bv. een nieuwe cluster met andere nodenamen: de tegel vindt dan niets, zeg waarom.
+                errors.append({"service": svc.name, "kind": "node",
+                               "error": f"node {node_filter} staat niet in deze cluster (wel: {', '.join(nodes)}). "
+                                        "Pas de node van de tegel aan onder ✎ bewerken → Integratie en API."})
         res = [r for r in res or [] if not node_filter or r.get("node") == node_filter]
         node_ip = {s.get("name"): s.get("ip") for s in status or [] if s.get("type") == "node"}
         for r in res:
@@ -163,7 +183,8 @@ async def discover(db: AsyncSession, clients) -> dict:
         i["host_id"] = h.id if h else None
         i["known"] = bool(h) or (i["host"], 22) in by_addr
     items.sort(key=lambda i: (i["folder"], i["kind"] != "node", i["name"].lower()))
-    return {"items": items, "errors": errors, "skipped": skipped, "asked": len(keys)}
+    answered = sum(not isinstance(a, BaseException) for a in got)
+    return {"items": items, "errors": errors, "skipped": skipped, "asked": len(keys), "answered": answered}
 
 
 async def apply(db: AsyncSession, items: list[dict], add_new: bool = True) -> dict:
