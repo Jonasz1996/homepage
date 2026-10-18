@@ -176,7 +176,13 @@ async def logged_in(conn: HTTPConnection, db: AsyncSession) -> bool:
 
 async def outside_without_login(conn: HTTPConnection, db: AsyncSession) -> bool:
     """Overal zonder login en zonder echte login: dan blijven van buitenaf de gevaarlijke functies dicht. (Of het
-    verzoek van buitenaf komt, kijkt de aanroeper.)"""
+    verzoek van buitenaf komt, kijkt de aanroeper.)
+
+    Loopt dit verzoek zonder login (deps.optional_session, routers/ssh._ws_user), dan altijd: de stand opnieuw lezen
+    volstaat niet. Wie van buitenaf aanmelden strenger zet (dat mag zonder login), zou anders zijn eigen verzoeken die
+    nog zonder login lopen langs deze controle krijgen."""
+    if getattr(conn.state, "zonder_login", False) or getattr(conn.state, "zonder_cookie", False):
+        return True
     return (await settings(db))["mode"] == "overal" and not await logged_in(conn, db)
 
 

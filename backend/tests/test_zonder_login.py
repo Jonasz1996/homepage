@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from app import zonderlogin
 from app.integrations import calls as callmod
+from app.db import ensure_state
 from app.main import app
 from app.monitoring import checks
 from app.models import AppState, AuditLog, ConfigVersion, Notification, Session
@@ -418,6 +419,36 @@ async def test_van_buitenaf_met_echte_login_nog_2fa(authed):
     async with _client(WAN) as c:
         c.cookies.set("hp_session", cookie)
         assert (await c.put("/api/outside/aanmelden", json={"mode": "uit"})).status_code == 200
+
+
+async def test_strenger_zetten_tijdens_je_eigen_verzoek(authed, monkeypatch):
+    """Van buitenaf mag iedereen aanmelden strenger zetten. Gebeurt dat terwijl een eigen verzoek zonder login nog
+    loopt, dan blijft dat verzoek zonder login: de stand opnieuw lezen mag het niet langs de controles laten."""
+    for f in ("terminal", "acties"):
+        assert (await authed.put(f"/api/outside/features/{f}", json={"mode": "aan"})).status_code == 200
+    await _mode(authed, "overal")
+    orig = zonderlogin.home_user
+
+    async def tighten(db):  # net nadat optional_session besliste dat dit verzoek zonder login mag
+        st = await ensure_state(db, zonderlogin.KEY, {})
+        st.value = {"mode": "thuis"}
+        await db.commit()
+        return await orig(db)
+
+    monkeypatch.setattr(zonderlogin, "home_user", tighten)
+    async with _client(WAN) as c:
+        for method, url, kw, detail in (
+                ("POST", "/api/ssh/keys", {"json": {"name": "aanvaller"}}, "buiten:terminal"),
+                ("POST", "/api/apis", {"json": {"name": "x", "type": "rest", "url": "https://example.com"}},
+                 "buiten:acties"),
+                ("PUT", "/api/outside/features/terminal", {"json": {"mode": "uur"}}, "Zonder login"),
+                ("POST", "/api/auth/password", {"json": {"current": PASSWORD, "new": "een-nieuw-lang-wachtwoord"}},
+                 "Zonder login"),
+                ("PUT", "/api/auth/oidc/settings", {"json": {"enabled": False, "issuer": "https://evil.example/",
+                                                             "client_id": "x"}}, "Zonder login")):
+            await _mode(authed, "overal")
+            r = await c.request(method, url, **kw)
+            assert r.status_code == 403 and r.json()["detail"].startswith(detail), (url, r.text)
 
 
 async def test_wachtwoord_raden(authed):

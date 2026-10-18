@@ -33,7 +33,7 @@
         <b>{OUTSIDE[feature] || feature}</b> niet, ook niet als het op <i>altijd</i> staat: anders kan iedereen die het
         adres kent het. Kijken kan wel.</p>
       <p class="hint">Thuis gaat het wel. Onderweg: zet in ⚿ → van buitenaf → Aanmelden op <i>altijd met 2FA</i> (dat
-        kan ook van buitenaf) en meld je aan.</p>
+        kan ook van buitenaf, terugzetten pas thuis) en meld je aan.</p>
     {:else}
       <p>Je bent van buitenaf verbonden (via Cloudflare of een publiek IP). Dan staat <b>{OUTSIDE[feature] || feature}</b> uit,
         zodat wie je login zou overnemen er niets mee kan. Kijken kan wel.</p>

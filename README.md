@@ -24,7 +24,8 @@ Fase 1 en 2 van het [stappenplan](https://claude.ai/code/artifact/fe2b226c-d5ef-
     `Sec-Fetch-*` niet meesturen (geweigerd bij opslaan, weggelaten bij versturen): anders doet een check die naar het
     dashboard wijst, zich voor als jouw browser;
   - losser zetten kan alleen thuis, strenger overal (van buitenaf bv. terug naar *altijd met 2FA*). Elke wijziging
-    komt in de meldingen en de auditlog; wat zonder cookie gebeurde (dus zonder login), staat er met `zonder_login`.
+    komt in de meldingen en de auditlog; in de auditlog staat wat zonder cookie gebeurde (dus zonder login) met
+    `zonder_login`, en een functie die zonder login aangaat, meldt "Iemand zonder login".
     hw → beveiliging waarschuwt zolang het overal uit staat
 - **bekende toestellen**: een toestel waarop je al met 2FA inlogde, krijgt een cookie (`hp_device`, een jaar geldig,
   bij elke login vernieuwd). Daar geldt de limiet van 30 foute pogingen per gebruikersnaam niet, die iedereen kan

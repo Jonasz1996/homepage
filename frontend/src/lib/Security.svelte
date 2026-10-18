@@ -89,7 +89,7 @@
   const LOGIN = [
     { mode: 'uit', label: 'altijd met 2FA', help: 'Overal je wachtwoord en 2FA-code.' },
     { mode: 'thuis', label: 'thuis zonder', help: 'Thuis geen login en geen 2FA-code; van buitenaf wel.' },
-    { mode: 'overal', label: 'overal zonder', help: 'Nergens een login of 2FA-code, ook niet van buitenaf. Wie het adres kent, kan alles zien en instellen, behalve terminal, updates, acties en downloads: die blijven van buitenaf dicht. Zet Authentik ervoor.' },
+    { mode: 'overal', label: 'overal zonder', help: 'Nergens een login of 2FA-code, ook niet van buitenaf. Wie het adres kent, kan alles zien en de gewone instellingen wijzigen; zonder echte login blijven van buitenaf dicht: terminal, updates, acties, downloads, Authentik, je wachtwoord en wat als thuis telt. Zet Authentik ervoor.' },
   ]
   // Hoe los: van buitenaf mag de stand alleen strenger (backend: zonderlogin.LOOSE).
   const LOOSE = { uit: 0, thuis: 1, overal: 2 }

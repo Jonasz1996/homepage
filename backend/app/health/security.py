@@ -63,8 +63,9 @@ async def check_2fa(db: AsyncSession) -> dict:
     fix = {"window": "security", "tab": "outside"}
     if mode == "overal":
         return item("2fa", "2FA voor elk account", "warn", "Aanmelden staat uit, ook van buitenaf: wie het adres kent, kan "
-                    "alles zien en instellen, behalve terminal, updates, acties en downloads. Zet Authentik ervoor, of zet "
-                    "aanmelden terug aan in ⚿ → van buitenaf.", fix=fix)
+                    "alles zien en de gewone instellingen wijzigen, maar niet de terminal, updates, acties, downloads, "
+                    "Authentik of je wachtwoord. Zet Authentik ervoor, of zet aanmelden terug aan in ⚿ → van buitenaf.",
+                    fix=fix)
     if mode == "thuis":
         return item("2fa", "2FA voor elk account", "info", "Thuis zonder login: van buitenaf vraagt het dashboard nog "
                     "login en 2FA.", fix=fix)
@@ -225,7 +226,8 @@ async def check_access(db: AsyncSession) -> dict:
         return item("access", "Slot voor het dashboard", "warn",
                     "Het laatste bezoek van buitenaf kwam zonder Cloudflare Access of Authentik binnen, en aanmelden staat "
                     "overal uit: iedereen die het adres kent, ziet en wijzigt het dashboard zonder login (behalve "
-                    "terminal, updates, acties en downloads). Zet er een slot voor in Cloudflare of NPM.", fix=fix)
+                    "terminal, updates, acties, downloads, Authentik en je wachtwoord). Zet er een slot voor in "
+                    "Cloudflare of NPM.", fix=fix)
     return item("access", "Slot voor het dashboard", "warn",
                 "Het laatste bezoek van buitenaf kwam zonder Cloudflare Access of Authentik binnen: iedereen krijgt het "
                 "loginscherm te zien. Zet er een slot voor in Cloudflare of NPM.", fix=fix)

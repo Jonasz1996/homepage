@@ -80,12 +80,12 @@ async def set_mode(key: str, data: ModeIn, request: Request, user: User = Depend
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Onbekende functie")
     cfg = await outside.settings(db)
     w = await outside.where(request, db, cfg)
+    if data.mode != "uit" and w["outside"] and await zonderlogin.outside_without_login(request, db):
+        # Anders zet iedereen die het adres kent hier de terminal aan.
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Zonder login kan je dit van buitenaf niet aanzetten. Thuis wel.")
     if data.mode == "aan" and w["outside"]:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Altijd aanzetten kan alleen thuis. Onderweg kan het voor één uur.")
     if data.mode != "uit" and w["outside"]:
-        if await zonderlogin.outside_without_login(request, db):
-            # Anders zet iedereen die het adres kent hier de terminal aan.
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "Zonder login kan je dit van buitenaf niet aanzetten. Thuis wel.")
         await fresh_auth(sess, user)  # ook overal zonder login: met een gestolen cookie alleen gaat het niet
     entry = {"mode": data.mode}
     if data.mode == "uur":
@@ -98,8 +98,10 @@ async def set_mode(key: str, data: ModeIn, request: Request, user: User = Depend
     await audit(db, request, user, "outside_mode", feature=key, mode=data.mode, outside=w["outside"])
     if data.mode != "uit":
         where = f"vanaf {w['ip']}{f' ({c})' if (c := client_country(request)) else ''}, {w['why']}"
+        who = f"Iemand zonder login (als {user.username})" if getattr(request.state, "zonder_login", False) \
+            else user.username
         notify(db, f"Van buitenaf: {label} {'één uur aan' if data.mode == 'uur' else 'altijd aan'}",
-               f"{user.username} zette dit aan {where}.", level="warn" if w["outside"] or data.mode == "aan" else "info",
+               f"{who} zette dit aan {where}.", level="warn" if w["outside"] or data.mode == "aan" else "info",
                source="auth")
     await db.commit()
     return {"features": _features(v)}
@@ -158,8 +160,9 @@ async def put_aanmelden(data: AanmeldenIn, request: Request, user: User = Depend
         notify(db, f"Aanmelden: {zonderlogin.LABELS[data.mode]}", {
             "uit": "Het dashboard vraagt weer overal je login met 2FA.",
             "thuis": "Thuis vraagt het dashboard geen login en geen 2FA-code meer; van buitenaf wel.",
-            "overal": "Het dashboard vraagt nergens nog een login of 2FA-code, ook niet van buitenaf. Terminal, "
-                      "updates, acties en downloads blijven van buitenaf dicht.",
+            "overal": "Het dashboard vraagt nergens nog een login of 2FA-code, ook niet van buitenaf. Zonder echte "
+                      "login blijven van buitenaf terminal, updates, acties en downloads dicht, net als Authentik en je "
+                      "wachtwoord wijzigen.",
         }[data.mode], level="info" if data.mode == "uit" else "warn", source="auth")
         await db.commit()
     return await _aanmelden(request, db)

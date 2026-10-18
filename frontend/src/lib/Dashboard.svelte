@@ -145,7 +145,7 @@
 
 <main class="wrap" ondragend={endDrag}>
   <Card title="homepage" glow class="top">
-    {#snippet right()}<Topbar {clock} uitloggen={!zonder || sessie} onlogout={logout} />{/snippet}
+    {#snippet right()}<Topbar {clock} uitloggen={!zonder || sessie} zonder={zonder && !sessie} onlogout={logout} />{/snippet}
     <div class="body head">
       <div class="hello">
         <h1>{greeting}, {user.username}</h1>
