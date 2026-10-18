@@ -240,6 +240,27 @@ async def test_aanmelden_van_buitenaf_alleen_strenger(authed):
     assert (await authed.put("/api/outside/aanmelden", json={"mode": "ergens"})).status_code == 422
 
 
+async def test_strenger_van_buitenaf_overschrijft_thuis_niet(authed, monkeypatch):
+    """Zet Jonas thuis net 'altijd met 2FA' terwijl een bezoeker van buitenaf 'thuis zonder' kiest, dan wint die lossere
+    stand niet: de controle kijkt naar de stand die overschreven wordt."""
+    from app.routers import outside as outside_router
+
+    await _mode(authed, "overal")
+    orig = outside_router.ensure_state
+
+    async def thuis_eerst(db, key, value=None):  # Jonas' verzoek komt net ertussen
+        st = await orig(db, zonderlogin.KEY, {})
+        st.value = {"mode": "uit"}
+        await db.commit()
+        return await orig(db, key, value)
+
+    monkeypatch.setattr(outside_router, "ensure_state", thuis_eerst)
+    async with _client(WAN) as c:
+        r = await c.put("/api/outside/aanmelden", json={"mode": "thuis"})
+        assert r.status_code == 403 and "losser" in r.json()["detail"], r.text
+    assert (await _state(zonderlogin.KEY))["mode"] == "uit"
+
+
 async def test_authentik_van_buitenaf_alleen_met_login(authed):
     await _mode(authed, "overal")
     body = {"enabled": False, "issuer": "https://evil.example/", "client_id": "x"}

@@ -7,7 +7,8 @@ Fase 1 en 2 van het [stappenplan](https://claude.ai/code/artifact/fe2b226c-d5ef-
 
 - inloggen met wachtwoord en verplichte 2FA (TOTP), eerste account via een eenmalige setup-code. Bevestigen (een
   actie, de terminal, een geheim wijzigen) gebeurt met je 2FA-code, nooit met je wachtwoord. Zonder login (hieronder)
-  vraagt het geen code, behalve van buitenaf met een echte login (zie daar)
+  vraagt het geen code, behalve van buitenaf met een echte login voor terminal, updates, acties, downloads, Authentik
+  en je wachtwoord (zie daar)
 - **zonder login** (standaard sinds nr 43, tot Authentik ervoor staat): ⚿ → *van buitenaf* → **Aanmelden** kiest
   *altijd met 2FA*, *thuis zonder* (thuis geen login en geen 2FA-code, van buitenaf wel) of *overal zonder*. Zonder
   login ben je het eerste account, zodra dat 2FA heeft; er is geen sessie en geen cookie. Wat blijft:

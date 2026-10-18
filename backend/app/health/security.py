@@ -226,8 +226,8 @@ async def check_access(db: AsyncSession) -> dict:
         return item("access", "Slot voor het dashboard", "warn",
                     "Het laatste bezoek van buitenaf kwam zonder Cloudflare Access of Authentik binnen, en aanmelden staat "
                     "overal uit: iedereen die het adres kent, ziet en wijzigt het dashboard zonder login (behalve "
-                    "terminal, updates, acties, downloads, Authentik en je wachtwoord). Zet er een slot voor in "
-                    "Cloudflare of NPM.", fix=fix)
+                    "terminal, updates, acties, downloads, Authentik, je wachtwoord en wat als thuis telt). Zet er een "
+                    "slot voor in Cloudflare of NPM.", fix=fix)
     return item("access", "Slot voor het dashboard", "warn",
                 "Het laatste bezoek van buitenaf kwam zonder Cloudflare Access of Authentik binnen: iedereen krijgt het "
                 "loginscherm te zien. Zet er een slot voor in Cloudflare of NPM.", fix=fix)

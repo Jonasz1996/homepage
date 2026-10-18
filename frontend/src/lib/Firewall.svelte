@@ -47,7 +47,7 @@
     <p>✓ {ACCESS[last.access]} stond voor het laatste bezoek van buitenaf ({when(last.ts)}, {last.ip}{last.country ? ` · ${last.country}` : ''}).</p>
   {:else}
     <p>Het laatste bezoek van buitenaf ({when(last.ts)}, {last.ip}{last.country ? ` · ${last.country}` : ''}) kwam zonder slot
-      binnen: {bare ? 'aanmelden staat overal uit, dus iedereen die het adres kent, ziet en wijzigt het dashboard zonder login (behalve terminal, updates, acties, downloads, Authentik en je wachtwoord).' : 'iedereen op internet krijgt je loginscherm te zien.'}</p>
+      binnen: {bare ? 'aanmelden staat overal uit, dus iedereen die het adres kent, ziet en wijzigt het dashboard zonder login (behalve terminal, updates, acties, downloads, Authentik, je wachtwoord en wat als thuis telt).' : 'iedereen op internet krijgt je loginscherm te zien.'}</p>
   {/if}
   {#if !last?.access}
     <p class="hint">Zet er een slot voor, zodat een aanvaller {bare ? 'niet eens bij het dashboard komt' : 'het loginscherm niet eens ziet'}: <b>Cloudflare Access</b>

@@ -150,19 +150,28 @@ class AanmeldenIn(BaseModel):
 async def put_aanmelden(data: AanmeldenIn, request: Request, user: User = Depends(recent_auth),
                         db: AsyncSession = Depends(get_db)):
     """Aanmelden aan of uit (zonderlogin.py). Losser zetten kan alleen thuis; strenger ook van buitenaf."""
-    current = (await zonderlogin.settings(db))["mode"]
-    if zonderlogin.LOOSE[data.mode] > zonderlogin.LOOSE[current] and (await outside.where(request, db))["outside"]:
+    out = (await outside.where(request, db))["outside"]
+    await ensure_state(db, zonderlogin.KEY, {})
+    # Vergelijken met de stand die we overschrijven (vergrendeld tot de commit): anders kan een strengere stand die
+    # thuis net bewaard werd, vervangen worden door een lossere van buitenaf.
+    st = await db.get(AppState, zonderlogin.KEY, with_for_update=True, populate_existing=True)
+    current = (st.value or {}).get("mode")
+    current = current if current in zonderlogin.MODES else zonderlogin.DEFAULT
+    if zonderlogin.LOOSE[data.mode] > zonderlogin.LOOSE[current] and out:
+        await db.rollback()
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Aanmelden losser zetten kan alleen thuis; strenger kan overal.")
     if data.mode != current:
-        st = await ensure_state(db, zonderlogin.KEY, {})
         st.value = {**(st.value or {}), "mode": data.mode}
         await audit(db, request, user, "aanmelden", mode=data.mode)
         notify(db, f"Aanmelden: {zonderlogin.LABELS[data.mode]}", {
             "uit": "Het dashboard vraagt weer overal je login met 2FA.",
             "thuis": "Thuis vraagt het dashboard geen login en geen 2FA-code meer; van buitenaf wel.",
-            "overal": "Het dashboard vraagt nergens nog een login of 2FA-code, ook niet van buitenaf. Zonder echte "
-                      "login blijven van buitenaf terminal, updates, acties en downloads dicht, net als Authentik en je "
-                      "wachtwoord wijzigen.",
+            "overal": "Het dashboard vraagt geen login of 2FA-code meer, ook niet van buitenaf. Zonder echte login "
+                      "blijven van buitenaf terminal, updates, acties en downloads dicht, net als Authentik, je "
+                      "wachtwoord en wat als thuis telt; met een echte login vragen die van buitenaf nog een verse "
+                      "2FA-code.",
         }[data.mode], level="info" if data.mode == "uit" else "warn", source="auth")
         await db.commit()
+    else:
+        await db.rollback()  # het slot vrijgeven
     return await _aanmelden(request, db)
