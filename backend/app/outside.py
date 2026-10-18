@@ -150,9 +150,14 @@ def allowed(cfg: dict, feature: str) -> tuple[bool, str, str | None]:
 
 async def blocked(conn: HTTPConnection, db: AsyncSession, feature: str) -> str | None:
     """None als het mag, anders de reden (voor WebSockets, die geen HTTPException kunnen geven)."""
+    from . import zonderlogin
+
     cfg = await settings(db)
     w = await where(conn, db, cfg)
-    if not w["outside"] or allowed(cfg, feature)[0]:
+    if not w["outside"]:
+        return None
+    # Zonder login van buitenaf: deze functies nooit, ook niet als ze altijd aan staan.
+    if allowed(cfg, feature)[0] and not await zonderlogin.outside_without_login(conn, db):
         return None
     return f"buiten:{feature}"
 
@@ -163,10 +168,12 @@ async def require(conn: HTTPConnection, db: AsyncSession, feature: str, sess: Se
     De stand van een functie geldt voor elke sessie van buitenaf (ze staat niet per sessie): zonder verse 2FA zou wie
     je sessie steelt in dat uur meeliften. Voor routes die het alleen in sommige gevallen vragen (een tegel die een
     nieuw adres krijgt); anders guard(feature, fresh=True)."""
+    from . import zonderlogin
+
     cfg = await settings(db)
     if not (await where(conn, db, cfg))["outside"]:
         return
-    if not allowed(cfg, feature)[0]:
+    if not allowed(cfg, feature)[0] or await zonderlogin.outside_without_login(conn, db):
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"buiten:{feature}")
     await recent_auth(sess, user)
 

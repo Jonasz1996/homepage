@@ -178,7 +178,8 @@ async def state(request: Request, response: Response, db: AsyncSession = Depends
                 sess: Session | None = Depends(optional_session)):
     user = sess.user if sess else None
     mfa_ok = bool(sess and sess.mfa_ok and user.totp_enabled)
-    if mfa_ok:
+    vluchtig = bool(getattr(sess, "vluchtig", False))
+    if mfa_ok and not vluchtig:
         # Al ingelogd met 2FA, dus een bekend toestel: ook als het inlogde voor er toestelcookies waren. En een toestel
         # dat nooit opnieuw hoeft in te loggen (de sessie glijdt mee), houdt zo zijn cookie.
         dev = read_device(request.cookies.get(DEVICE_COOKIE))
@@ -189,6 +190,9 @@ async def state(request: Request, response: Response, db: AsyncSession = Depends
         "user": {"username": user.username, "totp_enabled": user.totp_enabled} if user else None,
         "mfa_ok": mfa_ok,
         "site_name": get_settings().site_name,
+        # Zonder login (zonderlogin.py): sessie = er is ook een echte login op dit toestel.
+        "zonder_login": bool(getattr(sess, "zonder_login", False)),
+        "sessie": bool(sess) and not vluchtig,
     }
 
 
@@ -387,7 +391,7 @@ async def change_password(data: PasswordIn, request: Request, response: Response
 @router.post("/logout")
 async def logout(request: Request, response: Response, sess: Session | None = Depends(optional_session),
                  db: AsyncSession = Depends(get_db)):
-    if sess:
+    if sess and not getattr(sess, "vluchtig", False):
         await audit(db, request, sess.user, "logout")
         await db.delete(sess)
         await db.commit()

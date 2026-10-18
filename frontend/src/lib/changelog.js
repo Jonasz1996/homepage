@@ -3,6 +3,18 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 43,
+    datum: '2026-10-18',
+    titel: 'Geen login en geen 2FA meer',
+    items: [
+      'Het dashboard vraagt geen wachtwoord en geen 2FA-code meer, thuis en van buitenaf, tot Authentik ervoor staat. Je bent dan je eigen account; bovenaan staat "zonder login". Uitloggen staat er dan niet meer bij.',
+      'Van buitenaf blijven terminal, updates, acties en downloads zonder login altijd dicht, ook als ze op "altijd" stonden, en ze gaan dan ook niet aan. Ook Authentik instellen kan van buitenaf alleen met een echte login. Thuis werkt alles.',
+      'Zonder login werkt op een IP-adres en op elke naam waarop je al eens aanmeldde (bv. homepage.jbogaert.be). Op een nieuwe naam vraagt het één keer je login, daarna niet meer. Zo kan een vreemde website die je thuis opent het dashboard niet bedienen.',
+      'Terug aanzetten: ⚿ → van buitenaf → Aanmelden (altijd met 2FA, thuis zonder, of overal zonder). Uitzetten kan alleen thuis, aanzetten overal. Elke wijziging komt in de meldingen en de auditlog.',
+    ],
+    instellen: [],
+  },
+  {
     nr: 42,
     datum: '2026-10-17',
     titel: 'Terminal: zegt waarom verbinden niet lukt',

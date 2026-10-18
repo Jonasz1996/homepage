@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import outside
+from .. import outside, zonderlogin
 from ..config import get_settings
 from ..db import get_db
 from ..deps import COOKIE, audit, current_user, recent_auth
@@ -367,9 +367,14 @@ async def _ws_user(ws: WebSocket, db: AsyncSession, reauth: bool = True) -> tupl
     sess = await db.get(Session, token_id(token)) if token else None
     now = datetime.now(timezone.utc)
     aware = lambda dt: dt.replace(tzinfo=dt.tzinfo or timezone.utc)  # noqa: E731
+    free = (await zonderlogin.check(ws, db))[0]
     if sess is None or aware(sess.expires_at) < now or not (sess.mfa_ok and sess.user.totp_enabled):
+        # Zonder login: de eerste gebruiker, zonder cookie. watch_session kijkt dan of dat zo blijft.
+        if free and (user := await zonderlogin.home_user(db)):
+            ws.state.zonder_cookie = True
+            return user, ""
         return None, "Niet ingelogd"
-    if reauth and now - aware(sess.auth_at) > timedelta(minutes=get_settings().reauth_minutes):
+    if reauth and not free and now - aware(sess.auth_at) > timedelta(minutes=get_settings().reauth_minutes):
         return None, "reauth_required"
     return sess.user, ""
 
@@ -380,6 +385,7 @@ async def _send(ws: WebSocket, **msg) -> None:
 
 SESSION_CHECK = 60
 REVOKED = "Je sessie is afgemeld (elders uitgelogd of wachtwoord gewijzigd): verbinding gesloten"
+LOGIN_BACK = "Aanmelden staat weer aan (of je bent niet meer thuis): verbinding gesloten"
 
 
 async def watch_session(ws: WebSocket, db: AsyncSession) -> None:
@@ -389,6 +395,15 @@ async def watch_session(ws: WebSocket, db: AsyncSession) -> None:
     sid = token_id(token) if token else ""
     while True:
         await asyncio.sleep(SESSION_CHECK)
+        if getattr(ws.state, "zonder_cookie", False):
+            # Zonder login: open zolang dat nog mag (de stand of het netwerk kan intussen veranderd zijn).
+            free = (await zonderlogin.check(ws, db))[0]
+            await db.commit()
+            if not free:
+                with contextlib.suppress(Exception):
+                    await _send(ws, t="error", m=LOGIN_BACK)
+                return
+            continue
         expires = (await db.execute(select(Session.expires_at).where(Session.id == sid))).scalar_one_or_none()
         await db.commit()
         if expires is None or expires.replace(tzinfo=expires.tzinfo or timezone.utc) < datetime.now(timezone.utc):
