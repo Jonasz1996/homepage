@@ -7,9 +7,9 @@ export const CHANGELOG = [
     datum: '2026-10-18',
     titel: 'Geen login en geen 2FA meer',
     items: [
-      'Het dashboard vraagt geen wachtwoord en geen 2FA-code meer, thuis en van buitenaf, tot Authentik ervoor staat. Je bent dan je eigen account; bovenaan staat "zonder login". Uitloggen staat er dan niet meer bij.',
-      'Van buitenaf blijven terminal, updates, acties en downloads zonder login altijd dicht, ook als ze op "altijd" stonden, en ze gaan dan ook niet aan. Ook Authentik instellen kan van buitenaf alleen met een echte login. Thuis werkt alles.',
-      'Zonder login werkt op een IP-adres en op elke naam waarop je al eens aanmeldde (bv. homepage.jbogaert.be). Op een nieuwe naam vraagt het één keer je login, daarna niet meer. Zo kan een vreemde website die je thuis opent het dashboard niet bedienen.',
+      'Het dashboard vraagt geen wachtwoord en geen 2FA-code meer, thuis en van buitenaf, tot Authentik ervoor staat. Je bent dan je eigen account; bovenaan staat "zonder login". Ben je nog aangemeld van vroeger, dan blijft die sessie werken (ook zonder 2FA-code) en kan je ze nog uitloggen; anders staat Uitloggen er niet meer bij.',
+      'Van buitenaf blijven terminal, updates, acties en downloads zonder login altijd dicht, ook als ze op "altijd" stonden, en ze gaan dan ook niet aan. Met een echte login gaan ze van buitenaf zoals vroeger: aan zetten en gebruiken vraagt je 2FA-code, zodat een gestolen cookie niet volstaat. Ook Authentik instellen kan van buitenaf alleen met een echte login. Thuis werkt alles zonder login, behalve een Authentik-account koppelen: daarvoor meld je je even aan.',
+      'Zonder login werkt op een IP-adres en op elke naam waarop je al eens aanmeldde (bv. homepage.jbogaert.be). Op een nieuwe naam vraagt het één keer je login, daarna niet meer. Zo kan een vreemde website die je thuis opent het dashboard niet bedienen. Checks en API\'s van het dashboard zelf tellen nooit als bezoeker: een check kan de headers van je browser niet meer meesturen (X-Requested-With, Sec-Fetch-…).',
       'Terug aanzetten: ⚿ → van buitenaf → Aanmelden (altijd met 2FA, thuis zonder, of overal zonder). Uitzetten kan alleen thuis, aanzetten overal. Elke wijziging komt in de meldingen en de auditlog.',
     ],
     instellen: [],

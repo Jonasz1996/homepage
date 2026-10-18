@@ -12,13 +12,20 @@ Wat ook zonder login blijft:
 - Alleen op een bekend adres: een IP, localhost, of een naam waarop al eens iemand mét login binnenkwam (het
   sessiecookie hoort bij precies die naam, een andere website krijgt het nooit). Anders kan een website die je thuis
   opent via DNS-rebinding het dashboard bedienen alsof jij het deed.
-- Alleen verzoeken van de frontend zelf (X-Requested-With, of Sec-Fetch-Site same-origin/none): anders kan een andere
-  website met een <img> of een formulier iets laten doen. WebSockets controleren de Origin (routers/ssh._ws_user).
-- Niet vanaf de container zelf (127.0.0.1): een check of API-call die naar het dashboard zelf wijst, is geen bezoeker.
+- Alleen verzoeken van de frontend zelf (X-Requested-With, of Sec-Fetch-Site same-origin/none; die laatste stuurt een
+  browser alleen over https of naar localhost): anders kan een andere website met een <img> of een formulier iets laten
+  doen. WebSockets controleren de Origin (routers/ssh._ws_user). Checks en API's van het dashboard sturen die headers
+  nooit mee (schemas.FRONTEND_HEADER): anders doet een check die naar het dashboard wijst, zich voor als jouw browser.
+- Niet vanaf de container zelf (127.0.0.1 of een eigen adres, ook via NPM): een check of API-call die naar het
+  dashboard zelf wijst, is geen bezoeker.
+
+De namen staan apart (AppState "aanmelden_namen"): learn() schrijft bij het eerste verzoek op een nieuwe naam, en mag
+zo nooit een stand overschrijven die intussen gewijzigd is.
 """
 
 import ipaddress
 import re
+import time
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
@@ -34,12 +41,16 @@ from .models import AppState, Session, User
 from .security import token_id
 
 KEY = "aanmelden"
+NAMES_KEY = "aanmelden_namen"
 MODES = ("uit", "thuis", "overal")
 # Wat geldt zolang er niets gekozen is. De tests zetten dit op "uit" (conftest), zodat ze aanmelden blijven testen.
 DEFAULT = "overal"
 MAX_NAMES = 20
 NAME = re.compile(r"^[a-z0-9]([a-z0-9-]{0,62}\.)*[a-z0-9-]{1,63}$")
-LABELS = {"uit": "altijd aanmelden met 2FA", "thuis": "thuis zonder login", "overal": "overal zonder login"}
+LABELS = {"uit": "altijd met 2FA", "thuis": "thuis zonder login", "overal": "overal zonder login"}
+# De eigen adressen van het dashboard (monitoring/upgrade.me), een minuut onthouden.
+OWN_TTL = 60.0
+_own: tuple[float, frozenset[str]] = (float("-inf"), frozenset())
 
 
 def _now() -> datetime:
@@ -47,12 +58,10 @@ def _now() -> datetime:
 
 
 async def settings(db: AsyncSession) -> dict:
-    st = await db.get(AppState, KEY)
-    v = dict(st.value) if st else {}
-    if v.get("mode") not in MODES:
-        v["mode"] = DEFAULT
-    v["names"] = list(v.get("names") or [])
-    return v
+    rows = {st.key: st.value for st in (await db.execute(
+        select(AppState).where(AppState.key.in_((KEY, NAMES_KEY))))).scalars()}
+    mode = (rows.get(KEY) or {}).get("mode")
+    return {"mode": mode if mode in MODES else DEFAULT, "names": list((rows.get(NAMES_KEY) or {}).get("names") or [])}
 
 
 def host_of(conn: HTTPConnection) -> str | None:
@@ -78,20 +87,26 @@ def trusted(name: str | None, cfg: dict) -> bool:
     return bool(name) and (_is_ip(name) or name == "localhost" or name in cfg["names"])
 
 
-async def learn(conn: HTTPConnection, db: AsyncSession) -> bool:
-    """De naam onthouden van een verzoek met een echte login (geldig sessiecookie met 2FA). True als er iets
-    veranderde: dan moet de aanroeper bewaren."""
+async def learn(conn: HTTPConnection, db: AsyncSession, cfg: dict) -> bool:
+    """De naam onthouden van een verzoek met een echte login (geldig sessiecookie met 2FA), in elke stand: zo werkt
+    zonder login later ook op die naam. True als er iets veranderde: dan moet de aanroeper bewaren."""
     name = host_of(conn)
-    if not name or _is_ip(name) or name == "localhost" or len(name) > 253 or not NAME.match(name):
+    if not name or name in cfg["names"] or _is_ip(name) or name == "localhost" or len(name) > 253 \
+            or not NAME.match(name):
         return False
-    cfg = await settings(db)
-    if name in cfg["names"]:
-        return False
-    st = await ensure_state(db, KEY, {})
-    v = dict(st.value or {})
-    v["names"] = ([n for n in (v.get("names") or []) if n != name] + [name])[-MAX_NAMES:]
-    st.value = v
+    st = await ensure_state(db, NAMES_KEY, {})
+    names = [n for n in ((st.value or {}).get("names") or []) if n != name] + [name]
+    st.value = {"names": names[-MAX_NAMES:]}
+    cfg["names"] = st.value["names"]
     return True
+
+
+def own_ips() -> frozenset[str]:
+    global _own
+    if time.monotonic() - _own[0] > OWN_TTL:
+        from .monitoring import upgrade
+        _own = (time.monotonic(), upgrade.me().ips)
+    return _own[1]
 
 
 def _from_frontend(conn: HTTPConnection) -> bool:
@@ -104,22 +119,28 @@ def _from_frontend(conn: HTTPConnection) -> bool:
 
 async def check(conn: HTTPConnection, db: AsyncSession, cfg: dict | None = None) -> tuple[bool, str]:
     """(mag dit verzoek zonder login, waarom niet of van waar)."""
+    ok, why, _ = await check_full(conn, db, cfg)
+    return ok, why
+
+
+async def check_full(conn: HTTPConnection, db: AsyncSession, cfg: dict | None = None) -> tuple[bool, str, bool]:
+    """Zoals check(), en of het verzoek van buitenaf komt (alleen geldig als het mag)."""
     cfg = cfg or await settings(db)
     if cfg["mode"] == "uit":
-        return False, "aanmelden staat aan"
+        return False, "aanmelden staat aan", False
     ip = outside._ip(conn)
-    if ip is None or ip.is_loopback:
-        return False, "geen bezoeker (de container zelf)"
+    if ip is None or ip.is_loopback or str(ip) in own_ips():
+        return False, "geen bezoeker (het dashboard zelf)", False
     if not _from_frontend(conn):
-        return False, "niet van het dashboard zelf"
+        return False, "niet van het dashboard zelf", False
     name = host_of(conn)
     if not trusted(name, cfg):
         return False, (f"onbekend adres {name or '?'}: zonder login werkt alleen op een IP of op een naam waarop je al "
-                       "eens met login binnenkwam")
+                       "eens met login binnenkwam"), False
     w = await outside.where(conn, db)
     if w["outside"] and (cfg["mode"] != "overal" or outside.forged(conn)):
-        return False, "van buitenaf"
-    return True, w["why"]
+        return False, "van buitenaf", True
+    return True, w["why"], w["outside"]
 
 
 async def home_user(db: AsyncSession) -> User | None:

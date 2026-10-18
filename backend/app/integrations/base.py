@@ -13,6 +13,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
+from ..schemas import without_frontend_headers
+
 TIMEOUT = 8.0
 
 
@@ -142,6 +144,8 @@ class Integration:
     async def _send(self, method: str, path: str, **kw) -> httpx.Response:
         # Een eigen time-out per call (een certificaat van Let's Encrypt aanvragen duurt tot anderhalve minuut).
         timeout = kw.pop("timeout", TIMEOUT)
+        if kw.get("headers"):
+            kw["headers"] = without_frontend_headers(kw["headers"])
         try:
             # Nooit volgen: anders gaan headers als X-API-Key mee naar een ander adres.
             r = await self.client.request(method, self.base + path, timeout=timeout, follow_redirects=False, **kw)

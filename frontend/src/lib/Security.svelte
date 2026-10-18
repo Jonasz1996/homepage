@@ -211,7 +211,7 @@
     syslog_rollout: 'rsyslog uitgerold', login_failed_oidc: 'login via Authentik mislukt', oidc_settings_changed: 'Authentik-instellingen gewijzigd', maintenance: 'onderhoud', revision_restored: 'versie teruggezet',
     page_deleted: 'pagina verwijderd', group_deleted: 'groep verwijderd', log_rule_added: 'logregel toegevoegd',
     log_rule_changed: 'logregel gewijzigd', log_rule_deleted: 'logregel verwijderd', wol: 'Wake-on-LAN',
-    outside_mode: 'van buitenaf aan/uit', outside_settings: 'thuisnetwerken gewijzigd', ssh_pin: 'SSH-sleutel vastgezet',
+    outside_mode: 'van buitenaf aan/uit', aanmelden: 'aanmelden aan/uit', outside_settings: 'thuisnetwerken gewijzigd', ssh_pin: 'SSH-sleutel vastgezet',
     ssh_unpin: 'SSH-sleutel losgemaakt', secret_key_saved: 'kopie van secret.key bevestigd',
     oidc_linked: 'Authentik-account gekoppeld', oidc_unlinked: 'Authentik-account ontkoppeld', oidc_link_failed: 'Authentik koppelen mislukt',
     password_change_failed: 'wachtwoord wijzigen mislukt', attention_ignored: 'beveiligingspunt genegeerd', check_silenced: 'check stilgelegd',
@@ -358,12 +358,15 @@
           </div>
         </div>
         {#if a.mode !== 'uit'}
-          <p class="hint">Dit bezoek: {a.nu ? `zonder login (${a.why})` : `met login: ${a.why}`}. Zonder login werkt op een IP-adres{a.names.length ? ` en op ${a.names.join(', ')}` : ''}; op een andere naam meld je je één keer aan, daarna onthoudt het dashboard die naam.</p>
+          <p class="hint">{a.nu ? `Dit bezoek gaat zonder login (${a.why}).` : `Dit bezoek vraagt een login (${a.why}).`}
+            {#if !(out.outside && a.mode === 'thuis')}{a.mode === 'thuis' ? 'Thuis gaat' : 'Zonder login gaat'} het op een
+              IP-adres, localhost{a.names.length ? ` en ${a.names.join(', ')}` : ''}; op een andere naam meld je je één keer
+              aan, daarna onthoudt het dashboard die naam.{/if}</p>
         {/if}
       {/if}
       <p class="hint">Van buitenaf = via Cloudflare of vanaf een publiek IP. Dan staan deze functies standaard uit, zodat
-        wie je login overneemt er niets mee kan. Kijken kan altijd. Aanzetten vraagt je 2FA-code en geeft een melding;
-        <i>altijd</i> kan alleen thuis.</p>
+        wie je login overneemt er niets mee kan. Kijken kan altijd. Van buitenaf aanzetten (en gebruiken) vraagt een
+        echte login met je 2FA-code en geeft een melding; <i>altijd</i> kan alleen thuis.</p>
       {#each out.features as f (f.key)}
         <div class="feat">
           <div class="fw"><b>{f.label}</b><small>{f.help}</small></div>

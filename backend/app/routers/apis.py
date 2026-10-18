@@ -19,6 +19,7 @@ from ..integrations import calls as callmod
 from ..integrations import templates as tpl
 from ..layout import record_revision
 from ..models import ApiCall, ApiConnection, Service, Session, User, utcnow
+from ..schemas import check_header_name
 from ..security import decrypt_json, encrypt_json
 from . import integrations as integrations_router
 
@@ -74,6 +75,13 @@ class CallIn(BaseModel):
         except IntegrationError as e:
             raise ValueError(str(e)) from e
 
+    @field_validator("headers")
+    @classmethod
+    def _headers(cls, v: dict[str, str]) -> dict[str, str]:
+        for k in v:
+            check_header_name(k)
+        return v
+
     def checked(self) -> "CallIn":
         # Alles behalve GET verandert iets: dat is altijd een knop (die een recente 2FA vraagt), nooit iets dat de
         # tegel elke minuut zelf zou uitvoeren.
@@ -122,6 +130,11 @@ class ConnIn(BaseModel):
         if auth is not None and (not isinstance(auth, dict) or (auth.get("type") or "none") not in
                                  ("none", "bearer", "header", "query", "basic")):
             raise ValueError("Onbekende aanmelding")
+        names = [*(v.get("headers") or {})] if isinstance(v.get("headers"), dict) else []
+        if isinstance(auth, dict) and auth.get("type") == "header":
+            names.append(str(auth.get("name") or ""))
+        for k in names:
+            check_header_name(str(k).strip())
         return v
 
 

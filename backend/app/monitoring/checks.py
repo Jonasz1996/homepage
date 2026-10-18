@@ -16,6 +16,8 @@ import dns.resolver
 import httpx
 from cryptography import x509
 
+from ..schemas import without_frontend_headers
+
 TIMEOUT = 10.0
 # Bovengrens voor één check in zijn geheel (DNS, verbinden, trage body): een hangende check blokkeert anders
 # een plaats in de worker.
@@ -183,7 +185,8 @@ def _request_parts(check: dict) -> tuple[bool, str, bool, float, dict, str | Non
     method = check.get("method") if check.get("method") in ("GET", "HEAD", "POST") else "GET"
     follow = check.get("follow_redirects") is not False
     timeout = _seconds(check.get("timeout"), TIMEOUT)
-    headers = {"User-Agent": "homepage-monitor/1.0", **{str(k): str(v) for k, v in (check.get("headers") or {}).items()}}
+    own = without_frontend_headers({str(k): str(v) for k, v in (check.get("headers") or {}).items()})
+    headers = {"User-Agent": "homepage-monitor/1.0", **own}
     body = check.get("body") if method == "POST" else None
     if body is not None:
         headers.setdefault("Content-Type", BODY_TYPES.get(check.get("body_type") or "", "application/json"))

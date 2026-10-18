@@ -96,6 +96,7 @@ def met_login(monkeypatch):
     tests/test_zonder_login.py test de stand zonder login."""
     from app import zonderlogin
     monkeypatch.setattr(zonderlogin, "DEFAULT", "uit")
+    monkeypatch.setattr(zonderlogin, "_own", (float("-inf"), frozenset()))  # eigen adressen: van upgrade.me
 
 
 @pytest.fixture

@@ -31,7 +31,7 @@
 {:else if !state}
   <p class="boot hint">Laden...<span class="cur"></span></p>
 {:else if state.mfa_ok}
-  <Dashboard user={state.user} zonder={state.zonder_login && !state.sessie} onlogout={refresh} />
+  <Dashboard user={state.user} zonder={state.zonder_login} sessie={state.sessie} onlogout={refresh} />
 {:else}
   <Auth auth={state} ondone={refresh} />
 {/if}

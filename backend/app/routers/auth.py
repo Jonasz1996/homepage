@@ -332,15 +332,20 @@ async def login(data: LoginIn, request: Request, response: Response, db: AsyncSe
     return {"ok": True, "mfa_ok": user.totp_enabled}
 
 
-def _confirm_keys(request: Request, sess: Session) -> tuple[str, str]:
+def _confirm_keys(request: Request, sess: Session) -> tuple[str, ...]:
     """Bevestigen (reauth, wachtwoord wijzigen) telt apart van het inloggen, per sessie en per IP. Niet per gebruiker:
-    dan kon een gestolen sessie met foute codes het bevestigen op al je andere toestellen dichtzetten."""
+    dan kon een gestolen sessie met foute codes het bevestigen op al je andere toestellen dichtzetten. Zonder login
+    alleen per IP: die sessie delen alle bezoekers."""
+    if getattr(sess, "vluchtig", False):
+        return (f"confirm-ip:{limit_ip(request)}",)
     return f"confirm:{sess.id}", f"confirm-ip:{limit_ip(request)}"
 
 
 @router.post("/reauth")
 async def reauth(data: ReauthIn, request: Request, sess: Session = Depends(current_session),
                  user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    if getattr(sess, "vluchtig", False):
+        return {"ok": True}  # zonder login valt er niets te bevestigen (en geen 2FA-code te raden)
     keys = _confirm_keys(request, sess)
     if limiter.blocked(*keys):
         raise _too_many()

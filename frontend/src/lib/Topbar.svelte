@@ -7,7 +7,7 @@
 
   // De titelbalk: Aandacht (wat nu mis is, het enige getal dat telt), Meldingen (gebeurtenissen) en drie menu's met
   // leesbare namen. Op de gsm staan de drie menu's samen achter ☰.
-  let { clock, zonder = false, onlogout } = $props()
+  let { clock, uitloggen = true, onlogout } = $props()
 
   let open = $state(null) // 'infra', 'beheer', 'instellingen' of 'alles' (☰ op de gsm)
   let place = $state({ top: 56, right: 12 })
@@ -111,7 +111,7 @@
       <span class="nm">Effecten: {dash.fx ? 'aan' : 'uit'}</span>
       <small>bewegende achtergrond, gloed, scanlijnen, vuur en bliksem</small>
     </button>
-    {#if !zonder}
+    {#if uitloggen}
       <button class="it" role="menuitem" onclick={logout} title="Uitloggen">
         <span class="nm">Uitloggen</span><code>⏻</code>
         <small>deze sessie beëindigen</small>

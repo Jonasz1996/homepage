@@ -367,16 +367,22 @@ async def _ws_user(ws: WebSocket, db: AsyncSession, reauth: bool = True) -> tupl
     sess = await db.get(Session, token_id(token)) if token else None
     now = datetime.now(timezone.utc)
     aware = lambda dt: dt.replace(tzinfo=dt.tzinfo or timezone.utc)  # noqa: E731
-    free = (await zonderlogin.check(ws, db))[0]
+    free, _, out = await zonderlogin.check_full(ws, db)
     if sess is None or aware(sess.expires_at) < now or not (sess.mfa_ok and sess.user.totp_enabled):
         # Zonder login: de eerste gebruiker, zonder cookie. watch_session kijkt dan of dat zo blijft.
         if free and (user := await zonderlogin.home_user(db)):
             ws.state.zonder_cookie = True
             return user, ""
         return None, "Niet ingelogd"
-    if reauth and not free and now - aware(sess.auth_at) > timedelta(minutes=get_settings().reauth_minutes):
+    # Zonder login vraagt niets een code, behalve van buitenaf met een echte sessie (een gestolen cookie volstaat niet).
+    if reauth and (not free or out) and now - aware(sess.auth_at) > timedelta(minutes=get_settings().reauth_minutes):
         return None, "reauth_required"
     return sess.user, ""
+
+
+def _zl(ws: WebSocket) -> dict:
+    """Voor de auditlog, zoals deps.audit: zonder login geopend."""
+    return {"zonder_login": True} if getattr(ws.state, "zonder_cookie", False) else {}
 
 
 async def _send(ws: WebSocket, **msg) -> None:
@@ -388,28 +394,29 @@ REVOKED = "Je sessie is afgemeld (elders uitgelogd of wachtwoord gewijzigd): ver
 LOGIN_BACK = "Aanmelden staat weer aan (of je bent niet meer thuis): verbinding gesloten"
 
 
-async def watch_session(ws: WebSocket, db: AsyncSession) -> None:
-    """Loopt zolang de sessie bestaat; keert terug zodra ze ingetrokken of verlopen is.
-    Naast de pompen van een WebSocket starten: wie afgemeld wordt, houdt geen open shell over."""
+async def watch_session(ws: WebSocket, db: AsyncSession, feature: str | None = None) -> str:
+    """Loopt zolang de sessie bestaat; keert terug zodra ze ingetrokken of verlopen is, met de reden (die al
+    verstuurd is). Naast de pompen van een WebSocket starten: wie afgemeld wordt, houdt geen open shell over.
+    feature: zonder login ook sluiten zodra die functie hier niet meer mag (bv. niet meer thuis)."""
     token = ws.cookies.get(COOKIE)
     sid = token_id(token) if token else ""
     while True:
         await asyncio.sleep(SESSION_CHECK)
         if getattr(ws.state, "zonder_cookie", False):
             # Zonder login: open zolang dat nog mag (de stand of het netwerk kan intussen veranderd zijn).
-            free = (await zonderlogin.check(ws, db))[0]
+            ok = (await zonderlogin.check(ws, db))[0] and not (feature and await outside.blocked(ws, db, feature))
             await db.commit()
-            if not free:
+            if not ok:
                 with contextlib.suppress(Exception):
                     await _send(ws, t="error", m=LOGIN_BACK)
-                return
+                return LOGIN_BACK
             continue
         expires = (await db.execute(select(Session.expires_at).where(Session.id == sid))).scalar_one_or_none()
         await db.commit()
         if expires is None or expires.replace(tzinfo=expires.tzinfo or timezone.utc) < datetime.now(timezone.utc):
             with contextlib.suppress(Exception):
                 await _send(ws, t="error", m=REVOKED)
-            return
+            return REVOKED
 
 
 async def _hostkey_answer(ws: WebSocket, size: list[int]) -> bool:
@@ -481,7 +488,7 @@ async def terminal(ws: WebSocket, host_id: int, cols: int = 100, rows: int = 30,
                 return
             h.host_key = server_key.export_public_key().decode().strip()
             db.add(AuditLog(user_id=user.id, action="ssh_hostkey_accepted", ip=ip,
-                            detail={"name": h.name, "fp": server_key.get_fingerprint("sha256")}))
+                            detail={"name": h.name, "fp": server_key.get_fingerprint("sha256"), **_zl(ws)}))
             await db.commit()
             login = await login_for(db, h)
 
@@ -494,7 +501,7 @@ async def terminal(ws: WebSocket, host_id: int, cols: int = 100, rows: int = 30,
             client_factory=tcp,
         ), CONNECT_TIMEOUT)
     except asyncssh.HostKeyNotVerifiable:
-        db.add(AuditLog(user_id=user.id, action="ssh_hostkey_mismatch", ip=ip, detail={"name": h.name}))
+        db.add(AuditLog(user_id=user.id, action="ssh_hostkey_mismatch", ip=ip, detail={"name": h.name, **_zl(ws)}))
         await db.commit()
         await _send(ws, t="error", m="De hostsleutel is veranderd! Verbinding geweigerd. Herinstalleerde je de "
                                      "server, vergeet dan de oude sleutel bij deze host.")
@@ -515,7 +522,7 @@ async def terminal(ws: WebSocket, host_id: int, cols: int = 100, rows: int = 30,
 
     started = time.monotonic()
     h.last_used_at = datetime.now(timezone.utc)
-    db.add(AuditLog(user_id=user.id, action="ssh_open", ip=ip, detail={"name": h.name, "host": h.host}))
+    db.add(AuditLog(user_id=user.id, action="ssh_open", ip=ip, detail={"name": h.name, "host": h.host, **_zl(ws)}))
     await db.commit()
 
     async with conn:
@@ -543,7 +550,7 @@ async def terminal(ws: WebSocket, host_id: int, cols: int = 100, rows: int = 30,
                         if m.get("t") == "r":
                             proc.change_terminal_size(max(10, int(m["c"])), max(4, int(m["r"])))
 
-        watch = asyncio.create_task(watch_session(ws, db))
+        watch = asyncio.create_task(watch_session(ws, db, "terminal"))
         tasks = [asyncio.create_task(ssh_to_ws()), asyncio.create_task(ws_to_ssh()), watch]
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for t in pending:
@@ -552,9 +559,9 @@ async def terminal(ws: WebSocket, host_id: int, cols: int = 100, rows: int = 30,
         proc.close()
 
     db.add(AuditLog(user_id=user.id, action="ssh_close", ip=ip,
-                    detail={"name": h.name, "seconds": round(time.monotonic() - started)}))
+                    detail={"name": h.name, "seconds": round(time.monotonic() - started), **_zl(ws)}))
     await db.commit()
     with contextlib.suppress(Exception):
-        await _send(ws, t="closed", m=REVOKED if watch in done else
-                    "Afgemeld wegens 30 minuten inactiviteit" if idle else "Verbinding gesloten")
+        await _send(ws, t="closed", m=watch.result() if watch in done and not watch.cancelled() and not watch.exception()
+                    else "Afgemeld wegens 30 minuten inactiviteit" if idle else "Verbinding gesloten")
         await ws.close()

@@ -11,6 +11,19 @@ HEADER_NAME = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 # Wachtwoorden en sleutels horen niet in de check (die gaat naar de browser, de export en de versies):
 # daarvoor is de check "API van de tegel", met de versleutelde sleutels van de tegel of uit API-beheer.
 SECRET_HEADER = re.compile(r"auth|token|key|secret|cookie|session|pass", re.I)
+# Daaraan herkent het dashboard zonder login je browser (zonderlogin._from_frontend). Wat het dashboard zelf verstuurt
+# (checks, API's), stuurt ze nooit mee: anders doet een check die naar het dashboard wijst zich voor als jouw browser
+# thuis, en die mag ook de terminal.
+FRONTEND_HEADER = re.compile(r"^(x-requested-with|sec-fetch-[a-z0-9-]*)$", re.I)
+
+
+def without_frontend_headers(headers: dict | None) -> dict:
+    return {k: v for k, v in (headers or {}).items() if not FRONTEND_HEADER.match(str(k))}
+
+
+def check_header_name(k: str) -> None:
+    if FRONTEND_HEADER.match(k):
+        raise ValueError(f"Header {k} kan niet: daaraan herkent het dashboard je browser")
 CONTAINER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
@@ -105,6 +118,7 @@ class CheckIn(BaseModel):
         for k, val in v.items():
             if not HEADER_NAME.match(k) or k.lower() in ("host", "content-length"):
                 raise ValueError(f"Header {k!r} kan niet")
+            check_header_name(k)
             if SECRET_HEADER.search(k):
                 raise ValueError(f"Header {k} lijkt geheim: gebruik de check 'API van de tegel' met een sleutel")
             if len(val) > 500 or "\n" in val or "\r" in val:

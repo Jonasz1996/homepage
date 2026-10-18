@@ -12,12 +12,14 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 from app import zonderlogin
+from app.integrations import calls as callmod
 from app.main import app
+from app.monitoring import checks
 from app.models import AppState, AuditLog, Notification, Session
 from app.routers import ssh as ssh_router
 from app.security import DEVICE_COOKIE
 
-from .conftest import H, PASSWORD, SETUP_TOKEN
+from .conftest import H, PASSWORD, SETUP_TOKEN, TEST_DB
 from .test_buitenaf import CF, _db, _stale
 from .test_ssh import sshd  # noqa: F401  (fixture)
 
@@ -132,14 +134,14 @@ async def test_alleen_een_bekend_adres(authed):
     r = await authed.get("/api/layout", headers={"Host": "Homepage.Jbogaert.BE."})
     assert r.status_code == 200
     # "test": de naam van de testclient, die zich met login aanmeldde.
-    assert (await _state(zonderlogin.KEY))["names"] == ["test", "homepage.jbogaert.be"]
+    assert (await _state(zonderlogin.NAMES_KEY))["names"] == ["test", "homepage.jbogaert.be"]
     async with _client(LAN, host="homepage.jbogaert.be") as c:
         assert (await c.get("/api/layout")).status_code == 200
     async with _client(LAN, host="evil.example") as c:
         assert (await c.get("/api/layout")).status_code == 401
     a = (await authed.get("/api/outside")).json()["aanmelden"]
     assert a["names"] == ["test", "homepage.jbogaert.be"]
-    assert a["nu"] is False and "container zelf" in a["why"]
+    assert a["nu"] is False and "dashboard zelf" in a["why"]
 
 
 async def test_hoogstens_twintig_namen(authed):
@@ -148,7 +150,7 @@ async def test_hoogstens_twintig_namen(authed):
     # Geen naam: rare tekens, of een IP.
     for host in ("a_b.example", "10.0.0.1", "localhost"):
         await authed.get("/api/layout", headers={"Host": host})
-    names = (await _state(zonderlogin.KEY))["names"]
+    names = (await _state(zonderlogin.NAMES_KEY))["names"]
     assert names == [f"n{i}.jbogaert.be" for i in range(5, 25)]
 
 
@@ -220,7 +222,7 @@ async def test_aanmelden_uitzetten_alleen_thuis(authed):
     agen, db = await _db()
     notes = [n.title for n in (await db.execute(select(Notification).order_by(Notification.id))).scalars()]
     await agen.aclose()
-    assert notes[-2:] == ["Aanmelden: overal zonder login", "Aanmelden: altijd aanmelden met 2FA"]
+    assert notes[-2:] == ["Aanmelden: overal zonder login", "Aanmelden: altijd met 2FA"]
     assert (await authed.put("/api/outside/aanmelden", json={"mode": "ergens"})).status_code == 422
 
 
@@ -272,6 +274,134 @@ async def test_echte_login_naast_zonder_login(authed):
         assert s["zonder_login"] is True and s["sessie"] is True
         await _stale(authed)  # alle sessies: ook die van c
         assert (await c.put("/api/outside/settings", json={"home_ip": True, "networks": []})).status_code == 200
+
+
+# --- het dashboard zelf ------------------------------------------------------------------------------------
+
+SELF_LAN = "192.168.10.156"  # het eigen adres van de container: nginx geeft dat door als client (ook via NPM)
+
+
+async def _tile(c, check: dict):
+    page = (await c.post("/api/pages", json={"name": "P"})).json()["id"]
+    g = (await c.post("/api/groups", json={"page_id": page, "name": "G"})).json()["id"]
+    return await c.post("/api/services", json={"group_id": g, "name": "onschuldig", "type": "link", "check": check})
+
+
+ATTACK = {"type": "http", "target": f"http://{SELF_LAN}/api/ssh/keys", "method": "POST", "body": '{"name": "aanvaller"}',
+          "body_type": "json", "accept": "201"}
+
+
+async def test_check_doet_zich_niet_voor_als_browser(authed):
+    """Wie van buitenaf zonder login een check maakt die naar het dashboard zelf wijst, met de header van de frontend:
+    die check zou thuis zonder login tellen en de terminal mogen."""
+    await _mode(authed, "overal")
+    async with _client(WAN, headers={**H, **CF}) as atk:
+        assert (await atk.post("/api/ssh/keys", json={"name": "rechtstreeks"})).status_code == 403
+        for name in ("X-Requested-With", "x-requested-with", "Sec-Fetch-Site", "Sec-Fetch-Mode"):
+            r = await _tile(atk, {**ATTACK, "headers": {name: "homepage"}})
+            assert r.status_code == 422 and "herkent het dashboard je browser" in r.text, (name, r.text)
+        r = await _tile(atk, {**ATTACK, "headers": {"Accept": "application/json"}})
+        assert r.status_code == 201, r.text
+    # Een check van vroeger met zo'n header: die gaat niet meer mee.
+    stored = {**ATTACK, "headers": {"X-Requested-With": "homepage", "Sec-Fetch-Site": "same-origin", "Accept": "x"}}
+    assert checks._request_parts(stored)[4] == {"User-Agent": "homepage-monitor/1.0", "Accept": "x",
+                                                 "Content-Type": "application/json"}
+    async with AsyncClient(transport=ASGITransport(app=app, client=("192.168.10.200", 40000))) as worker:
+        out = await checks.check_http(checks.target_for(stored, None), stored, worker)
+    assert out.status_code in (401, 403) and not out.ok  # zonder de header: niet aangemeld (of CSRF)
+    assert (await authed.get("/api/ssh/keys")).json() == []
+
+
+async def test_eigen_adres_is_geen_bezoeker(authed, monkeypatch):
+    """Ook als een verzoek van het dashboard zelf de header toch heeft: vanaf een eigen adres nooit zonder login."""
+    from app.monitoring import upgrade
+    monkeypatch.setattr(upgrade, "me", lambda: upgrade.Me(ips=frozenset({SELF_LAN})))
+    await _mode(authed, "overal")
+    async with _client(SELF_LAN) as c:
+        assert (await c.post("/api/ssh/keys", json={"name": "zelf"})).status_code == 401
+        assert (await c.get("/api/layout")).status_code == 401
+    async with _client(LAN) as c:
+        assert (await c.get("/api/layout")).status_code == 200
+
+
+async def test_api_stuurt_geen_browserheaders(authed):
+    await _mode(authed, "overal")
+    base = {"name": "x", "kind": "rest", "url": "http://192.168.10.156"}
+    for config in ({"headers": {"X-Requested-With": "homepage"}}, {"auth": {"type": "header", "name": "Sec-Fetch-Site"}}):
+        r = await authed.post("/api/apis", json={**base, "config": config})
+        assert r.status_code == 422 and "herkent het dashboard je browser" in r.text, r.text
+    r = await authed.post("/api/apis", json={**base, "config": {"headers": {"Accept": "application/json"}}})
+    assert r.status_code in (200, 201), r.text
+    api_id = r.json()["id"]
+    r = await authed.post(f"/api/apis/{api_id}/calls", json={"name": "c", "headers": {"X-Requested-With": "homepage"}})
+    assert r.status_code == 422, r.text
+    # En bij het versturen: ook wat er al stond, gaat niet mee.
+    sent = []
+    import httpx
+
+    from app.integrations.rest import RestApi
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        sent.append(dict(req.headers))
+        return httpx.Response(200, json={})
+    integ = RestApi("http://192.168.10.156", {"headers": {"X-Requested-With": "homepage", "Accept": "a"},
+                                           "auth": {"type": "header", "name": "Sec-Fetch-Site"}},
+                 {"token": "same-origin"}, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    await callmod.run(integ, {"method": "GET", "path": "/x", "headers": {"sec-fetch-mode": "cors"}})
+    assert sent and not any(k.startswith("sec-fetch") or k == "x-requested-with" for k in sent[0])
+    assert sent[0]["accept"] == "a"
+
+
+async def test_van_buitenaf_met_echte_login_nog_2fa(authed):
+    """Overal zonder login, van buitenaf met een echte (misschien gestolen) cookie: de vier gevaarlijke functies vragen
+    nog een verse 2FA. Gewone dingen niet, en thuis niets."""
+    await _mode(authed, "overal")
+    assert (await authed.put("/api/outside/features/terminal", json={"mode": "aan"})).status_code == 200
+    await _stale(authed)
+    cookie = authed.cookies.get("hp_session")
+    async with _client(LAN) as c:
+        c.cookies.set("hp_session", cookie)
+        assert (await c.get("/api/ssh/ready")).status_code != 403
+        assert (await c.put("/api/outside/features/updates", json={"mode": "uit"})).status_code == 200
+    async with _client(WAN) as c:  # met de cookie, van buitenaf, op een vertrouwd adres
+        c.cookies.set("hp_session", cookie)
+        assert (await c.get("/api/auth/state")).json()["zonder_login"] is True
+        r = await c.get("/api/ssh/ready")
+        assert r.status_code == 403 and r.json()["detail"] == "reauth_required", r.text
+        r = await c.put("/api/outside/features/updates", json={"mode": "uur"})
+        assert r.status_code == 403 and r.json()["detail"] == "reauth_required", r.text
+        # Gewone gevoelige dingen: zonder code, zoals zonder cookie.
+        assert (await c.put("/api/outside/aanmelden", json={"mode": "uit"})).status_code == 200
+
+
+async def test_raden_blokkeert_de_eigenaar_niet(authed):
+    """Zonder login delen alle bezoekers één vluchtige sessie: foute pogingen van buitenaf tellen per IP."""
+    await _mode(authed, "overal")
+    async with _client(WAN) as c:
+        for _ in range(6):
+            r = await c.post("/api/auth/password", json={"current": "fout-fout-fout", "new": "x" * 14})
+            assert r.status_code in (401, 429), r.text
+        # Bevestigen valt er zonder login niet: geen 2FA-code om te raden.
+        assert (await c.post("/api/auth/reauth", json={"code": "000000"})).json() == {"ok": True}
+    async with _client(LAN) as c:
+        r = await c.post("/api/auth/password", json={"current": PASSWORD, "new": "een-nieuw-lang-wachtwoord"})
+        assert r.status_code == 200, r.text
+
+
+async def test_namen_overschrijven_de_stand_niet(authed):
+    """De namen staan apart: een eerste verzoek op een nieuwe naam schrijft de stand niet terug."""
+    await _mode(authed, "thuis")
+    agen, db = await _db()
+    cfg = await zonderlogin.settings(db)
+    await authed.put("/api/outside/aanmelden", json={"mode": "uit"})
+
+    class C:
+        headers = {"host": "nieuw.jbogaert.be"}
+    assert await zonderlogin.learn(C(), db, cfg)
+    await db.commit()
+    await agen.aclose()
+    assert (await _state(zonderlogin.KEY)) == {"mode": "uit"}
+    assert "nieuw.jbogaert.be" in (await _state(zonderlogin.NAMES_KEY))["names"]
 
 
 # --- WebSockets --------------------------------------------------------------------------------------------
@@ -349,6 +479,38 @@ async def test_terminal_sluit_als_aanmelden_terug_aan_gaat(authed, sshd, monkeyp
         m = ws.from_app.get_nowait()
         assert m["type"] == "websocket.send" and not m.get("text"), m  # alleen uitvoer van de shell
     await _mode(authed, "uit")
+    while (m := await ws.json())["t"] not in ("error", "socket-closed"):
+        pass
+    assert m == {"t": "error", "m": ssh_router.LOGIN_BACK}
+    # En de afsluiter zegt hetzelfde, niet "elders uitgelogd".
+    assert await ws.json() == {"t": "closed", "m": ssh_router.LOGIN_BACK}
+    await ws.close()
+    agen, db = await _db()
+    rows = {a.action: a.detail for a in (await db.execute(select(AuditLog))).scalars()}
+    await agen.aclose()
+    assert rows["ssh_open"]["zonder_login"] is True and rows["ssh_hostkey_accepted"]["zonder_login"] is True
+    # SQLite in het geheugen deelt één verbinding tussen alle sessies: het afsluiten van een ander verzoek kan de
+    # laatste regel nog terugdraaien. Op PostgreSQL (zoals in productie) staat ze er altijd.
+    if not TEST_DB.startswith("sqlite"):
+        assert rows["ssh_close"]["zonder_login"] is True
+
+
+async def test_terminal_sluit_als_je_niet_meer_thuis_bent(authed, sshd, monkeypatch):  # noqa: F811
+    """Overal zonder login: een terminal van een netwerk dat thuis telt, sluit als dat niet meer zo is."""
+    hid = await _host(authed, sshd)
+    r = await authed.put("/api/outside/settings", json={"home_ip": True, "networks": ["81.82.83.0/24"]})
+    assert r.status_code == 200, r.text
+    await _mode(authed, "overal")
+    monkeypatch.setattr(ssh_router, "SESSION_CHECK", 0.2)
+    ws = WS(f"/api/ssh/ws/{hid}", ip=WAN)
+    await ws.open()
+    assert (await ws.json())["t"] == "status"
+    assert (await ws.json())["t"] == "hostkey"
+    await ws.to_app.put({"type": "websocket.receive", "text": json.dumps({"t": "accept"})})
+    while (m := await ws.json())["t"] != "ready":
+        assert m["t"] == "status", m
+    r = await authed.put("/api/outside/settings", json={"home_ip": True, "networks": []})
+    assert r.status_code == 200, r.text
     while (m := await ws.json())["t"] not in ("error", "socket-closed"):
         pass
     assert m == {"t": "error", "m": ssh_router.LOGIN_BACK}

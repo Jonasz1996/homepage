@@ -23,7 +23,7 @@ from ..deps import SILENCE_HINT, audit, confirm_silence, current_session, curren
 from ..models import AppState, AuditLog, CronJob, CronRun, Session, SshHost, User
 from ..ssh_exec import SshFail, command as ssh_command, connect, run
 from ..ssh_login import login_for
-from .ssh import _send, _ws_user, watch_session
+from .ssh import _send, _ws_user, _zl, watch_session
 
 router = APIRouter(prefix="/api/cron", tags=["cron"])
 log = logging.getLogger("homepage.api")
@@ -269,7 +269,8 @@ async def run_now(ws: WebSocket, job_id: int, db: AsyncSession = Depends(get_db)
     login = await login_for(db, h)
     ip = ws.client.host if ws.client else None
     started = datetime.now(timezone.utc).replace(microsecond=0)
-    db.add(AuditLog(user_id=user.id, action="cron_run", ip=ip, detail={"job": job.name, "target": job.target_name}))
+    db.add(AuditLog(user_id=user.id, action="cron_run", ip=ip,
+                    detail={"job": job.name, "target": job.target_name, **_zl(ws)}))
     await db.commit()
     buf = bytearray()
     code = None
@@ -296,7 +297,7 @@ async def run_now(ws: WebSocket, job_id: int, db: AsyncSession = Depends(get_db)
                     if msg.get("text") and json.loads(msg["text"]).get("t") == "stop":
                         return "stop"
 
-            t1, t2, t3 = asyncio.create_task(pump()), asyncio.create_task(stop()), asyncio.create_task(watch_session(ws, db))
+            t1, t2, t3 = asyncio.create_task(pump()), asyncio.create_task(stop()), asyncio.create_task(watch_session(ws, db, "terminal"))
             done, pending = await asyncio.wait({t1, t2, t3}, timeout=RUN_TIMEOUT, return_when=asyncio.FIRST_COMPLETED)
             if t1 in done:
                 await proc.wait()

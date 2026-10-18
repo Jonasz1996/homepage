@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import HTTPConnection
 
 from .db import get_db
-from .deps import cf_forged, current_session, current_user, notify, recent_auth
+from .deps import cf_forged, current_session, current_user, fresh_auth, notify, optional_session
 from .models import AppState, Notification, Session, User
 
 STATE_KEY = "outside"
@@ -175,7 +175,7 @@ async def require(conn: HTTPConnection, db: AsyncSession, feature: str, sess: Se
         return
     if not allowed(cfg, feature)[0] or await zonderlogin.outside_without_login(conn, db):
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"buiten:{feature}")
-    await recent_auth(sess, user)
+    await fresh_auth(sess, user)
 
 
 def guard(feature: str, fresh: bool = False):
@@ -188,9 +188,14 @@ def guard(feature: str, fresh: bool = False):
                       sess: Session = Depends(current_session), user: User = Depends(current_user)) -> None:
             await require(conn, db, feature, sess, user)
     else:
-        async def dep(conn: HTTPConnection, db: AsyncSession = Depends(get_db)) -> None:
+        async def dep(conn: HTTPConnection, db: AsyncSession = Depends(get_db),
+                      sess: Session | None = Depends(optional_session)) -> None:
             if why := await blocked(conn, db, feature):
                 raise HTTPException(status.HTTP_403_FORBIDDEN, why)
+            # Overal zonder login, van buitenaf met een echte sessie: recent_auth vraagt dan niets meer, dus vraagt de
+            # functie zelf een verse 2FA. Een gestolen cookie volstaat zo niet voor de terminal.
+            if sess is not None and getattr(sess, "zonder_buiten", False):
+                await fresh_auth(sess, sess.user)
 
     dep.outside_feature = feature  # voor de test die nagaat welke routes bewaakt zijn
     return Depends(dep)

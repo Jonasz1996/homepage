@@ -73,7 +73,7 @@ export async function withReauth(fn) {
 // Buitenmodus: van buitenaf (via Cloudflare of een publiek IP) staan sommige functies uit. De server antwoordt dan
 // "buiten:<functie>"; het dashboard toont een venster om ze voor één uur aan te zetten.
 export const OUTSIDE = { terminal: 'de terminal', updates: 'updates installeren', acties: 'acties', downloads: 'configuraties, diagnose en noodplan downloaden' }
-export const outsideMessage = (detail) => `Van buitenaf staat ${OUTSIDE[detail.slice(7)] || detail.slice(7)} uit.`
+export const outsideMessage = (detail) => `Van buitenaf gaat ${OUTSIDE[detail.slice(7)] || detail.slice(7)} nu niet.`
 export function signalOutside(detail) {
   window.dispatchEvent(new CustomEvent('hp:outside', { detail: { feature: detail.slice(7) } }))
 }

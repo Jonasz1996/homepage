@@ -204,8 +204,8 @@ async def link(request: Request, response: Response, sess: Session = Depends(cur
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Zet inloggen via Authentik eerst aan en sla op")
     if getattr(sess, "vluchtig", False):
         # De terugkeer van Authentik zoekt deze sessie weer op; zonder login is er geen.
-        raise HTTPException(status.HTTP_409_CONFLICT, "Koppelen vraagt een echte login: zet in ⚿ → van buitenaf "
-                            "aanmelden even op 'altijd aanmelden met 2FA', meld je aan en koppel dan")
+        raise HTTPException(status.HTTP_409_CONFLICT, "Koppelen vraagt een echte login: zet in ⚿ → van buitenaf → "
+                            "Aanmelden even op 'altijd met 2FA', meld je aan en koppel dan")
     try:
         url, cookie = await _authorize(request, db, cfg, m="link", u=user.id, sid=sess.id)
     except OidcError as e:

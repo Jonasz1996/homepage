@@ -9,8 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import outside, zonderlogin
 from ..db import ensure_state, get_db
-from ..deps import audit, client_country, current_user, notify, recent_auth
-from ..models import AppState, User
+from ..deps import audit, client_country, current_session, current_user, fresh_auth, notify, recent_auth
+from ..models import AppState, Session, User
 
 router = APIRouter(prefix="/api/outside", tags=["buitenaf"])
 
@@ -75,16 +75,18 @@ class ModeIn(BaseModel):
 
 @router.put("/features/{key}")
 async def set_mode(key: str, data: ModeIn, request: Request, user: User = Depends(recent_auth),
-                   db: AsyncSession = Depends(get_db)):
+                   sess: Session = Depends(current_session), db: AsyncSession = Depends(get_db)):
     if key not in outside.FEATURES:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Onbekende functie")
     cfg = await outside.settings(db)
     w = await outside.where(request, db, cfg)
     if data.mode == "aan" and w["outside"]:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Altijd aanzetten kan alleen thuis. Onderweg kan het voor één uur.")
-    if data.mode != "uit" and w["outside"] and await zonderlogin.outside_without_login(request, db):
-        # Anders zet iedereen die het adres kent hier de terminal aan.
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Zonder login kan je dit van buitenaf niet aanzetten. Thuis wel.")
+    if data.mode != "uit" and w["outside"]:
+        if await zonderlogin.outside_without_login(request, db):
+            # Anders zet iedereen die het adres kent hier de terminal aan.
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Zonder login kan je dit van buitenaf niet aanzetten. Thuis wel.")
+        await fresh_auth(sess, user)  # ook overal zonder login: met een gestolen cookie alleen gaat het niet
     entry = {"mode": data.mode}
     if data.mode == "uur":
         entry["until"] = (datetime.now(timezone.utc) + outside.TEMP).isoformat()
