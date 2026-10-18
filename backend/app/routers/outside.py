@@ -147,10 +147,11 @@ class AanmeldenIn(BaseModel):
 @router.put("/aanmelden")
 async def put_aanmelden(data: AanmeldenIn, request: Request, user: User = Depends(recent_auth),
                         db: AsyncSession = Depends(get_db)):
-    """Aanmelden aan of uit (zonderlogin.py). Uitzetten kan alleen thuis; terug aanzetten ook van buitenaf."""
-    if data.mode != "uit" and (await outside.where(request, db))["outside"]:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Aanmelden uitzetten kan alleen thuis. Terug aanzetten kan overal.")
-    if data.mode != (await zonderlogin.settings(db))["mode"]:
+    """Aanmelden aan of uit (zonderlogin.py). Losser zetten kan alleen thuis; strenger ook van buitenaf."""
+    current = (await zonderlogin.settings(db))["mode"]
+    if zonderlogin.LOOSE[data.mode] > zonderlogin.LOOSE[current] and (await outside.where(request, db))["outside"]:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Aanmelden losser zetten kan alleen thuis; strenger kan overal.")
+    if data.mode != current:
         st = await ensure_state(db, zonderlogin.KEY, {})
         st.value = {**(st.value or {}), "mode": data.mode}
         await audit(db, request, user, "aanmelden", mode=data.mode)

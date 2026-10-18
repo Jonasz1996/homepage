@@ -17,6 +17,8 @@
   const when = (ts) => new Date(ts).toLocaleString('nl-BE', { dateStyle: 'short', timeStyle: 'short' })
   const SCOPE = { 'ander netwerk': 'via de router', 'zelfde netwerk': 'zelfde netwerk', internet: 'internet', zelf: 'zelf', onbekend: '?' }
   let last = $derived(where?.seen?.last)
+  // Overal zonder login (⚿ → van buitenaf → Aanmelden): dan is er van buitenaf geen loginscherm.
+  let bare = $derived(where?.aanmelden?.mode === 'overal')
   let rule = $derived(data ? [
     `Alias homepage (Host(s)):        ${data.own_ip || '<IP van het dashboard>'}`,
     `Alias homepage_doelen (Host(s)): ${data.opnsense.hosts.join(' ') || '-'}`,
@@ -45,10 +47,10 @@
     <p>✓ {ACCESS[last.access]} stond voor het laatste bezoek van buitenaf ({when(last.ts)}, {last.ip}{last.country ? ` · ${last.country}` : ''}).</p>
   {:else}
     <p>Het laatste bezoek van buitenaf ({when(last.ts)}, {last.ip}{last.country ? ` · ${last.country}` : ''}) kwam zonder slot
-      binnen: iedereen op internet krijgt je loginscherm te zien.</p>
+      binnen: {bare ? 'aanmelden staat overal uit, dus iedereen die het adres kent, ziet en wijzigt het dashboard zonder login (behalve terminal, updates, acties en downloads).' : 'iedereen op internet krijgt je loginscherm te zien.'}</p>
   {/if}
   {#if !last?.access}
-    <p class="hint">Zet er een slot voor, zodat een aanvaller het loginscherm niet eens ziet: <b>Cloudflare Access</b>
+    <p class="hint">Zet er een slot voor, zodat een aanvaller {bare ? 'niet eens bij het dashboard komt' : 'het loginscherm niet eens ziet'}: <b>Cloudflare Access</b>
       (Zero Trust → Access → Applications → Self-hosted, voor home.jbogaert.be, met je e-mailadres als regel) of de
       <b>forward-auth van Authentik</b> in NPM (Advanced bij de proxy host, met de nginx-config uit Authentik). Het dashboard
       herkent ze aan de headers <code>Cf-Access-Jwt-Assertion</code> en <code>X-authentik-username</code>.</p>

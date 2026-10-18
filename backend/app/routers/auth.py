@@ -11,6 +11,7 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
+from .. import zonderlogin
 from ..config import get_settings
 from ..db import get_db
 from ..deps import (COOKIE, audit, client_country, client_ip, current_session, current_user, limit_ip, notify,
@@ -365,13 +366,22 @@ async def change_password(data: PasswordIn, request: Request, response: Response
                           sess: Session = Depends(current_session), user: User = Depends(recent_auth),
                           db: AsyncSession = Depends(get_db)):
     # recent_auth: met alleen een (gestolen) sessie en het wachtwoord kan het niet, er hoort een verse 2FA-code bij.
+    # Zonder login van buitenaf niet: anders raadt wie het adres kent hier je wachtwoord, en sluit hij je buiten met
+    # een nieuw. Met een echte login van buitenaf: een verse 2FA, ook overal zonder login.
+    await zonderlogin.need_login_outside(request, db, sess)
+    vluchtig = bool(getattr(sess, "vluchtig", False))
     keys = _confirm_keys(request, sess)
-    if limiter.blocked(*keys):
+    # Zonder login (thuis) delen alle bezoekers die sessie: per IP, en samen hoogstens zoveel als het inloggen per
+    # gebruikersnaam toelaat, zodat ook veel adressen samen niet eindeloos kunnen raden.
+    shared = (f"confirm-zonder-login:{user.id}",) if vluchtig else ()
+    shared_limit = get_settings().login_max_failures * USER_FAILURE_FACTOR
+    if limiter.blocked(*keys) or (shared and limiter.blocked(*shared, limit=shared_limit)):
         raise _too_many()
-    with password_slot(known=True) as free:  # een ingelogde sessie met verse 2FA: de eigenaar
+    # Een ingelogde sessie met verse 2FA is de eigenaar (de plaatsen voor bekende toestellen); zonder login niet.
+    with password_slot(known=not vluchtig) as free:
         if not free:
             raise _busy()
-        limiter.fail(*keys)  # vóór de eerste await
+        limiter.fail(*keys, *shared)  # vóór de eerste await
         await db.commit()  # geen verbinding vasthouden terwijl argon2 rekent
         ok = await verify_password_async(user.password_hash, data.current)
         new_hash = await hash_password_async(data.new) if ok else None
@@ -379,7 +389,7 @@ async def change_password(data: PasswordIn, request: Request, response: Response
         await audit(db, request, user, "password_change_failed")
         await db.commit()
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Huidig wachtwoord klopt niet")
-    limiter.reset(*keys)
+    limiter.reset(*keys, *shared)
     user.password_hash = new_hash
     # Alle andere sessies afmelden, en de vernieuwgeheimen van de gsm's laten vervallen. Het nieuwe wachtwoord maakt
     # ook alle bekende toestellen weer onbekend (hun cookie hangt aan de hash); dit toestel krijgt hieronder een nieuw.
@@ -389,7 +399,8 @@ async def change_password(data: PasswordIn, request: Request, response: Response
     notify(db, "Wachtwoord gewijzigd", f"Voor {user.username}, vanaf {client_ip(request) or '?'}. Alle andere "
            f"apparaten zijn afgemeld en tellen als nieuw toestel tot ze opnieuw inloggen.", level="warn", source="auth")
     await db.commit()
-    _set_device(request, response, user)
+    if not vluchtig:  # zonder login logde dit toestel niet in, zoals in state()
+        _set_device(request, response, user)
     return {"ok": True}
 
 

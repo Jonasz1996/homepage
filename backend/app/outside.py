@@ -192,10 +192,12 @@ def guard(feature: str, fresh: bool = False):
                       sess: Session | None = Depends(optional_session)) -> None:
             if why := await blocked(conn, db, feature):
                 raise HTTPException(status.HTTP_403_FORBIDDEN, why)
-            # Overal zonder login, van buitenaf met een echte sessie: recent_auth vraagt dan niets meer, dus vraagt de
-            # functie zelf een verse 2FA. Een gestolen cookie volstaat zo niet voor de terminal.
-            if sess is not None and getattr(sess, "zonder_buiten", False):
-                await fresh_auth(sess, sess.user)
+            # Voor recent_auth (deps): overal zonder login, van buitenaf met een echte sessie, vraagt een route van
+            # deze functie die een bevestiging vraagt, toch een verse 2FA, net als met aanmelden aan. Een gestolen
+            # cookie volstaat zo niet voor de terminal. Routes zonder bevestiging (kijken, een proef) vragen niets.
+            # De dependencies van een route lopen vóór die van de functie zelf, en de sessie is per verzoek dezelfde.
+            if sess is not None:
+                sess.gevaarlijk = True
 
     dep.outside_feature = feature  # voor de test die nagaat welke routes bewaakt zijn
     return Depends(dep)

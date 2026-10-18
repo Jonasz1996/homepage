@@ -131,8 +131,11 @@ async def current_user(sess: Session = Depends(current_session)) -> User:
 
 
 async def recent_auth(sess: Session = Depends(current_session), user: User = Depends(current_user)) -> User:
-    """Voor gevoelige acties: wachtwoord of TOTP moet recent ingegeven zijn. Zonder login vraagt niets een code."""
-    if getattr(sess, "zonder_login", False):
+    """Voor gevoelige acties: wachtwoord of TOTP moet recent ingegeven zijn. Zonder login vraagt niets een code,
+    behalve van buitenaf met een echte sessie voor de vier gevaarlijke functies (outside.guard zet gevaarlijk): daar
+    geldt wat met aanmelden aan geldt."""
+    if getattr(sess, "zonder_login", False) and not (
+            getattr(sess, "zonder_buiten", False) and getattr(sess, "gevaarlijk", False)):
         return user
     return await fresh_auth(sess, user)
 

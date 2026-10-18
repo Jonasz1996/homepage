@@ -91,17 +91,21 @@
     { mode: 'thuis', label: 'thuis zonder', help: 'Thuis geen login en geen 2FA-code; van buitenaf wel.' },
     { mode: 'overal', label: 'overal zonder', help: 'Nergens een login of 2FA-code, ook niet van buitenaf. Wie het adres kent, kan alles zien en instellen, behalve terminal, updates, acties en downloads: die blijven van buitenaf dicht. Zet Authentik ervoor.' },
   ]
+  // Hoe los: van buitenaf mag de stand alleen strenger (backend: zonderlogin.LOOSE).
+  const LOOSE = { uit: 0, thuis: 1, overal: 2 }
   // Van buitenaf zonder echte login: dan gaan de functies hieronder niet aan.
   const bare = $derived(!!out?.outside && out?.aanmelden?.mode === 'overal' && !out?.aanmelden?.sessie)
   async function setLogin(mode) {
     outMsg = ''
-    if (mode === 'uit' && !out.aanmelden.sessie
+    // Vraagt dit bezoek daarna een login (altijd met 2FA, of thuis zonder terwijl je buiten bent)?
+    const login = mode === 'uit' || (mode === 'thuis' && out.outside)
+    if (login && !out.aanmelden.sessie
         && !(await ask('Aanmelden weer aanzetten? Je meldt je daarna meteen aan met je wachtwoord en 2FA-code.', { ok: 'Aanzetten' }))) return
     try {
       const r = await withReauth(() => api('/outside/aanmelden', { method: 'PUT', body: { mode } }))
       out = { ...out, aanmelden: r }
       error = ''
-      if (mode === 'uit' && !r.sessie) window.dispatchEvent(new Event('hp:unauth'))
+      if (!r.nu && !r.sessie) window.dispatchEvent(new Event('hp:unauth'))
     } catch (e) { error = e.message }
   }
   const until = (ts) => new Date(ts).toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' })
@@ -352,7 +356,7 @@
           <div class="seg" role="group" aria-label="Aanmelden">
             {#each LOGIN as l (l.mode)}
               <button class="mini" class:on={a.mode === l.mode} class:warn={l.mode === 'overal'}
-                      disabled={out.outside && l.mode !== 'uit' && a.mode !== l.mode} title={out.outside && l.mode !== 'uit' ? 'Uitzetten kan alleen thuis' : ''}
+                      disabled={out.outside && LOOSE[l.mode] > LOOSE[a.mode]} title={out.outside && LOOSE[l.mode] > LOOSE[a.mode] ? 'Losser zetten kan alleen thuis' : ''}
                       onclick={() => a.mode !== l.mode && setLogin(l.mode)}>{l.label}</button>
             {/each}
           </div>

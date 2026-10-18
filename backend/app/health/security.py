@@ -221,6 +221,11 @@ async def check_access(db: AsyncSession) -> dict:
     if last.get("access"):
         name = {"cloudflare-access": "Cloudflare Access", "authentik": "Authentik"}.get(last["access"], last["access"])
         return item("access", "Slot voor het dashboard", "ok", f"{name} stond voor het laatste bezoek van buitenaf.", fix=fix)
+    if (await zonderlogin.settings(db))["mode"] == "overal":
+        return item("access", "Slot voor het dashboard", "warn",
+                    "Het laatste bezoek van buitenaf kwam zonder Cloudflare Access of Authentik binnen, en aanmelden staat "
+                    "overal uit: iedereen die het adres kent, ziet en wijzigt het dashboard zonder login (behalve "
+                    "terminal, updates, acties en downloads). Zet er een slot voor in Cloudflare of NPM.", fix=fix)
     return item("access", "Slot voor het dashboard", "warn",
                 "Het laatste bezoek van buitenaf kwam zonder Cloudflare Access of Authentik binnen: iedereen krijgt het "
                 "loginscherm te zien. Zet er een slot voor in Cloudflare of NPM.", fix=fix)

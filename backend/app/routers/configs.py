@@ -58,7 +58,9 @@ async def diff(vid: int, request: Request, against: int | None = None, sess: Ses
     if v.kind == "file":
         if why := await outside.blocked(request, db, "downloads"):
             raise HTTPException(status.HTTP_403_FORBIDDEN, why)
-        # Eigen bestanden kunnen van alles bevatten dat het maskeren mist: vraagt een recente 2FA.
+        # Eigen bestanden kunnen van alles bevatten dat het maskeren mist: vraagt een recente 2FA. Van buitenaf ook
+        # overal zonder login met een echte sessie (zoals outside.guard): een gestolen cookie volstaat niet.
+        sess.gevaarlijk = True
         await recent_auth(sess, user)
     if against:
         old = await _version(db, against)

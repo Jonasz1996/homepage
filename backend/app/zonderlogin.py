@@ -36,7 +36,7 @@ from starlette.requests import HTTPConnection
 
 from . import outside
 from .db import ensure_state
-from .deps import COOKIE, CSRF_HEADER
+from .deps import COOKIE, CSRF_HEADER, fresh_auth
 from .models import AppState, Session, User
 from .security import token_id
 
@@ -48,6 +48,8 @@ DEFAULT = "overal"
 MAX_NAMES = 20
 NAME = re.compile(r"^[a-z0-9]([a-z0-9-]{0,62}\.)*[a-z0-9-]{1,63}$")
 LABELS = {"uit": "altijd met 2FA", "thuis": "thuis zonder login", "overal": "overal zonder login"}
+# Hoe los: van buitenaf mag de stand alleen strenger (routers/outside.put_aanmelden).
+LOOSE = {"uit": 0, "thuis": 1, "overal": 2}
 # De eigen adressen van het dashboard (monitoring/upgrade.me), een minuut onthouden.
 OWN_TTL = 60.0
 _own: tuple[float, frozenset[str]] = (float("-inf"), frozenset())
@@ -178,8 +180,13 @@ async def outside_without_login(conn: HTTPConnection, db: AsyncSession) -> bool:
     return (await settings(db))["mode"] == "overal" and not await logged_in(conn, db)
 
 
-async def need_login_outside(conn: HTTPConnection, db: AsyncSession) -> None:
-    """Voor wat bepaalt wie er mag inloggen (Authentik): van buitenaf alleen met een echte login. Anders stelt wie het
-    adres kent zijn eigen Authentik in, logt daarmee echt in en kan dan ook de terminal aanzetten."""
-    if (await outside.where(conn, db))["outside"] and await outside_without_login(conn, db):
+async def need_login_outside(conn: HTTPConnection, db: AsyncSession, sess: Session | None = None) -> None:
+    """Voor wat bepaalt wie er mag inloggen (Authentik, het wachtwoord): van buitenaf alleen met een echte login, en
+    dan met een verse 2FA, zoals met aanmelden aan. Anders stelt wie het adres kent (of een gestolen cookie heeft) zijn
+    eigen Authentik in, logt daarmee echt in en kan dan ook de terminal aanzetten."""
+    if not (await outside.where(conn, db))["outside"]:
+        return
+    if await outside_without_login(conn, db):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Zonder login kan je dit van buitenaf niet wijzigen. Thuis wel.")
+    if sess is not None and getattr(sess, "zonder_buiten", False):
+        await fresh_auth(sess, sess.user)

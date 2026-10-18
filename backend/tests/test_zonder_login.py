@@ -15,9 +15,9 @@ from app import zonderlogin
 from app.integrations import calls as callmod
 from app.main import app
 from app.monitoring import checks
-from app.models import AppState, AuditLog, Notification, Session
+from app.models import AppState, AuditLog, ConfigVersion, Notification, Session
 from app.routers import ssh as ssh_router
-from app.security import DEVICE_COOKIE
+from app.security import DEVICE_COOKIE, USER_FAILURE_FACTOR, encrypt
 
 from .conftest import H, PASSWORD, SETUP_TOKEN, TEST_DB
 from .test_buitenaf import CF, _db, _stale
@@ -209,20 +209,33 @@ async def test_van_buitenaf_blijft_gevaarlijk_dicht(authed):
     assert r.status_code != 403, r.text
 
 
-async def test_aanmelden_uitzetten_alleen_thuis(authed):
+async def test_aanmelden_van_buitenaf_alleen_strenger(authed):
+    """Van buitenaf kan de stand alleen strenger: losser zetten (en dus de terminal bereikbaarder) kan alleen thuis."""
     await _mode(authed, "overal")
     async with _client(WAN) as c:
-        for mode in ("thuis", "overal"):
-            r = await c.put("/api/outside/aanmelden", json={"mode": mode})
-            assert r.status_code == 403, r.text
+        assert (await c.put("/api/outside/aanmelden", json={"mode": "overal"})).status_code == 200  # niets nieuws
+        r = await c.put("/api/outside/aanmelden", json={"mode": "thuis"})
+        assert r.status_code == 200 and r.json()["mode"] == "thuis" and r.json()["nu"] is False
+        assert (await c.get("/api/layout")).status_code == 401
+    await _mode(authed, "overal")
+    async with _client(WAN) as c:
         r = await c.put("/api/outside/aanmelden", json={"mode": "uit"})
         assert r.status_code == 200 and r.json()["mode"] == "uit" and r.json()["nu"] is False
         assert (await c.get("/api/layout")).status_code == 401
     assert (await _state(zonderlogin.KEY))["mode"] == "uit"
+    # Van buitenaf met een echte login en een verse 2FA: losser zetten gaat toch niet.
+    for mode in ("thuis", "overal"):
+        r = await authed.put("/api/outside/aanmelden", json={"mode": mode}, headers=CF)
+        assert r.status_code == 403 and "losser" in r.json()["detail"], r.text
+    await _mode(authed, "thuis")
+    r = await authed.put("/api/outside/aanmelden", json={"mode": "overal"}, headers=CF)
+    assert r.status_code == 403, r.text
+    assert (await authed.put("/api/outside/aanmelden", json={"mode": "uit"}, headers=CF)).status_code == 200
     agen, db = await _db()
     notes = [n.title for n in (await db.execute(select(Notification).order_by(Notification.id))).scalars()]
     await agen.aclose()
-    assert notes[-2:] == ["Aanmelden: overal zonder login", "Aanmelden: altijd met 2FA"]
+    assert notes[-5:] == ["Aanmelden: thuis zonder login", "Aanmelden: overal zonder login", "Aanmelden: altijd met 2FA",
+                          "Aanmelden: thuis zonder login", "Aanmelden: altijd met 2FA"]
     assert (await authed.put("/api/outside/aanmelden", json={"mode": "ergens"})).status_code == 422
 
 
@@ -353,39 +366,84 @@ async def test_api_stuurt_geen_browserheaders(authed):
 
 
 async def test_van_buitenaf_met_echte_login_nog_2fa(authed):
-    """Overal zonder login, van buitenaf met een echte (misschien gestolen) cookie: de vier gevaarlijke functies vragen
-    nog een verse 2FA. Gewone dingen niet, en thuis niets."""
+    """Overal zonder login, van buitenaf met een echte (misschien gestolen) cookie: de vier gevaarlijke functies,
+    Authentik en het wachtwoord vragen nog een verse 2FA, net als met aanmelden aan. Gewone dingen en wat in die
+    functies niets bevestigt (kijken, een proef) niet, en thuis niets."""
     await _mode(authed, "overal")
-    assert (await authed.put("/api/outside/features/terminal", json={"mode": "aan"})).status_code == 200
+    for f in ("terminal", "downloads"):
+        assert (await authed.put(f"/api/outside/features/{f}", json={"mode": "aan"})).status_code == 200
+    agen, db = await _db()
+    st = await db.get(AppState, "oidc")
+    if st is None:
+        st = AppState(key="oidc", value={})
+        db.add(st)
+    st.value = {**(st.value or {}), "enabled": True, "issuer": "https://auth.jbogaert.be/", "client_id": "homepage"}
+    body = "PrivateKey = geheim\n"
+    v = ConfigVersion(item="file:1:/etc/wireguard/wg0.conf", name="wg0.conf", kind="file", sha="f", size=len(body),
+                      content=encrypt(body))
+    db.add(v)
+    await db.commit()
+    vid = v.id
+    await agen.aclose()
     await _stale(authed)
     cookie = authed.cookies.get("hp_session")
-    async with _client(LAN) as c:
-        c.cookies.set("hp_session", cookie)
-        assert (await c.get("/api/ssh/ready")).status_code != 403
-        assert (await c.put("/api/outside/features/updates", json={"mode": "uit"})).status_code == 200
+    oidc_off = {"enabled": False, "issuer": "https://evil.example/", "client_id": "x"}
     async with _client(WAN) as c:  # met de cookie, van buitenaf, op een vertrouwd adres
         c.cookies.set("hp_session", cookie)
         assert (await c.get("/api/auth/state")).json()["zonder_login"] is True
-        r = await c.get("/api/ssh/ready")
-        assert r.status_code == 403 and r.json()["detail"] == "reauth_required", r.text
-        r = await c.put("/api/outside/features/updates", json={"mode": "uur"})
-        assert r.status_code == 403 and r.json()["detail"] == "reauth_required", r.text
+        for method, url, kw in (
+                ("GET", "/api/ssh/ready", {}),
+                ("POST", "/api/ssh/keys", {"json": {"name": "aanvaller"}}),
+                ("PUT", "/api/outside/features/updates", {"json": {"mode": "uur"}}),
+                ("GET", f"/api/configs/versions/{vid}/diff", {}),
+                ("PUT", "/api/auth/oidc/settings", {"json": oidc_off}),
+                ("POST", "/api/auth/oidc/link", {}),
+                ("DELETE", "/api/auth/oidc/link", {}),
+                ("POST", "/api/auth/password", {"json": {"current": PASSWORD, "new": "een-nieuw-lang-wachtwoord"}})):
+            r = await c.request(method, url, **kw)
+            assert r.status_code == 403 and r.json()["detail"] == "reauth_required", (url, r.text)
+        # In een gevaarlijke functie, maar zonder bevestiging (nakijken): geen code, zoals met aanmelden aan.
+        assert (await c.post("/api/ssh/pin/check")).status_code == 200
         # Gewone gevoelige dingen: zonder code, zoals zonder cookie.
+        assert (await c.put("/api/outside/features/updates", json={"mode": "uit"})).status_code == 200
+    async with _client(LAN) as c:  # thuis met dezelfde cookie: niets
+        c.cookies.set("hp_session", cookie)
+        assert (await c.get("/api/ssh/ready")).status_code == 200
+        assert (await c.get(f"/api/configs/versions/{vid}/diff")).status_code == 200
+        r = await c.put("/api/auth/oidc/settings", json=oidc_off)
+        assert r.status_code == 200, r.text
+    agen, db = await _db()
+    assert (await db.get(AppState, "oidc")).value["issuer"] == "https://evil.example/"  # pas thuis
+    await agen.aclose()
+    async with _client(WAN) as c:
+        c.cookies.set("hp_session", cookie)
         assert (await c.put("/api/outside/aanmelden", json={"mode": "uit"})).status_code == 200
 
 
-async def test_raden_blokkeert_de_eigenaar_niet(authed):
-    """Zonder login delen alle bezoekers één vluchtige sessie: foute pogingen van buitenaf tellen per IP."""
+async def test_wachtwoord_raden(authed):
+    """Zonder login delen alle bezoekers één vluchtige sessie. Van buitenaf kan die je wachtwoord niet wijzigen (en dus
+    ook niet raden); thuis telt elke poging per IP en alle samen hoogstens zoveel als het inloggen per gebruikersnaam.
+    Een echte login telt apart: de eigenaar blijft er zo niet buiten."""
     await _mode(authed, "overal")
+    wrong = {"current": "fout-fout-fout", "new": "x" * 14}
     async with _client(WAN) as c:
-        for _ in range(6):
-            r = await c.post("/api/auth/password", json={"current": "fout-fout-fout", "new": "x" * 14})
-            assert r.status_code in (401, 429), r.text
+        r = await c.post("/api/auth/password", json={"current": PASSWORD, "new": "een-nieuw-lang-wachtwoord"})
+        assert r.status_code == 403 and "Zonder login" in r.json()["detail"], r.text
         # Bevestigen valt er zonder login niet: geen 2FA-code om te raden.
         assert (await c.post("/api/auth/reauth", json={"code": "000000"})).json() == {"ok": True}
-    async with _client(LAN) as c:
+    limit = 5 * USER_FAILURE_FACTOR
+    async with _client(LAN) as c:  # één IP: na 5 dicht
+        codes = [(await c.post("/api/auth/password", json=wrong)).status_code for _ in range(6)]
+        assert codes == [401] * 5 + [429], codes
+    for i in range(limit - 5):  # andere IP's thuis: samen tot de limiet per gebruikersnaam
+        async with _client(f"192.168.0.{60 + i}") as c:
+            assert (await c.post("/api/auth/password", json=wrong)).status_code == 401
+    async with _client("192.168.0.200") as c:
         r = await c.post("/api/auth/password", json={"current": PASSWORD, "new": "een-nieuw-lang-wachtwoord"})
-        assert r.status_code == 200, r.text
+        assert r.status_code == 429, r.text
+    # Met een echte login gaat het nog.
+    r = await authed.post("/api/auth/password", json={"current": PASSWORD, "new": "een-nieuw-lang-wachtwoord"})
+    assert r.status_code == 200, r.text
 
 
 async def test_namen_overschrijven_de_stand_niet(authed):
