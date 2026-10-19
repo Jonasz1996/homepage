@@ -18,6 +18,8 @@ APP_DIR=/opt/homepage
 CONF_DIR=/etc/homepage
 BK=/var/backups/homepage
 LOG_DIR=/var/log/homepage
+# Het certificaat voor https rechtstreeks op de container (zie certificaat).
+TLS_DIR=/etc/ssl/homepage
 # NPM_IP: het IP van Nginx Proxy Manager. Wordt bij de eerste keer bewaard in homepage.env en daarna daar gelezen.
 NPM_IP="${NPM_IP:-$(sed -n 's/^HOMEPAGE_NPM_IP=//p' "$CONF_DIR/homepage.env" 2>/dev/null | tail -1 || true)}"
 # Niet opgegeven en nog niet bewaard: dan is de standaard een gok, en blijft het LAN open (zie nginx hieronder).
@@ -214,6 +216,110 @@ PY
       ?*) warn "$regel" ;;
     esac
   done <<< "$uit"
+}
+
+# Liggen in $TLS_DIR een certificaat, zijn sleutel en de CA die het ondertekende, en is het nog geldig?
+certificaat_past() {
+  local pub
+  [ -s "$TLS_DIR/homepage.crt" ] && [ -s "$TLS_DIR/homepage.key" ] && [ -s "$TLS_DIR/homepage-ca.crt" ] \
+    && openssl verify -CAfile "$TLS_DIR/homepage-ca.crt" -purpose sslserver "$TLS_DIR/homepage.crt" >/dev/null 2>&1 \
+    && pub=$(openssl x509 -in "$TLS_DIR/homepage.crt" -noout -pubkey 2>/dev/null) && [ -n "$pub" ] \
+    && [ "$pub" = "$(openssl pkey -in "$TLS_DIR/homepage.key" -pubout 2>/dev/null)" ]
+}
+
+# Het certificaat voor https rechtstreeks op de container (poort 443, deploy/nginx-tls.conf): een eigen CA en een
+# servercertificaat, allebei 9999 dagen geldig, in $TLS_DIR. De sleutel van de CA is weg zodra het certificaat
+# ondertekend is: niemand kan er nog een ander certificaat mee maken, ook niet wie later in de container raakt. Zo is
+# homepage-ca.crt vertrouwen op je toestellen hetzelfde als alleen dit ene certificaat vertrouwen. Het geldt voor de
+# naam van de container, localhost, 127.0.0.1, ::1 en elk IPv4-adres van de container (geen IPv6: dat voorvoegsel kan
+# veranderen). Een nieuw certificaat, met een nieuwe CA die je opnieuw importeert, alleen als een van die namen of
+# adressen ontbreekt (bv. een nieuw IP), het binnen 30 dagen verloopt, of een bestand ontbreekt of niet past.
+# Zet TLS_OK (1: nginx kan https), TLS_NIEUW (1: net gemaakt), TLS_REDEN (waarom nieuw), TLS_FOUT (waarom het
+# mislukte) en TLS_VORIG (1: er was al een CA, die je misschien al importeerde). Geeft 1 als maken mislukte; een vorig certificaat dat nog past, blijft dan staan (TLS_OK=1).
+# Altijd als `certificaat || ...`: set -e geldt dan niet in de functie, dus elke stap kijkt zelf na.
+certificaat() {
+  local naam ip uit tmp cnf i=0 host=homepage
+  local namen=(localhost 127.0.0.1 ::1)
+  TLS_OK="" TLS_NIEUW="" TLS_REDEN="" TLS_FOUT="" TLS_VORIG=""
+  [ ! -e "$TLS_DIR/homepage-ca.crt" ] || TLS_VORIG=1
+  naam=$(hostname 2>/dev/null || true)
+  if [[ $naam =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] && [ "$naam" != localhost ]; then
+    host=$naam
+    namen+=("$naam")
+  fi
+  for ip in $(hostname -I 2>/dev/null || true); do
+    if [[ $ip =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ && $ip != 127.* && " ${namen[*]} " != *" $ip "* ]]; then
+      namen+=("$ip")
+    fi
+  done
+  # Wat er nog ligt van een keer die onderbroken werd, met misschien de sleutel van een CA.
+  rm -rf "$TLS_DIR"/.nieuw.*
+  if ! certificaat_past; then
+    if [ -e "$TLS_DIR/homepage.crt" ]; then TLS_REDEN="het vorige paste niet meer"; else TLS_REDEN="er was er nog geen"; fi
+  elif ! openssl x509 -in "$TLS_DIR/homepage.crt" -noout -checkend 2592000 >/dev/null 2>&1 \
+       || ! openssl x509 -in "$TLS_DIR/homepage-ca.crt" -noout -checkend 2592000 >/dev/null 2>&1; then
+    TLS_REDEN="het vorige verliep binnen 30 dagen"
+  else
+    for naam in "${namen[@]}"; do
+      if [[ $naam == *:* || $naam =~ ^[0-9.]+$ ]]; then
+        uit=$(openssl x509 -in "$TLS_DIR/homepage.crt" -noout -checkip "$naam" 2>&1)
+      else
+        uit=$(openssl x509 -in "$TLS_DIR/homepage.crt" -noout -checkhost "$naam" 2>&1)
+      fi
+      # Alleen een uitdrukkelijk "NOT": andere uitvoer (een andere versie van openssl) mag niet bij elke update een
+      # nieuwe CA maken.
+      case "$uit" in *"does NOT match"*) TLS_REDEN="$naam stond niet in het vorige"; break ;; esac
+    done
+  fi
+  if [ -z "$TLS_REDEN" ]; then
+    TLS_OK=1
+    return 0
+  fi
+
+  if ! install -d -m 755 "$TLS_DIR" || ! tmp=$(mktemp -d "$TLS_DIR/.nieuw.XXXXXX"); then
+    TLS_FOUT="$TLS_DIR niet beschrijfbaar"
+    if certificaat_past; then TLS_OK=1; fi
+    return 1
+  fi
+  cnf="$tmp/openssl.cnf"
+  {
+    printf '[req]\ndistinguished_name = dn\nprompt = no\n[dn]\nCN = homepage\n'
+    printf '[homepage_ca]\nbasicConstraints = critical, CA:TRUE, pathlen:0\n'
+    printf 'keyUsage = critical, keyCertSign, cRLSign\nsubjectKeyIdentifier = hash\n'
+    printf '[homepage_server]\nbasicConstraints = critical, CA:FALSE\nkeyUsage = critical, digitalSignature\n'
+    printf 'extendedKeyUsage = serverAuth\nsubjectKeyIdentifier = hash\nauthorityKeyIdentifier = keyid\n'
+    printf 'subjectAltName = @homepage_namen\n[homepage_namen]\n'
+    for naam in "${namen[@]}"; do
+      i=$((i + 1))
+      if [[ $naam == *:* || $naam =~ ^[0-9.]+$ ]]; then printf 'IP.%d = %s\n' "$i" "$naam"
+      else printf 'DNS.%d = %s\n' "$i" "$naam"; fi
+    done
+  } > "$cnf"
+  # Sleutels alleen voor root (umask 077). De datum in de naam van de CA: zo zie je bij het importeren welke de
+  # nieuwe is.
+  if ( umask 077 \
+       && openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$tmp/ca.key" \
+       && openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$tmp/homepage.key" \
+       && openssl req -x509 -new -config "$cnf" -extensions homepage_ca -key "$tmp/ca.key" -sha256 -days 9999 \
+            -set_serial "0x$(openssl rand -hex 16)" -subj "/O=homepage/CN=homepage CA $host $(date +%F)" \
+            -out "$tmp/homepage-ca.crt" \
+       && openssl req -new -config "$cnf" -key "$tmp/homepage.key" -subj "/O=homepage/CN=$host" \
+            -out "$tmp/homepage.csr" \
+       && openssl x509 -req -in "$tmp/homepage.csr" -CA "$tmp/homepage-ca.crt" -CAkey "$tmp/ca.key" -sha256 \
+            -days 9999 -set_serial "0x$(openssl rand -hex 16)" -extfile "$cnf" -extensions homepage_server \
+            -out "$tmp/homepage.crt" ) > "$tmp/uitvoer" 2>&1 \
+     && rm -f "$tmp/ca.key" \
+     && openssl verify -CAfile "$tmp/homepage-ca.crt" -purpose sslserver "$tmp/homepage.crt" >> "$tmp/uitvoer" 2>&1 \
+     && chmod 644 "$tmp/homepage-ca.crt" "$tmp/homepage.crt" && chmod 600 "$tmp/homepage.key" \
+     && mv -f "$tmp/homepage.key" "$TLS_DIR/homepage.key" && mv -f "$tmp/homepage.crt" "$TLS_DIR/homepage.crt" \
+     && mv -f "$tmp/homepage-ca.crt" "$TLS_DIR/homepage-ca.crt"; then
+    TLS_OK=1 TLS_NIEUW=1
+  else
+    TLS_FOUT=$(tail -n 3 "$tmp/uitvoer" 2>/dev/null | tr '\n' ' ')
+    if certificaat_past; then TLS_OK=1; fi
+  fi
+  rm -rf "$tmp"
+  [ -n "$TLS_NIEUW" ]
 }
 
 # Gebruikt homepage (HOMEPAGE_DATABASE_URL, al ingelezen) de PostgreSQL die dit script beheert: op deze machine, via
@@ -603,9 +709,25 @@ NPM_IP_RE="${NPM_IP//./\\\\.}"
 sed "s/__NPM_IP_RE__/$NPM_IP_RE/; s/__LAN_DICHT__/$LAN_DICHT/; s#__LAN_NETS__#$LAN_GEO#" \
   "$APP_DIR/deploy/nginx-map.conf" > /etc/nginx/conf.d/homepage-map.conf
 install -D -m 644 "$APP_DIR/deploy/nginx-headers.conf" /etc/nginx/snippets/homepage-headers.conf
+# Ook https op poort 443, met een eigen certificaat van 9999 dagen (zie certificaat). Zonder certificaat alleen http
+# zoals vroeger: dan is homepage-tls.conf leeg.
+if ! certificaat; then
+  if [ -n "$TLS_OK" ]; then
+    warn "Een nieuw certificaat voor https lukte niet (nodig omdat $TLS_REDEN; fout: ${TLS_FOUT:-onbekend}). Het\
+ vorige blijft in gebruik."
+  else
+    warn "Geen certificaat voor https (${TLS_FOUT:-onbekende fout}): nginx luistert alleen op http (poort 80)."
+  fi
+fi
+if [ -n "$TLS_OK" ]; then
+  install -m 644 "$APP_DIR/deploy/nginx-tls.conf" /etc/nginx/snippets/homepage-tls.conf
+else
+  : > /etc/nginx/snippets/homepage-tls.conf
+fi
 sed "s/__NPM_IP__/$NPM_IP/" "$APP_DIR/deploy/nginx.conf" > /etc/nginx/sites-available/homepage
 # Zonder IPv6 in de container kan nginx niet op [::] luisteren.
-[ -e /proc/net/if_inet6 ] || sed -i '/listen \[::\]/d' /etc/nginx/sites-available/homepage
+[ -e /proc/net/if_inet6 ] || sed -i '/listen \[::\]/d' /etc/nginx/sites-available/homepage \
+  /etc/nginx/snippets/homepage-tls.conf
 ln -sf /etc/nginx/sites-available/homepage /etc/nginx/sites-enabled/homepage
 rm -f /etc/nginx/sites-enabled/default
 nginx -t
@@ -641,18 +763,36 @@ cat <<EOF
 Dashboard: open het via zijn naam in Nginx Proxy Manager (bv. https://home.jbogaert.be): een HTTPS-host naar
 http://$IP:80 met "Websockets Support" aan.
 EOF
+if [ -n "$TLS_OK" ]; then
+  TLS_TOT=$(openssl x509 -in "$TLS_DIR/homepage.crt" -noout -enddate 2>/dev/null | sed 's/^notAfter=//' || true)
+  TLS_TOT=$(date -d "$TLS_TOT" +%F 2>/dev/null || echo "$TLS_TOT")
+  TLS_VINGER=$(openssl x509 -in "$TLS_DIR/homepage-ca.crt" -noout -fingerprint -sha256 2>/dev/null \
+    | sed 's/^.*=//' || true)
+  cat <<EOF
+https: nginx luistert ook op poort 443, met een eigen certificaat dat geldig is tot $TLS_TOT. In NPM mag de host
+dus ook naar https://$IP:443 wijzen (schema https). Geen waarschuwing in je browser of in Zabbix: vertrouw daar de
+CA (importeren als vertrouwde basis-CA): $TLS_DIR/homepage-ca.crt, of download het via NPM op
+https://<naam van het dashboard>/homepage-ca.crt. Vingerafdruk van de CA (SHA-256):
+$TLS_VINGER
+EOF
+  if [ -n "$TLS_NIEUW" ] && [ -n "$TLS_VORIG" ]; then
+    warn "Nieuw certificaat voor https, omdat $TLS_REDEN, met een nieuwe CA. Had je de vorige CA ergens\
+ geïmporteerd, importeer dan deze en verwijder daar de vorige (\"homepage CA\" met een oudere datum)."
+  fi
+fi
 if [ -n "$LAN_OPEN" ]; then
   cat <<EOF
 Rechtstreeks op http://$IP kan nu ook vanaf het hele LAN (HOMEPAGE_LAN_OPEN=1): je wachtwoord en sessiecookie
-gaan dan onversleuteld over het netwerk, dus alleen om te testen. Werkt het via NPM, zet dan HOMEPAGE_LAN_OPEN=0 in
-$CONF_DIR/homepage.env en voer dit script opnieuw uit: bash $APP_DIR/deploy/install.sh
+gaan dan onversleuteld over het netwerk, dus alleen om te testen${TLS_OK:+, en liever op https://$IP}. Werkt het
+via NPM, zet dan HOMEPAGE_LAN_OPEN=0 in $CONF_DIR/homepage.env en voer dit script opnieuw uit:
+bash $APP_DIR/deploy/install.sh
 EOF
 else
   cat <<EOF
-Rechtstreeks op http://$IP werkt alleen vanuit de container zelf: nginx laat alleen NPM ($NPM_IP) binnen, en van
-het LAN alleen push-monitors, webhooks en /api/healthz (Zabbix). Krijg je ook via NPM een 403, dan klopt
-HOMEPAGE_NPM_IP in $CONF_DIR/homepage.env niet: zet het juiste IP en voer dit script opnieuw uit. Eerst testen
-zonder NPM: zet HOMEPAGE_LAN_OPEN=1 in $CONF_DIR/homepage.env en voer dit script opnieuw uit:
+Rechtstreeks op http://$IP${TLS_OK:+ of https://$IP} werkt alleen vanuit de container zelf: nginx laat alleen NPM
+($NPM_IP) binnen, en van het LAN alleen push-monitors, webhooks en /api/healthz (Zabbix). Krijg je ook via NPM een
+403, dan klopt HOMEPAGE_NPM_IP in $CONF_DIR/homepage.env niet: zet het juiste IP en voer dit script opnieuw uit.
+Eerst testen zonder NPM: zet HOMEPAGE_LAN_OPEN=1 in $CONF_DIR/homepage.env en voer dit script opnieuw uit:
 bash $APP_DIR/deploy/install.sh
 EOF
 fi

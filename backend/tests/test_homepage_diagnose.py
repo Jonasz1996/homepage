@@ -53,9 +53,15 @@ SECRETS = (SECRET_KEY, SETUP, DB_PW, ENV_TOKEN, "abcdefghijklmnopqrstuvwxyz", "A
 
 
 def _omgeving(tmp: Path) -> dict:
-    conf, bk, logs, fake, uit = (tmp / n for n in ("conf", "bk", "logs", "bin", "uit"))
-    for d in (conf, bk, logs, fake, uit):
+    conf, bk, logs, fake, uit, tls = (tmp / n for n in ("conf", "bk", "logs", "bin", "uit", "tls"))
+    for d in (conf, bk, logs, fake, uit, tls):
         d.mkdir()
+    # Het certificaat voor https (install.sh): hier één zelfondertekend, als CA en als certificaat.
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
+                    "-keyout", str(tls / "homepage.key"), "-out", str(tls / "homepage.crt"), "-days", "9999",
+                    "-subj", "/CN=testhost", "-addext", "subjectAltName=DNS:testhost,IP:127.0.0.1"],
+                   check=True, capture_output=True)
+    (tls / "homepage-ca.crt").write_bytes((tls / "homepage.crt").read_bytes())
     (conf / "secret.key").write_text(SECRET_KEY)
     (conf / "setup-token").write_text(SETUP + "\n")
     (conf / "versie").write_text("versie=v1.2.3\ncommit=abc123\nkanaal=stabiel\ndatum=2026-10-17T12:00:00+02:00\n")
@@ -86,6 +92,7 @@ def _omgeving(tmp: Path) -> dict:
         (fake / name).chmod(0o755)
     env = {**os.environ, "PATH": f"{fake}:{os.environ['PATH']}", "DIAGNOSE_DIR": str(uit), "DIAGNOSE_CONF": str(conf),
            "DIAGNOSE_BK": str(bk), "DIAGNOSE_LOGS": str(logs), "DIAGNOSE_APP": str(tmp / "app"),
+           "DIAGNOSE_TLS": str(tls),
            # Geen PostgreSQL: een socket die er niet is (de test met PostgreSQL staat hieronder).
            "PGHOST": str(tmp / "geen-socket"), "PGDATABASE": "homepage"}
     return env
@@ -107,11 +114,15 @@ def test_diagnose_zonder_geheimen(tmp_path):
     for s in SECRETS:
         assert s not in text, s
     # Wat er in moet staan.
-    for kop in ("Versies", "Diensten", "API", "Schijf en geheugen", "PostgreSQL", "Back-ups", "Configuratie",
+    for kop in ("Versies", "Diensten", "API", "Certificaat (https op poort 443)", "Schijf en geheugen", "PostgreSQL", "Back-ups", "Configuratie",
                 "Laatste install-log", "journald: homepage-api", "journald: homepage-worker", "journald: homepage-syslog",
                 "journald: postgresql", "journald: nginx"):
         assert f"===== {kop}" in text, kop
     assert "versie=v1.2.3" in text and '{"ok":true} (HTTP 200)' in text and "test is successful" in text
+    # Het certificaat: namen, tot wanneer, en of https antwoordt (met de CA). De sleutel zelf nooit.
+    blok = text.split("===== Certificaat (https op poort 443) =====\n")[1].split("\n===== ")[0]
+    assert "IP Address:127.0.0.1" in blok and "notAfter=" in blok and "sha256 Fingerprint=" in blok
+    assert "--cacert" in blok and "/api/ping" in blok and "PRIVATE KEY" not in blok
     assert "Started homepage worker" in text and "timescaledb=2.17.2" in text and "homepage-2026-10-17.dump" in text
     # homepage.env: de waarde van wat op een geheim lijkt nooit, de rest wel (met een wachtwoord in de url gemaskeerd).
     assert "HOMEPAGE_SITE_NAME=thuis-dashboard" in text and "HOMEPAGE_DB_POOL_WORKER=40" in text
@@ -125,6 +136,12 @@ def test_diagnose_zonder_geheimen(tmp_path):
     assert "PVEAPIToken=" in text and "/api/push/***" in text and "https://jonas:***@example.com" in text
     # PostgreSQL is er niet: dat staat erin, en de rest is er toch.
     assert "SHOW max_connections" in text and "(code " in text
+
+
+def test_zonder_certificaat(tmp_path):
+    env = {**_omgeving(tmp_path), "DIAGNOSE_TLS": str(tmp_path / "geen")}
+    _, text, _ = _diagnose(env)
+    assert f"(geen certificaat in {tmp_path / 'geen'}: nginx luistert alleen op http)" in text
 
 
 def test_een_sleutel_zonder_einde_laat_de_rest_weg(tmp_path):

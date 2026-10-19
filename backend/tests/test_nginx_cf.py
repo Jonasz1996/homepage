@@ -49,13 +49,22 @@ def _free_port(host: str = "127.0.0.1") -> int:
 
 
 def render(tmp: Path, port: int, api_port: int, npm: str = NPM, lan_dicht: str = "1", host: str = "127.0.0.1",
-           peers: str = "", lan_nets: str = "") -> Path:
+           peers: str = "", lan_nets: str = "", tls: tuple[int, Path] | None = None) -> Path:
     """De configuratie zoals install.sh ze neerzet, met andere poorten en paden. lan_dicht: wat install.sh invult ("0"
     met HOMEPAGE_LAN_OPEN=1). peers: extra regels voor de geo $homepage_peer, om een 127.0.0.x als toestel op het LAN
     of als publiek IP te laten tellen (andere afzenders heeft een test niet). lan_nets: wat install.sh invult voor
-    __LAN_NETS__ ("net lan; net lan; ", of niets)."""
+    __LAN_NETS__ ("net lan; net lan; ", of niets). tls: (poort, map met het certificaat) voor https zoals
+    deploy/nginx-tls.conf; zonder is homepage-tls.conf leeg, zoals install.sh het zonder certificaat neerzet."""
     (tmp / "snippets").mkdir(parents=True, exist_ok=True)
     shutil.copy(DEPLOY / "nginx-headers.conf", tmp / "snippets" / "homepage-headers.conf")
+    snippet = ""
+    if tls:
+        snippet = (DEPLOY / "nginx-tls.conf").read_text()
+        for old, new in (("listen 443 ssl default_server;", f"listen {host}:{tls[0]} ssl;"),
+                         ("listen [::]:443 ssl default_server;", ""), ("/etc/ssl/homepage", str(tls[1]))):
+            assert old in snippet, old
+            snippet = snippet.replace(old, new)
+    (tmp / "snippets" / "homepage-tls.conf").write_text(snippet)
     maps = (DEPLOY / "nginx-map.conf").read_text()
     for old, new in (("__NPM_IP_RE__", npm.replace(".", "\\.")), ("__LAN_DICHT__", lan_dicht),
                      ("__LAN_NETS__", lan_nets),
@@ -66,7 +75,8 @@ def render(tmp: Path, port: int, api_port: int, npm: str = NPM, lan_dicht: str =
     site = (DEPLOY / "nginx.conf").read_text()
     for old, new in (("__NPM_IP__", npm), ("listen 80 default_server;", f"listen {host}:{port};"),
                      ("listen [::]:80 default_server;", ""), ("127.0.0.1:8000", f"127.0.0.1:{api_port}"),
-                     ("/var/log/nginx/error.log", str(tmp / "error.log")), ("/opt/homepage/frontend/dist", str(tmp))):
+                     ("/var/log/nginx/error.log", str(tmp / "error.log")), ("/opt/homepage/frontend/dist", str(tmp)),
+                     ("/etc/ssl/homepage", str(tls[1] if tls else tmp / "ssl"))):
         assert old in site, old
         site = site.replace(old, new)
     (tmp / "homepage.conf").write_text(site)
@@ -96,8 +106,9 @@ def _bindable(*addrs: str) -> None:
 
 
 @contextlib.contextmanager
-def _running(tmp: Path, host: str = "127.0.0.1", **kw):
-    """nginx met de configuratie uit deploy/ (render) voor de echo-server; geeft de poort."""
+def _running(tmp: Path, host: str = "127.0.0.1", tls_dir: Path | None = None, **kw):
+    """nginx met de configuratie uit deploy/ (render) voor de echo-server; geeft de poort. Met tls_dir (de map met
+    het certificaat) ook https: dan (poort, poort voor https)."""
     echo = ThreadingHTTPServer(("127.0.0.1", 0), _Echo)
     threading.Thread(target=echo.serve_forever, daemon=True).start()
     proc = None
@@ -106,7 +117,10 @@ def _running(tmp: Path, host: str = "127.0.0.1", **kw):
         # verbinding van een vorige test vanaf dat adres) ze nog nemen: dan een andere poort, tot 5 keer.
         for poging in range(5):
             port = _free_port(host)
-            conf = render(tmp, port, echo.server_address[1], host=host, **kw)
+            tls = None
+            while tls_dir and (tls is None or tls[0] == port):
+                tls = (_free_port(host), tls_dir)
+            conf = render(tmp, port, echo.server_address[1], host=host, tls=tls, **kw)
             test = subprocess.run([NGINX, "-t", "-p", str(tmp), "-c", str(conf)], capture_output=True, text=True)
             assert test.returncode == 0, test.stderr
             log = tmp / "error.log"
@@ -126,7 +140,7 @@ def _running(tmp: Path, host: str = "127.0.0.1", **kw):
             text = log.read_text() if log.exists() else ""
             if "Address already in use" not in text or poging == 4:
                 pytest.fail(f"nginx startte niet: {text}")
-        yield port
+        yield (port, tls[0]) if tls else port
     finally:
         if proc is not None and proc.poll() is None:
             proc.terminate()

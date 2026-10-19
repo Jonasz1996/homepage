@@ -3,7 +3,8 @@
 # niet start (de diagnose in het dashboard, ! → diagnose ↓, dan niet). Als root in de container:
 #   homepage-diagnose   schrijft /root/homepage-diagnose-<datum>.txt en toont waar
 # Erin: de versies, de diensten (systemctl status en de laatste 100 regels van journald, ook van postgresql en nginx),
-# of /api/ping en /api/healthz antwoorden, schijf en geheugen, PostgreSQL (bereikbaar, max_connections en hoeveel
+# of /api/ping en /api/healthz antwoorden, het certificaat voor https (namen, tot wanneer, of https antwoordt), schijf
+# en geheugen, PostgreSQL (bereikbaar, max_connections en hoeveel
 # verbindingen er open zijn, alembic_version), de nieuwste back-ups en kopieën van voor een update, en het laatste log
 # van install.sh. Het verandert niets.
 #
@@ -16,7 +17,8 @@
 # twee regels loopt, en een token zonder herkenbare naam of vorm (een los woord in een logregel). IP-adressen en
 # namen staan er ook in: kijk het bestand na voor je het deelt.
 # Om te testen: DIAGNOSE_DIR (waar het bestand komt), DIAGNOSE_CONF, DIAGNOSE_APP, DIAGNOSE_BK, DIAGNOSE_LOGS,
-# DIAGNOSE_URL (via nginx), DIAGNOSE_API (rechtstreeks) en de gewone PostgreSQL-variabelen (PGDATABASE, PGHOST, PGPORT).
+# DIAGNOSE_URL (via nginx), DIAGNOSE_API (rechtstreeks), DIAGNOSE_TLS (het certificaat), DIAGNOSE_HTTPS (nginx op
+# poort 443) en de gewone PostgreSQL-variabelen (PGDATABASE, PGHOST, PGPORT).
 set -u
 
 UIT=${DIAGNOSE_DIR:-/root}
@@ -26,6 +28,8 @@ BK=${DIAGNOSE_BK:-/var/backups/homepage}
 LOGS=${DIAGNOSE_LOGS:-/var/log/homepage}
 URL=${DIAGNOSE_URL:-http://127.0.0.1}
 API=${DIAGNOSE_API:-http://127.0.0.1:8000}
+TLS=${DIAGNOSE_TLS:-/etc/ssl/homepage}
+HTTPS=${DIAGNOSE_HTTPS:-https://127.0.0.1}
 DB=${PGDATABASE:-homepage}
 REGELS=100
 export PGCONNECT_TIMEOUT=5
@@ -169,6 +173,17 @@ verslag() {
   # Rechtstreeks, zonder nginx: zo blijkt of het aan nginx ligt.
   doe curl -sS -m 5 -w ' (HTTP %{http_code})\n' "$API/api/ping"
   doe nginx -t
+
+  kop "Certificaat (https op poort 443)"
+  if [ -r "$TLS/homepage.crt" ]; then
+    doe ls -l "$TLS"
+    doe openssl x509 -in "$TLS/homepage.crt" -noout -subject -issuer -startdate -enddate -ext subjectAltName
+    doe openssl x509 -in "$TLS/homepage-ca.crt" -noout -subject -enddate -fingerprint -sha256
+    doe openssl verify -CAfile "$TLS/homepage-ca.crt" -purpose sslserver "$TLS/homepage.crt"
+    doe curl -sS -m 5 -o /dev/null -w 'HTTP %{http_code}\n' --cacert "$TLS/homepage-ca.crt" "$HTTPS/api/ping"
+  else
+    echo "(geen certificaat in $TLS: nginx luistert alleen op http)"
+  fi
 
   kop "Schijf en geheugen"
   for d in / "$BK" /var/lib/postgresql /mnt/homepage-backup; do
