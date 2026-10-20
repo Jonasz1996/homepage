@@ -85,6 +85,29 @@
       error = ''
     } catch (err) { error = err.message }
   }
+  // Aanmelden (zonder login, zie backend/app/zonderlogin.py): uit = altijd login met 2FA.
+  const LOGIN = [
+    { mode: 'uit', label: 'altijd met 2FA', help: 'Overal je wachtwoord en 2FA-code.' },
+    { mode: 'thuis', label: 'thuis zonder', help: 'Thuis geen login en geen 2FA-code; van buitenaf wel.' },
+    { mode: 'overal', label: 'overal zonder', help: 'Geen login of 2FA-code, ook niet van buitenaf. Wie het adres kent, kan alles zien en de gewone instellingen wijzigen; zonder echte login blijven van buitenaf dicht: terminal, updates, acties, downloads, Authentik, je wachtwoord en wat als thuis telt. Met een echte login vragen die van buitenaf nog een verse 2FA-code. Zet Authentik ervoor.' },
+  ]
+  // Hoe los: van buitenaf mag de stand alleen strenger (backend: zonderlogin.LOOSE).
+  const LOOSE = { uit: 0, thuis: 1, overal: 2 }
+  // Van buitenaf zonder echte login: dan gaan de functies hieronder niet aan.
+  const bare = $derived(!!out?.outside && out?.aanmelden?.mode === 'overal' && !out?.aanmelden?.sessie)
+  async function setLogin(mode) {
+    outMsg = ''
+    // Vraagt dit bezoek daarna een login (altijd met 2FA, of thuis zonder terwijl je buiten bent)?
+    const login = mode === 'uit' || (mode === 'thuis' && out.outside)
+    if (login && !out.aanmelden.sessie
+        && !(await ask('Aanmelden weer aanzetten? Je meldt je daarna meteen aan met je wachtwoord en 2FA-code.', { ok: 'Aanzetten' }))) return
+    try {
+      const r = await withReauth(() => api('/outside/aanmelden', { method: 'PUT', body: { mode } }))
+      out = { ...out, aanmelden: r }
+      error = ''
+      if (!r.nu && !r.sessie) window.dispatchEvent(new Event('hp:unauth'))
+    } catch (e) { error = e.message }
+  }
   const until = (ts) => new Date(ts).toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' })
   const ACCESS = { 'cloudflare-access': 'Cloudflare Access', authentik: 'Authentik' }
 
@@ -192,7 +215,7 @@
     syslog_rollout: 'rsyslog uitgerold', login_failed_oidc: 'login via Authentik mislukt', oidc_settings_changed: 'Authentik-instellingen gewijzigd', maintenance: 'onderhoud', revision_restored: 'versie teruggezet',
     page_deleted: 'pagina verwijderd', group_deleted: 'groep verwijderd', log_rule_added: 'logregel toegevoegd',
     log_rule_changed: 'logregel gewijzigd', log_rule_deleted: 'logregel verwijderd', wol: 'Wake-on-LAN',
-    outside_mode: 'van buitenaf aan/uit', outside_settings: 'thuisnetwerken gewijzigd', ssh_pin: 'SSH-sleutel vastgezet',
+    outside_mode: 'van buitenaf aan/uit', aanmelden: 'aanmelden aan/uit', outside_settings: 'thuisnetwerken gewijzigd', ssh_pin: 'SSH-sleutel vastgezet',
     ssh_unpin: 'SSH-sleutel losgemaakt', secret_key_saved: 'kopie van secret.key bevestigd',
     oidc_linked: 'Authentik-account gekoppeld', oidc_unlinked: 'Authentik-account ontkoppeld', oidc_link_failed: 'Authentik koppelen mislukt',
     password_change_failed: 'wachtwoord wijzigen mislukt', attention_ignored: 'beveiligingspunt genegeerd', check_silenced: 'check stilgelegd',
@@ -326,20 +349,40 @@
           Dit bezoek komt <b>van thuis</b> ({out.why}{out.ip ? `, ${out.ip}` : ''}).
         {/if}
       </p>
+      {#if out.aanmelden}
+        {@const a = out.aanmelden}
+        <div class="feat login">
+          <div class="fw"><b>Aanmelden</b><small>{LOGIN.find((l) => l.mode === a.mode)?.help}</small></div>
+          <div class="seg" role="group" aria-label="Aanmelden">
+            {#each LOGIN as l (l.mode)}
+              <button class="mini" class:on={a.mode === l.mode} class:warn={l.mode === 'overal'}
+                      disabled={out.outside && LOOSE[l.mode] > LOOSE[a.mode]} title={out.outside && LOOSE[l.mode] > LOOSE[a.mode] ? 'Losser zetten kan alleen thuis' : ''}
+                      onclick={() => a.mode !== l.mode && setLogin(l.mode)}>{l.label}</button>
+            {/each}
+          </div>
+        </div>
+        {#if a.mode !== 'uit'}
+          <p class="hint">{a.nu ? `Dit bezoek gaat zonder login (${a.why}).` : `Dit bezoek vraagt een login (${a.why}).`}
+            {#if !(out.outside && a.mode === 'thuis')}{a.mode === 'thuis' ? 'Thuis gaat' : 'Zonder login gaat'} het op een
+              IP-adres, localhost{a.names.length ? ` en ${a.names.join(', ')}` : ''}; op een andere naam meld je je één keer
+              aan, daarna onthoudt het dashboard die naam.{/if}</p>
+        {/if}
+      {/if}
       <p class="hint">Van buitenaf = via Cloudflare of vanaf een publiek IP. Dan staan deze functies standaard uit, zodat
-        wie je login overneemt er niets mee kan. Kijken kan altijd. Aanzetten vraagt je 2FA-code en geeft een melding;
-        <i>altijd</i> kan alleen thuis.</p>
+        wie je login overneemt er niets mee kan. Kijken kan altijd. Van buitenaf aanzetten (en gebruiken) vraagt een
+        echte login met je 2FA-code en geeft een melding; <i>altijd</i> kan alleen thuis.</p>
       {#each out.features as f (f.key)}
         <div class="feat">
           <div class="fw"><b>{f.label}</b><small>{f.help}</small></div>
           <div class="seg" role="group" aria-label="{f.label} van buitenaf">
             <button class="mini" class:on={f.mode === 'uit'} onclick={() => setMode(f, 'uit')}>uit</button>
-            <button class="mini" class:on={f.mode === 'uur'} onclick={() => setMode(f, 'uur')}>{f.mode === 'uur' ? `aan tot ${until(f.until)}` : '1 uur'}</button>
+            <button class="mini" class:on={f.mode === 'uur'} disabled={bare && f.mode !== 'uur'} onclick={() => setMode(f, 'uur')}>{f.mode === 'uur' ? `aan tot ${until(f.until)}` : '1 uur'}</button>
             <button class="mini" class:on={f.mode === 'aan'} class:warn={f.mode === 'aan'} disabled={out.outside && f.mode !== 'aan'}
                     onclick={() => setMode(f, 'aan')} title={out.outside ? 'Kan alleen thuis' : ''}>altijd</button>
           </div>
         </div>
       {/each}
+      {#if bare}<p class="hint">Zonder login gaan deze functies van buitenaf niet aan, ook niet als ze op <i>altijd</i> staan. Thuis wel.</p>{/if}
       <form onsubmit={saveHome} class="home">
         <b>wat telt als thuis</b>
         <p class="hint">Je LAN, VPN en Tailscale tellen al als thuis. Surf je thuis via Cloudflare (bv. met Private DNS op je
@@ -404,6 +447,7 @@
   .fw small { color: var(--muted); font-size: 11.5px }
   .seg { display: flex; gap: 4px; flex-shrink: 0 }
   .seg .warn.on { color: var(--mid); border-color: rgba(230, 181, 107, .6) }
+  .login { border-top: 0; padding-top: 4px }
   .home { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px }
   .home b { color: var(--text-h); font-weight: 500 }
   @media (max-width: 560px) { .two { grid-template-columns: 1fr } .feat { flex-direction: column; align-items: flex-start } }

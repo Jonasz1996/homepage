@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import outside
+from .. import outside, zonderlogin
 from ..integrations import IntegrationError, build, from_api
 from ..models import ApiConnection, AppState, AuditLog, Service, Session, SshHost, User
 from ..ssh_pin import STATE_KEY as PIN_KEY
@@ -59,6 +59,16 @@ async def check_2fa(db: AsyncSession) -> dict:
     if oidc.get("enabled") and not oidc.get("require_mfa", True):
         return item("2fa", "2FA voor elk account", "warn", "Inloggen via Authentik vraagt geen 2FA: zet 'Authentik moet "
                     "2FA melden' weer aan.", fix={"window": "security", "tab": "sso"})
+    mode = (await zonderlogin.settings(db))["mode"]
+    fix = {"window": "security", "tab": "outside"}
+    if mode == "overal":
+        return item("2fa", "2FA voor elk account", "warn", "Aanmelden staat uit, ook van buitenaf: wie het adres kent, kan "
+                    "alles zien en de gewone instellingen wijzigen, maar niet de terminal, updates, acties, downloads, "
+                    "Authentik of je wachtwoord. Zet Authentik ervoor, of zet aanmelden terug aan in ⚿ → van buitenaf.",
+                    fix=fix)
+    if mode == "thuis":
+        return item("2fa", "2FA voor elk account", "info", "Thuis zonder login: van buitenaf vraagt het dashboard nog "
+                    "login en 2FA.", fix=fix)
     via = " Authentik moet ook 2FA melden." if oidc.get("enabled") else ""
     return item("2fa", "2FA voor elk account", "ok", f"Staat aan voor {len(users)} account{'s' if len(users) != 1 else ''}.{via}")
 
@@ -212,6 +222,12 @@ async def check_access(db: AsyncSession) -> dict:
     if last.get("access"):
         name = {"cloudflare-access": "Cloudflare Access", "authentik": "Authentik"}.get(last["access"], last["access"])
         return item("access", "Slot voor het dashboard", "ok", f"{name} stond voor het laatste bezoek van buitenaf.", fix=fix)
+    if (await zonderlogin.settings(db))["mode"] == "overal":
+        return item("access", "Slot voor het dashboard", "warn",
+                    "Het laatste bezoek van buitenaf kwam zonder Cloudflare Access of Authentik binnen, en aanmelden staat "
+                    "overal uit: iedereen die het adres kent, ziet en wijzigt het dashboard zonder login (behalve "
+                    "terminal, updates, acties, downloads, Authentik, je wachtwoord en wat als thuis telt). Zet er een "
+                    "slot voor in Cloudflare of NPM.", fix=fix)
     return item("access", "Slot voor het dashboard", "warn",
                 "Het laatste bezoek van buitenaf kwam zonder Cloudflare Access of Authentik binnen: iedereen krijgt het "
                 "loginscherm te zien. Zet er een slot voor in Cloudflare of NPM.", fix=fix)

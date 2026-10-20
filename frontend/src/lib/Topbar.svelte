@@ -7,7 +7,7 @@
 
   // De titelbalk: Aandacht (wat nu mis is, het enige getal dat telt), Meldingen (gebeurtenissen) en drie menu's met
   // leesbare namen. Op de gsm staan de drie menu's samen achter ☰.
-  let { clock, onlogout } = $props()
+  let { clock, uitloggen = true, zonder = false, onlogout } = $props()
 
   let open = $state(null) // 'infra', 'beheer', 'instellingen' of 'alles' (☰ op de gsm)
   let place = $state({ top: 56, right: 12 })
@@ -111,17 +111,21 @@
       <span class="nm">Effecten: {dash.fx ? 'aan' : 'uit'}</span>
       <small>bewegende achtergrond, gloed, scanlijnen, vuur en bliksem</small>
     </button>
-    <button class="it" role="menuitem" onclick={logout} title="Uitloggen">
-      <span class="nm">Uitloggen</span><code>⏻</code>
-      <small>deze sessie beëindigen</small>
-    </button>
+    {#if uitloggen}
+      <button class="it" role="menuitem" onclick={logout} title="Uitloggen">
+        <span class="nm">Uitloggen</span><code>⏻</code>
+        <small>deze sessie beëindigen</small>
+      </button>
+    {/if}
   {/if}
 {/snippet}
 
 <span class="clock">{clock}</span>
 {#if dash.where?.outside}
   <button class="mini buiten" onclick={() => dash.open('security', { tab: 'outside' })}
-          title="Je bent van buitenaf verbonden ({dash.where.why}): terminal, updates, acties en downloads staan uit, tenzij je ze aanzet">buiten</button>
+          title={zonder
+            ? `Je bent van buitenaf verbonden (${dash.where.why}), zonder login: terminal, updates, acties en downloads gaan niet, ook niet als ze op altijd staan. Thuis wel.`
+            : `Je bent van buitenaf verbonden (${dash.where.why}): terminal, updates, acties en downloads staan uit, tenzij je ze aanzet`}>buiten</button>
 {/if}
 <button class="mini att" class:bad={dash.att.counts.err} class:warn={!dash.att.counts.err && att} onclick={() => dash.open('attention')}
         title="Aandacht: alles wat nu mis is, en welke functies nog ingesteld moeten worden">!<span class="ml">Aandacht</span>{#if att}<b class="n">{att}</b>{/if}</button>

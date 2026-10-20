@@ -7,10 +7,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import outside
+from .. import outside, zonderlogin
 from ..db import ensure_state, get_db
-from ..deps import audit, client_country, current_user, notify, recent_auth
-from ..models import AppState, User
+from ..deps import audit, client_country, current_session, current_user, fresh_auth, notify, recent_auth
+from ..models import AppState, Session, User
 
 router = APIRouter(prefix="/api/outside", tags=["buitenaf"])
 
@@ -48,6 +48,14 @@ async def _record_visit(db: AsyncSession, request: Request, w: dict) -> None:
     st.value = v
 
 
+async def _aanmelden(request: Request, db: AsyncSession) -> dict:
+    """Stand van aanmelden, en of dit bezoek zonder login mag (en zo niet, waarom)."""
+    cfg = await zonderlogin.settings(db)
+    ok, why = await zonderlogin.check(request, db, cfg)
+    return {"mode": cfg["mode"], "label": zonderlogin.LABELS[cfg["mode"]], "names": cfg["names"],
+            "nu": ok, "why": why, "sessie": await zonderlogin.logged_in(request, db)}
+
+
 @router.get("")
 async def state(request: Request, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     cfg = await outside.settings(db)
@@ -58,7 +66,7 @@ async def state(request: Request, user: User = Depends(current_user), db: AsyncS
     seen = await db.get(AppState, outside.SEEN_KEY)
     return {**w, "country": client_country(request), "access": access_of(request),
             "features": _features(cfg), "home_ip": cfg["home_ip"], "networks": cfg["networks"],
-            "seen": (seen.value if seen else {}) or {}}
+            "seen": (seen.value if seen else {}) or {}, "aanmelden": await _aanmelden(request, db)}
 
 
 class ModeIn(BaseModel):
@@ -67,13 +75,18 @@ class ModeIn(BaseModel):
 
 @router.put("/features/{key}")
 async def set_mode(key: str, data: ModeIn, request: Request, user: User = Depends(recent_auth),
-                   db: AsyncSession = Depends(get_db)):
+                   sess: Session = Depends(current_session), db: AsyncSession = Depends(get_db)):
     if key not in outside.FEATURES:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Onbekende functie")
     cfg = await outside.settings(db)
     w = await outside.where(request, db, cfg)
+    if data.mode != "uit" and w["outside"] and await zonderlogin.outside_without_login(request, db):
+        # Anders zet iedereen die het adres kent hier de terminal aan.
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Zonder login kan je dit van buitenaf niet aanzetten. Thuis wel.")
     if data.mode == "aan" and w["outside"]:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Altijd aanzetten kan alleen thuis. Onderweg kan het voor één uur.")
+    if data.mode != "uit" and w["outside"]:
+        await fresh_auth(sess, user)  # ook overal zonder login: met een gestolen cookie alleen gaat het niet
     entry = {"mode": data.mode}
     if data.mode == "uur":
         entry["until"] = (datetime.now(timezone.utc) + outside.TEMP).isoformat()
@@ -85,8 +98,10 @@ async def set_mode(key: str, data: ModeIn, request: Request, user: User = Depend
     await audit(db, request, user, "outside_mode", feature=key, mode=data.mode, outside=w["outside"])
     if data.mode != "uit":
         where = f"vanaf {w['ip']}{f' ({c})' if (c := client_country(request)) else ''}, {w['why']}"
+        who = f"Iemand zonder login (als {user.username})" if getattr(request.state, "zonder_login", False) \
+            else user.username
         notify(db, f"Van buitenaf: {label} {'één uur aan' if data.mode == 'uur' else 'altijd aan'}",
-               f"{user.username} zette dit aan {where}.", level="warn" if w["outside"] or data.mode == "aan" else "info",
+               f"{who} zette dit aan {where}.", level="warn" if w["outside"] or data.mode == "aan" else "info",
                source="auth")
     await db.commit()
     return {"features": _features(v)}
@@ -125,3 +140,38 @@ async def put_settings(data: SettingsIn, request: Request, user: User = Depends(
     await audit(db, request, user, "outside_settings", home_ip=data.home_ip, networks=data.networks)
     await db.commit()
     return {"home_ip": data.home_ip, "networks": data.networks}
+
+
+class AanmeldenIn(BaseModel):
+    mode: str = Field(pattern="^(uit|thuis|overal)$")
+
+
+@router.put("/aanmelden")
+async def put_aanmelden(data: AanmeldenIn, request: Request, user: User = Depends(recent_auth),
+                        db: AsyncSession = Depends(get_db)):
+    """Aanmelden aan of uit (zonderlogin.py). Losser zetten kan alleen thuis; strenger ook van buitenaf."""
+    out = (await outside.where(request, db))["outside"]
+    await ensure_state(db, zonderlogin.KEY, {})
+    # Vergelijken met de stand die we overschrijven (vergrendeld tot de commit): anders kan een strengere stand die
+    # thuis net bewaard werd, vervangen worden door een lossere van buitenaf.
+    st = await db.get(AppState, zonderlogin.KEY, with_for_update=True, populate_existing=True)
+    current = (st.value or {}).get("mode")
+    current = current if current in zonderlogin.MODES else zonderlogin.DEFAULT
+    if zonderlogin.LOOSE[data.mode] > zonderlogin.LOOSE[current] and out:
+        await db.rollback()
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Aanmelden losser zetten kan alleen thuis; strenger kan overal.")
+    if data.mode != current:
+        st.value = {**(st.value or {}), "mode": data.mode}
+        await audit(db, request, user, "aanmelden", mode=data.mode)
+        notify(db, f"Aanmelden: {zonderlogin.LABELS[data.mode]}", {
+            "uit": "Het dashboard vraagt weer overal je login met 2FA.",
+            "thuis": "Thuis vraagt het dashboard geen login en geen 2FA-code meer; van buitenaf wel.",
+            "overal": "Het dashboard vraagt geen login of 2FA-code meer, ook niet van buitenaf. Zonder echte login "
+                      "blijven van buitenaf terminal, updates, acties en downloads dicht, net als Authentik, je "
+                      "wachtwoord en wat als thuis telt; met een echte login vragen die van buitenaf nog een verse "
+                      "2FA-code.",
+        }[data.mode], level="info" if data.mode == "uit" else "warn", source="auth")
+        await db.commit()
+    else:
+        await db.rollback()  # het slot vrijgeven
+    return await _aanmelden(request, db)

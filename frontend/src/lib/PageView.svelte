@@ -8,6 +8,17 @@
   // bolletje per tabblad en groep zodat je een tegel die down is ook ziet als hij op een ander tabblad of in een
   // dichtgeklapte groep staat. De tabbladen staan in de kopkaart, de groepen eronder: twee keer dit onderdeel
   // (part = 'tabs' en 'groups'), met één gedeelde toestand.
+  // Via api() (met de header van de frontend): een gewone downloadlink werkt zonder login niet op http://IP.
+  async function exportYaml() {
+    try {
+      const text = await api('/export')
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(new Blob([text], { type: 'text/yaml' }))
+      a.download = 'homepage-export.yaml'
+      a.click()
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000)
+    } catch (e) { v.error = e.message }
+  }
   function readNum(k) {
     try { return Number(localStorage.getItem('hp:' + k)) || null } catch { return null }
   }
@@ -255,7 +266,7 @@
       <button class="mini" onclick={() => (v.form = { kind: 'page', page })}>✎ pagina</button>
     {/if}
     <button class="mini" onclick={() => dash.open('import')}>import</button>
-    <a class="mini" href="/api/export" download>export</a>
+    <button class="mini" onclick={exportYaml}>export</button>
     <button class="mini" onclick={() => dash.open('revisions')}>versies</button>
     <span class="tip">Sleep tegels, groepen (aan ⠿) en tabbladen om ze te verplaatsen.</span>
   </div>
@@ -367,7 +378,6 @@
   .chipb { all: unset; cursor: pointer; padding: 2px 4px; border-radius: 6px }
   .chipb:hover, .chipb:focus-visible { background: var(--fill-h) }
   .tools { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding: 12px 24px; border-top: 1px solid var(--line) }
-  .tools a { text-decoration: none }
   .tip { color: var(--muted); font-size: 12px; margin-left: 6px }
   .banner { margin: 14px 4px 0; display: flex; gap: 10px; align-items: center }
   .groups {

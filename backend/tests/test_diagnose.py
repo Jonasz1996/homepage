@@ -645,6 +645,8 @@ async def test_lange_teksten_begrensd(authed):
 
 
 async def test_geen_bijwerkingen(authed):
+    # Het eerste verzoek met login onthoudt de naam waarop je binnenkwam (zonderlogin.learn): dat is niet de export.
+    assert (await authed.get("/api/layout")).status_code == 200
     agen, db = await _db()
     # Een genegeerd punt dat er niet meer is: het overzicht ruimt het op, de export niet.
     db.add(AppState(key="attention_ack", value={"items": {"weg:1": {"sig": "x", "at": "2026-10-01", "by": "jonas"}}}))

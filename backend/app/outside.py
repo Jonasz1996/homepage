@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import HTTPConnection
 
 from .db import get_db
-from .deps import cf_forged, current_session, current_user, notify, recent_auth
+from .deps import cf_forged, current_session, current_user, fresh_auth, notify, optional_session
 from .models import AppState, Notification, Session, User
 
 STATE_KEY = "outside"
@@ -150,9 +150,14 @@ def allowed(cfg: dict, feature: str) -> tuple[bool, str, str | None]:
 
 async def blocked(conn: HTTPConnection, db: AsyncSession, feature: str) -> str | None:
     """None als het mag, anders de reden (voor WebSockets, die geen HTTPException kunnen geven)."""
+    from . import zonderlogin
+
     cfg = await settings(db)
     w = await where(conn, db, cfg)
-    if not w["outside"] or allowed(cfg, feature)[0]:
+    if not w["outside"]:
+        return None
+    # Zonder login van buitenaf: deze functies nooit, ook niet als ze altijd aan staan.
+    if allowed(cfg, feature)[0] and not await zonderlogin.outside_without_login(conn, db):
         return None
     return f"buiten:{feature}"
 
@@ -163,12 +168,14 @@ async def require(conn: HTTPConnection, db: AsyncSession, feature: str, sess: Se
     De stand van een functie geldt voor elke sessie van buitenaf (ze staat niet per sessie): zonder verse 2FA zou wie
     je sessie steelt in dat uur meeliften. Voor routes die het alleen in sommige gevallen vragen (een tegel die een
     nieuw adres krijgt); anders guard(feature, fresh=True)."""
+    from . import zonderlogin
+
     cfg = await settings(db)
     if not (await where(conn, db, cfg))["outside"]:
         return
-    if not allowed(cfg, feature)[0]:
+    if not allowed(cfg, feature)[0] or await zonderlogin.outside_without_login(conn, db):
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"buiten:{feature}")
-    await recent_auth(sess, user)
+    await fresh_auth(sess, user)
 
 
 def guard(feature: str, fresh: bool = False):
@@ -181,9 +188,16 @@ def guard(feature: str, fresh: bool = False):
                       sess: Session = Depends(current_session), user: User = Depends(current_user)) -> None:
             await require(conn, db, feature, sess, user)
     else:
-        async def dep(conn: HTTPConnection, db: AsyncSession = Depends(get_db)) -> None:
+        async def dep(conn: HTTPConnection, db: AsyncSession = Depends(get_db),
+                      sess: Session | None = Depends(optional_session)) -> None:
             if why := await blocked(conn, db, feature):
                 raise HTTPException(status.HTTP_403_FORBIDDEN, why)
+            # Voor recent_auth (deps): overal zonder login, van buitenaf met een echte sessie, vraagt een route van
+            # deze functie die een bevestiging vraagt, toch een verse 2FA, net als met aanmelden aan. Een gestolen
+            # cookie volstaat zo niet voor de terminal. Routes zonder bevestiging (kijken, een proef) vragen niets.
+            # De dependencies van een route lopen vóór die van de functie zelf, en de sessie is per verzoek dezelfde.
+            if sess is not None:
+                sess.gevaarlijk = True
 
     dep.outside_feature = feature  # voor de test die nagaat welke routes bewaakt zijn
     return Depends(dep)

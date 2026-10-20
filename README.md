@@ -6,7 +6,28 @@ waarin je alles vanuit de browser beheert.
 Fase 1 en 2 van het [stappenplan](https://claude.ai/code/artifact/fe2b226c-d5ef-4cef-9b02-6047fcc63504):
 
 - inloggen met wachtwoord en verplichte 2FA (TOTP), eerste account via een eenmalige setup-code. Bevestigen (een
-  actie, de terminal, een geheim wijzigen) gebeurt altijd met je 2FA-code, nooit met je wachtwoord
+  actie, de terminal, een geheim wijzigen) gebeurt met je 2FA-code, nooit met je wachtwoord. Zonder login (hieronder)
+  vraagt het geen code, behalve van buitenaf met een echte login voor terminal, updates, acties, downloads, Authentik
+  en je wachtwoord (zie daar)
+- **zonder login** (standaard sinds nr 43, tot Authentik ervoor staat): ⚿ → *van buitenaf* → **Aanmelden** kiest
+  *altijd met 2FA*, *thuis zonder* (thuis geen login en geen 2FA-code, van buitenaf wel) of *overal zonder*. Zonder
+  login ben je het eerste account, zodra dat 2FA heeft; er is geen sessie en geen cookie. Wat blijft:
+  - van buitenaf gaan terminal, updates, acties en downloads zonder echte login nooit, ook niet als ze op *altijd*
+    staan, en ze gaan dan ook niet aan; Authentik instellen, koppelen of ontkoppelen en je wachtwoord wijzigen
+    evenmin. Met een echte login vragen die van buitenaf nog altijd een verse 2FA-code, zoals met aanmelden aan (een
+    gestolen cookie volstaat niet);
+  - het werkt alleen op een IP-adres, `localhost` of een naam waarop al eens iemand met login binnenkwam (de laatste
+    20). Op een nieuwe naam meld je je één keer aan. Zo kan een website die je thuis opent het dashboard niet via
+    DNS-rebinding bedienen;
+  - alleen voor de frontend zelf (header `X-Requested-With`, of `Sec-Fetch-Site` same-origin, die een browser alleen
+    over https of naar localhost stuurt), niet vanaf het dashboard zelf (127.0.0.1 of een eigen adres, ook via NPM),
+    en niet met een vervalste header van Cloudflare. Een check of API in het dashboard kan `X-Requested-With` en
+    `Sec-Fetch-*` niet meesturen (geweigerd bij opslaan, weggelaten bij versturen): anders doet een check die naar het
+    dashboard wijst, zich voor als jouw browser;
+  - losser zetten kan alleen thuis, strenger overal (van buitenaf bv. terug naar *altijd met 2FA*). Elke wijziging
+    komt in de meldingen en de auditlog; in de auditlog staat wat zonder cookie gebeurde (dus zonder login) met
+    `zonder_login`, en een functie die zonder login aangaat, meldt "Iemand zonder login".
+    hw → beveiliging waarschuwt zolang het overal uit staat
 - **bekende toestellen**: een toestel waarop je al met 2FA inlogde, krijgt een cookie (`hp_device`, een jaar geldig,
   bij elke login vernieuwd). Daar geldt de limiet van 30 foute pogingen per gebruikersnaam niet, die iedereen kan
   vullen, maar wel die per IP (5), per toestel (5) en op 2FA-codes (5). Zit de gebruikersnaam op slot, dan moeten

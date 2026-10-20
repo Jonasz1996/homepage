@@ -64,6 +64,29 @@ async def csrf_guard(conn: HTTPConnection) -> None:
 
 
 async def optional_session(request: Request, db: AsyncSession = Depends(get_db)) -> Session | None:
+    """De sessie van dit verzoek. Zonder login (zie zonderlogin.py): een echte sessie krijgt het kenmerk zonder_login
+    (geen 2FA-code meer), en wie geen sessie heeft, krijgt een vluchtige sessie van de eerste gebruiker."""
+    from . import zonderlogin
+
+    sess = await _cookie_session(request, db)
+    cfg = await zonderlogin.settings(db)
+    if sess is not None and sess.mfa_ok and sess.user.totp_enabled:
+        if await zonderlogin.learn(request, db, cfg):
+            await db.commit()
+        ok, _, out = await zonderlogin.check_full(request, db, cfg)
+        if ok:
+            # Gewone attributen, geen kolommen: gelden alleen voor dit verzoek. Van buitenaf vragen de vier gevaarlijke
+            # functies met een echte sessie nog altijd een verse 2FA (fresh_auth): een gestolen cookie volstaat niet.
+            sess.zonder_login = True
+            sess.zonder_buiten = out
+        return sess
+    if (await zonderlogin.check(request, db, cfg))[0] and (user := await zonderlogin.home_user(db)):
+        request.state.zonder_login = True
+        return zonderlogin.transient(user, request)
+    return sess
+
+
+async def _cookie_session(request: Request, db: AsyncSession) -> Session | None:
     token = request.cookies.get(COOKIE)
     if not token:
         return None
@@ -101,14 +124,24 @@ async def current_session(sess: Session | None = Depends(optional_session)) -> S
 
 
 async def current_user(sess: Session = Depends(current_session)) -> User:
-    """Volledig ingelogd: wachtwoord en TOTP zijn allebei gecontroleerd."""
+    """Volledig ingelogd: wachtwoord en TOTP zijn allebei gecontroleerd (of zonder login, zie optional_session)."""
     if not (sess.mfa_ok and sess.user.totp_enabled):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "2FA vereist")
     return sess.user
 
 
 async def recent_auth(sess: Session = Depends(current_session), user: User = Depends(current_user)) -> User:
-    """Voor gevoelige acties: wachtwoord of TOTP moet recent ingegeven zijn."""
+    """Voor gevoelige acties: wachtwoord of TOTP moet recent ingegeven zijn. Zonder login vraagt niets een code,
+    behalve van buitenaf met een echte sessie voor de vier gevaarlijke functies (outside.guard zet gevaarlijk): daar
+    geldt wat met aanmelden aan geldt."""
+    if getattr(sess, "zonder_login", False) and not (
+            getattr(sess, "zonder_buiten", False) and getattr(sess, "gevaarlijk", False)):
+        return user
+    return await fresh_auth(sess, user)
+
+
+async def fresh_auth(sess: Session, user: User) -> User:
+    """Een verse 2FA, ook zonder login (voor de gevaarlijke functies van buitenaf met een echte sessie)."""
     limit = timedelta(minutes=get_settings().reauth_minutes)
     auth_at = sess.auth_at.replace(tzinfo=sess.auth_at.tzinfo or timezone.utc)
     if datetime.now(timezone.utc) - auth_at > limit:
@@ -117,6 +150,8 @@ async def recent_auth(sess: Session = Depends(current_session), user: User = Dep
 
 
 async def audit(db: AsyncSession, request: Request, user: User | None, action: str, **detail) -> None:
+    if getattr(request.state, "zonder_login", False):
+        detail = {**detail, "zonder_login": True}
     db.add(AuditLog(user_id=user.id if user else None, action=action, detail=detail, ip=client_ip(request)))
 
 

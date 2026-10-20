@@ -90,6 +90,15 @@ def dashboard_self(monkeypatch):
     monkeypatch.setattr(upgrade, "me", lambda: upgrade.Me())
 
 
+@pytest.fixture(autouse=True)
+def met_login(monkeypatch):
+    """De tests melden zich aan zoals vroeger: zonder keuze in ⚿ → van buitenaf geldt hier "altijd aanmelden met 2FA".
+    tests/test_zonder_login.py test de stand zonder login."""
+    from app import zonderlogin
+    monkeypatch.setattr(zonderlogin, "DEFAULT", "uit")
+    monkeypatch.setattr(zonderlogin, "_own", (float("-inf"), frozenset()))  # eigen adressen: van upgrade.me
+
+
 @pytest.fixture
 async def client(migrated):
     engine = create_async_engine(TEST_DB)

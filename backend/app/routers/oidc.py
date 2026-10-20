@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import zonderlogin
 from ..db import get_db
 from ..deps import audit, client_ip, current_session, current_user, notify, recent_auth, secure_cookie
 from ..models import AppState, Session, User
@@ -124,7 +125,8 @@ async def read_settings(request: Request, user: User = Depends(current_user), db
 
 @router.put("/settings")
 async def put_settings(data: SettingsIn, request: Request, user: User = Depends(recent_auth),
-                       db: AsyncSession = Depends(get_db)):
+                       sess: Session = Depends(current_session), db: AsyncSession = Depends(get_db)):
+    await zonderlogin.need_login_outside(request, db, sess)
     cfg = await _settings(db)
     new = data.model_dump(exclude={"client_secret"})
     new["client_secret"] = cfg.get("client_secret")
@@ -200,6 +202,12 @@ async def link(request: Request, response: Response, sess: Session = Depends(cur
     cfg = await _settings(db)
     if not _enabled(cfg):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Zet inloggen via Authentik eerst aan en sla op")
+    if getattr(sess, "vluchtig", False):
+        # De terugkeer van Authentik zoekt deze sessie weer op; zonder login is er geen.
+        raise HTTPException(status.HTTP_409_CONFLICT, "Koppelen vraagt een echte login: zet in ⚿ → van buitenaf → "
+                            "Aanmelden op 'altijd met 2FA', meld je aan en koppel dan (losser zetten kan daarna alleen "
+                            "thuis)")
+    await zonderlogin.need_login_outside(request, db, sess)
     try:
         url, cookie = await _authorize(request, db, cfg, m="link", u=user.id, sid=sess.id)
     except OidcError as e:
@@ -209,7 +217,9 @@ async def link(request: Request, response: Response, sess: Session = Depends(cur
 
 
 @router.delete("/link")
-async def unlink(request: Request, user: User = Depends(recent_auth), db: AsyncSession = Depends(get_db)):
+async def unlink(request: Request, user: User = Depends(recent_auth), sess: Session = Depends(current_session),
+                 db: AsyncSession = Depends(get_db)):
+    await zonderlogin.need_login_outside(request, db, sess)
     if user.oidc_sub:
         await audit(db, request, user, "oidc_unlinked", name=user.oidc_name, sub=user.oidc_sub[:64])
         user.oidc_issuer = user.oidc_sub = user.oidc_name = None

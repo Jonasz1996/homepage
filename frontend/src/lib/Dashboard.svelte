@@ -16,7 +16,8 @@
 
   // Het hoofdscherm. De onderdelen staan elk in een eigen bestand; de gedeelde toestand in dash.svelte.js en welke
   // vensters er zijn in windows.js.
-  let { user, onlogout } = $props()
+  // zonder: zonder login binnen (geen 2FA-code nodig); sessie: er is ook een echte login op dit toestel.
+  let { user, zonder = false, sessie = true, onlogout } = $props()
 
   let query = $state('')
   let now = $state(new Date())
@@ -144,12 +145,14 @@
 
 <main class="wrap" ondragend={endDrag}>
   <Card title="homepage" glow class="top">
-    {#snippet right()}<Topbar {clock} onlogout={logout} />{/snippet}
+    {#snippet right()}<Topbar {clock} uitloggen={!zonder || sessie} zonder={zonder && !sessie} onlogout={logout} />{/snippet}
     <div class="body head">
       <div class="hello">
         <h1>{greeting}, {user.username}</h1>
         <p class="hint">
           {date}
+          {#if zonder}{' · '}<button class="zl" onclick={() => dash.open('security', { tab: 'outside' })}
+            title="Aanmelden staat uit (⚿ → van buitenaf): je bent {user.username}, zonder {sessie ? '2FA-code' : 'login of 2FA-code'}">zonder login</button>{/if}
           {#if summary.up + summary.down > 0}
             {' · '}<span class="ok">{summary.up} up</span>{#if summary.down}{' · '}<button class="down" onclick={() => (dash.problemsOnly = true)}
               title="Alleen de tegels met een probleem tonen, van alle pagina's">{summary.down} down</button>{/if}{#if summary.maint}{' · '}<span class="maint">{summary.maint} in onderhoud</span>{/if}{#if summary.paused}{' · '}<span class="maint">{summary.paused} gepauzeerd</span>{/if}
@@ -200,7 +203,7 @@
 
 <PageView part="forms" />
 <WindowHost onnews={markNews} />
-<OutsideDialog onsettings={() => dash.open('security', { tab: 'outside' })} />
+<OutsideDialog zonder={zonder && !sessie} onsettings={() => dash.open('security', { tab: 'outside' })} />
 <ReauthDialog />
 
 <style>
@@ -211,6 +214,8 @@
   .wrap > :global(.card:first-child) { z-index: 5 }
   .down { all: unset; cursor: pointer; color: var(--err); text-decoration: underline dotted; text-underline-offset: 3px }
   .down:hover, .down:focus-visible { color: #ffb0b0 }
+  .zl { all: unset; cursor: pointer; color: var(--mid); text-decoration: underline dotted; text-underline-offset: 3px }
+  .zl:hover, .zl:focus-visible { color: var(--text-h) }
   .maint { color: var(--mid) }
   .upd { color: var(--muted) }
   .upd.old { color: var(--mid) }

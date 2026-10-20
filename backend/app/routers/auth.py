@@ -11,6 +11,7 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
+from .. import zonderlogin
 from ..config import get_settings
 from ..db import get_db
 from ..deps import (COOKIE, audit, client_country, client_ip, current_session, current_user, limit_ip, notify,
@@ -178,7 +179,8 @@ async def state(request: Request, response: Response, db: AsyncSession = Depends
                 sess: Session | None = Depends(optional_session)):
     user = sess.user if sess else None
     mfa_ok = bool(sess and sess.mfa_ok and user.totp_enabled)
-    if mfa_ok:
+    vluchtig = bool(getattr(sess, "vluchtig", False))
+    if mfa_ok and not vluchtig:
         # Al ingelogd met 2FA, dus een bekend toestel: ook als het inlogde voor er toestelcookies waren. En een toestel
         # dat nooit opnieuw hoeft in te loggen (de sessie glijdt mee), houdt zo zijn cookie.
         dev = read_device(request.cookies.get(DEVICE_COOKIE))
@@ -189,6 +191,9 @@ async def state(request: Request, response: Response, db: AsyncSession = Depends
         "user": {"username": user.username, "totp_enabled": user.totp_enabled} if user else None,
         "mfa_ok": mfa_ok,
         "site_name": get_settings().site_name,
+        # Zonder login (zonderlogin.py): sessie = er is ook een echte login op dit toestel.
+        "zonder_login": bool(getattr(sess, "zonder_login", False)),
+        "sessie": bool(sess) and not vluchtig,
     }
 
 
@@ -328,15 +333,20 @@ async def login(data: LoginIn, request: Request, response: Response, db: AsyncSe
     return {"ok": True, "mfa_ok": user.totp_enabled}
 
 
-def _confirm_keys(request: Request, sess: Session) -> tuple[str, str]:
+def _confirm_keys(request: Request, sess: Session) -> tuple[str, ...]:
     """Bevestigen (reauth, wachtwoord wijzigen) telt apart van het inloggen, per sessie en per IP. Niet per gebruiker:
-    dan kon een gestolen sessie met foute codes het bevestigen op al je andere toestellen dichtzetten."""
+    dan kon een gestolen sessie met foute codes het bevestigen op al je andere toestellen dichtzetten. Zonder login
+    alleen per IP: die sessie delen alle bezoekers."""
+    if getattr(sess, "vluchtig", False):
+        return (f"confirm-ip:{limit_ip(request)}",)
     return f"confirm:{sess.id}", f"confirm-ip:{limit_ip(request)}"
 
 
 @router.post("/reauth")
 async def reauth(data: ReauthIn, request: Request, sess: Session = Depends(current_session),
                  user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    if getattr(sess, "vluchtig", False):
+        return {"ok": True}  # zonder login valt er niets te bevestigen (en geen 2FA-code te raden)
     keys = _confirm_keys(request, sess)
     if limiter.blocked(*keys):
         raise _too_many()
@@ -356,13 +366,22 @@ async def change_password(data: PasswordIn, request: Request, response: Response
                           sess: Session = Depends(current_session), user: User = Depends(recent_auth),
                           db: AsyncSession = Depends(get_db)):
     # recent_auth: met alleen een (gestolen) sessie en het wachtwoord kan het niet, er hoort een verse 2FA-code bij.
+    # Zonder login van buitenaf niet: anders raadt wie het adres kent hier je wachtwoord, en sluit hij je buiten met
+    # een nieuw. Met een echte login van buitenaf: een verse 2FA, ook overal zonder login.
+    await zonderlogin.need_login_outside(request, db, sess)
+    vluchtig = bool(getattr(sess, "vluchtig", False))
     keys = _confirm_keys(request, sess)
-    if limiter.blocked(*keys):
+    # Zonder login (thuis) delen alle bezoekers die sessie: per IP, en samen hoogstens zoveel als het inloggen per
+    # gebruikersnaam toelaat, zodat ook veel adressen samen niet eindeloos kunnen raden.
+    shared = (f"confirm-zonder-login:{user.id}",) if vluchtig else ()
+    shared_limit = get_settings().login_max_failures * USER_FAILURE_FACTOR
+    if limiter.blocked(*keys) or (shared and limiter.blocked(*shared, limit=shared_limit)):
         raise _too_many()
-    with password_slot(known=True) as free:  # een ingelogde sessie met verse 2FA: de eigenaar
+    # Een ingelogde sessie met verse 2FA is de eigenaar (de plaatsen voor bekende toestellen); zonder login niet.
+    with password_slot(known=not vluchtig) as free:
         if not free:
             raise _busy()
-        limiter.fail(*keys)  # vóór de eerste await
+        limiter.fail(*keys, *shared)  # vóór de eerste await
         await db.commit()  # geen verbinding vasthouden terwijl argon2 rekent
         ok = await verify_password_async(user.password_hash, data.current)
         new_hash = await hash_password_async(data.new) if ok else None
@@ -370,7 +389,7 @@ async def change_password(data: PasswordIn, request: Request, response: Response
         await audit(db, request, user, "password_change_failed")
         await db.commit()
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Huidig wachtwoord klopt niet")
-    limiter.reset(*keys)
+    limiter.reset(*keys, *shared)
     user.password_hash = new_hash
     # Alle andere sessies afmelden, en de vernieuwgeheimen van de gsm's laten vervallen. Het nieuwe wachtwoord maakt
     # ook alle bekende toestellen weer onbekend (hun cookie hangt aan de hash); dit toestel krijgt hieronder een nieuw.
@@ -380,14 +399,15 @@ async def change_password(data: PasswordIn, request: Request, response: Response
     notify(db, "Wachtwoord gewijzigd", f"Voor {user.username}, vanaf {client_ip(request) or '?'}. Alle andere "
            f"apparaten zijn afgemeld en tellen als nieuw toestel tot ze opnieuw inloggen.", level="warn", source="auth")
     await db.commit()
-    _set_device(request, response, user)
+    if not vluchtig:  # zonder login logde dit toestel niet in, zoals in state()
+        _set_device(request, response, user)
     return {"ok": True}
 
 
 @router.post("/logout")
 async def logout(request: Request, response: Response, sess: Session | None = Depends(optional_session),
                  db: AsyncSession = Depends(get_db)):
-    if sess:
+    if sess and not getattr(sess, "vluchtig", False):
         await audit(db, request, sess.user, "logout")
         await db.delete(sess)
         await db.commit()
