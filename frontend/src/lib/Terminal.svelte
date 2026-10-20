@@ -1,6 +1,8 @@
 <script>
   import { onMount } from 'svelte'
   import { api, withReauth } from './api.js'
+  import { ask } from './dialog.svelte.js'
+  import FileSession from './FileSession.svelte'
   import HostForm from './HostForm.svelte'
   import SshDefaults from './SshDefaults.svelte'
   import SshDiscover from './SshDiscover.svelte'
@@ -11,7 +13,8 @@
 
   // Terminalvenster: hosts links (in mappen, doorzoekbaar), open sessies als tabbladen. Sessies blijven lopen
   // als het venster dicht is. Het beste van PuTTY en RDM: snel verbinden, standaard login, hosts uit Proxmox,
-  // snippets, typen in alle tabs tegelijk, zoeken in de uitvoer en de log bewaren.
+  // snippets, typen in alle tabs tegelijk, zoeken in de uitvoer en de log bewaren. Naast een shell kan een tabblad
+  // ook de bestanden van een host tonen (📁, zoals WinSCP), met dezelfde login.
   let { open = false, request = null, services = [], onclose } = $props()
 
   let hosts = $state([])
@@ -64,7 +67,8 @@
     savePref('collapsed', collapsed)
   }
 
-  async function start(h) {
+  // kind: 'shell' (terminal) of 'files' (bestanden).
+  async function start(h, kind = 'shell') {
     error = ''
     try {
       await withReauth(() => api('/ssh/ready'))
@@ -73,7 +77,7 @@
       return
     }
     const uid = ++seq
-    tabs.push({ uid, host: h, phase: 'verbinden' })
+    tabs.push({ uid, host: h, phase: 'verbinden', kind })
     active = uid
   }
 
@@ -95,8 +99,10 @@
     } catch (err) { error = err.message }
   }
 
-  function closeTab(uid) {
+  async function closeTab(uid) {
+    if (sessions[uid]?.uploading?.() && !(await ask('Er lopen nog uploads in dit tabblad. Toch sluiten? Wat nog niet helemaal op de host staat, gaat verloren.', { ok: 'Sluiten', danger: true }))) return
     const i = tabs.findIndex((t) => t.uid === uid)
+    if (i < 0) return
     tabs.splice(i, 1)
     delete sessions[uid]
     if (active === uid) active = tabs[Math.max(0, i - 1)]?.uid ?? null
@@ -105,13 +111,13 @@
   // Typen in alle verbonden tabs tegelijk (multi-exec), zoals MobaXterm en RDM.
   function typed(uid, d) {
     if (!broadcast) return
-    for (const t of tabs) if (t.uid !== uid && t.phase === 'verbonden') sessions[t.uid]?.send(d)
+    for (const t of tabs) if (t.uid !== uid && t.kind === 'shell' && t.phase === 'verbonden') sessions[t.uid]?.send(d)
   }
 
   function sendSnippet(s) {
     snipOpen = false
     const text = s.command + (s.run ? '\r' : '')
-    const targets = broadcast ? tabs.filter((t) => t.phase === 'verbonden') : tabs.filter((t) => t.uid === active)
+    const targets = broadcast ? tabs.filter((t) => t.kind === 'shell' && t.phase === 'verbonden') : tabs.filter((t) => t.uid === active && t.kind === 'shell')
     for (const t of targets) sessions[t.uid]?.send(text)
     sessions[active]?.focus()
   }
@@ -125,7 +131,7 @@
   }
 
   function wheel(e) {
-    if (!e.ctrlKey) return
+    if (!e.ctrlKey || activeTab?.kind !== 'shell') return
     e.preventDefault()
     zoom(e.deltaY < 0 ? 1 : -1)
   }
@@ -138,7 +144,7 @@
   function key(e) {
     if (!open) return
     // Ctrl+Shift+F zoeken, Ctrl+Shift+D tab dupliceren, Ctrl+Shift+←/→ vorige of volgende tab.
-    if (e.ctrlKey && e.shiftKey && e.code === 'KeyF') { e.preventDefault(); findOpen = true }
+    if (e.ctrlKey && e.shiftKey && e.code === 'KeyF') { if (activeTab?.kind === 'shell') { e.preventDefault(); findOpen = true } }
     else if (e.ctrlKey && e.shiftKey && e.code === 'KeyD' && active) { e.preventDefault(); duplicate() }
     else if (e.ctrlKey && e.shiftKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight') && tabs.length > 1) {
       e.preventDefault()
@@ -149,7 +155,7 @@
 
   function duplicate() {
     const t = tabs.find((x) => x.uid === active)
-    if (t) start(t.host)
+    if (t) start(t.host, t.kind)
   }
 
   // Vraag van buitenaf (bv. knop in het mini dashboard): open een sessie naar deze host, of een venster
@@ -161,7 +167,7 @@
     load().then(() => {
       if (request.modal) { modal = { kind: request.modal }; return }
       const h = hosts.find((x) => x.id === request.hostId)
-      if (h) start(h)
+      if (h) start(h, request.files ? 'files' : 'shell')
     })
   })
 
@@ -171,7 +177,8 @@
   }
 
   const dot = { verbinden: 'mid', verbonden: 'ok', fout: 'err', gesloten: 'off' }
-  let connected = $derived(tabs.filter((t) => t.phase === 'verbonden').length)
+  let connected = $derived(tabs.filter((t) => t.kind === 'shell' && t.phase === 'verbonden').length)
+  let activeTab = $derived(tabs.find((t) => t.uid === active))
 </script>
 
 <svelte:window onkeydown={key} />
@@ -204,6 +211,7 @@
                         title="Nieuwe sessie naar {h.username || defaults?.username || 'root'}@{h.host}">
                   <b>{h.name}</b><small>{h.username || defaults?.username || 'root'}@{h.host}{h.port !== 22 ? `:${h.port}` : ''}</small>
                 </button>
+                <button class="mini ed" onclick={() => start(h, 'files')} title="Bestanden (zoals WinSCP)" aria-label="Bestanden">📁</button>
                 <button class="mini ed" onclick={() => (modal = { kind: 'host', host: h })} aria-label="Bewerken">✎</button>
               </div>
             {/each}
@@ -226,7 +234,7 @@
         {#each tabs as t (t.uid)}
           <span class="tab" class:on={active === t.uid}>
             <button class="tb" onclick={() => (active = t.uid)} onauxclick={(e) => e.button === 1 && closeTab(t.uid)}>
-              <i class={dot[t.phase]}></i>{t.host.name}</button>
+              <i class={dot[t.phase]}></i>{t.kind === 'files' ? '📁 ' : ''}{t.host.name}</button>
             {#if t.phase === 'gesloten' || t.phase === 'fout'}
               <button class="tx" onclick={() => sessions[t.uid]?.reconnect()} title="Opnieuw verbinden">↻</button>
             {/if}
@@ -234,7 +242,15 @@
           </span>
         {/each}
       </div>
-      {#if tabs.length}
+      {#if activeTab?.kind === 'files'}
+        <div class="tools">
+          <span class="tg">
+            <button class="mini" onclick={() => start(activeTab.host)} title="Een terminal naar {activeTab.host.name}">&gt;_ terminal</button>
+            <button class="mini" onclick={duplicate} title="Nog een bestandenvenster naar deze host (Ctrl+Shift+D)">⧉</button>
+          </span>
+          <span class="tg hint-k">sleep bestanden of mappen van je pc in de lijst · dubbelklik = openen of bewerken · rechtsklik = menu</span>
+        </div>
+      {:else if tabs.length}
         <div class="tools">
           <span class="tg">
             <button class="mini" class:bc={broadcast} onclick={() => { broadcast = !broadcast; refocus() }}
@@ -251,6 +267,7 @@
               {/if}
             </span>
             <button class="mini" onclick={duplicate} title="Nog een sessie naar deze host (Ctrl+Shift+D)">⧉</button>
+            {#if activeTab}<button class="mini" onclick={() => start(activeTab.host, 'files')} title="De bestanden van {activeTab.host.name} (zoals WinSCP)">📁 bestanden</button>{/if}
           </span>
           <span class="tg">
             {#if findOpen}
@@ -266,14 +283,18 @@
         </div>
       {/if}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="stage" class:bcast={broadcast} onwheel={wheel}>
+      <div class="stage" class:bcast={broadcast && activeTab?.kind === 'shell'} onwheel={wheel}>
         {#each tabs as t (t.uid)}
-          <TermSession bind:this={sessions[t.uid]} host={t.host} active={open && active === t.uid} {fontSize}
-                       onstate={(p) => (t.phase = p)} ontyped={(d) => typed(t.uid, d)} />
+          {#if t.kind === 'files'}
+            <FileSession bind:this={sessions[t.uid]} host={t.host} active={open && active === t.uid} onstate={(p) => (t.phase = p)} />
+          {:else}
+            <TermSession bind:this={sessions[t.uid]} host={t.host} active={open && active === t.uid} {fontSize}
+                         onstate={(p) => (t.phase = p)} ontyped={(d) => typed(t.uid, d)} />
+          {/if}
         {/each}
         {#if !tabs.length}
           <div class="empty">
-            <p>Kies links een host om een sessie te openen.</p>
+            <p>Kies links een host om een sessie te openen, of 📁 voor zijn bestanden (uploaden, downloaden, bewerken).</p>
             <p class="hint">Selecteren = kopiëren · rechtsklik = plakken · middenklik = laatste selectie plakken ·
               Ctrl+Shift+C/V · Ctrl+scroll = lettergrootte · Ctrl+Shift+←/→ = andere tab</p>
           </div>
@@ -329,6 +350,8 @@
   .tools { display: flex; justify-content: space-between; gap: 8px; padding: 5px 8px; background: #0c0c0c; border-bottom: 1px solid rgba(255, 255, 255, .05); flex-wrap: wrap }
   .tg { display: flex; gap: 4px; align-items: center }
   .bc { background: rgba(230, 181, 107, .2); color: var(--mid); border-color: rgba(230, 181, 107, .5) }
+  .hint-k { color: var(--dim); font-size: 11.5px }
+  @media (max-width: 700px) { .hint-k { display: none } }
   .find { padding: 4px 8px; font-size: 12px; width: 220px }
   .snip { position: relative }
   .menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 5; min-width: 260px; max-width: 420px; max-height: 50vh; overflow: auto; padding: 6px; display: flex; flex-direction: column; gap: 2px }

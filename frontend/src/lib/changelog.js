@@ -3,6 +3,18 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 45,
+    datum: '2026-10-20',
+    titel: 'Bestanden naast de terminal, zoals WinSCP',
+    items: [
+      'In de terminal staat naast elke host 📁: de bestanden op die machine, met dezelfde login en hostsleutel als de terminal. Bladeren, sorteren, filteren, een pad typen, verborgen bestanden tonen. Ook vanuit een terminal-tab (📁 bestanden) en in het mini dashboard van een service.',
+      'Uploaden: sleep bestanden of hele mappen van je pc in het venster (of op een map), of kies ze met ⇪. Je ziet de voortgang en de snelheid. Bestaat een bestand al, dan vraagt het: overschrijven, overslaan, of alles. Het oude bestand blijft staan tot het nieuwe er helemaal is.',
+      'Downloaden: een bestand zoals het is, een map of meerdere bestanden als zip. Verder: nieuwe map of bestand, hernoemen of verplaatsen, verwijderen, rechten zetten en tekstbestanden tot 1 MB bewerken (Ctrl+S). Rechtsklik geeft een menu; Enter, Delete, F2, F5 en Backspace werken zoals in een verkenner.',
+      'Openen vraagt wat een terminal vraagt, van buitenaf staat het dicht zoals de terminal, en wat je doet komt in het auditlog.',
+    ],
+    instellen: [],
+  },
+  {
     nr: 44,
     datum: '2026-10-20',
     titel: 'Eigen certificaat voor https, 9999 dagen geldig',

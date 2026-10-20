@@ -7,9 +7,16 @@
   let pending = $state(null)
   let code = $state('')
   let error = $state('')
+  // Vraagt intussen nog iets een code (twee uploads tegelijk): één code beantwoordt ze allemaal.
+  let more = []
 
   onMount(() => {
-    const h = (e) => { pending = e.detail; code = ''; error = '' }
+    const h = (e) => {
+      if (pending) { more.push(e.detail); return }
+      pending = e.detail
+      code = ''
+      error = ''
+    }
     window.addEventListener('hp:reauth', h)
     return () => window.removeEventListener('hp:reauth', h)
   })
@@ -18,17 +25,17 @@
     e.preventDefault()
     try {
       await api('/auth/reauth', { method: 'POST', body: { code } })
-      const p = pending
+      const all = [pending, ...more.splice(0)]
       pending = null
-      p.resolve()
+      all.forEach((p) => p.resolve())
     } catch (err) {
       error = err.message
     }
   }
   function cancel() {
-    const p = pending
+    const all = [pending, ...more.splice(0)]
     pending = null
-    p.reject(new Error('Geannuleerd'))
+    all.forEach((p) => p.reject(new Error('Geannuleerd')))
   }
 </script>
 

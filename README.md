@@ -221,7 +221,8 @@ Fase 5, SSH-terminal (knop `>_` in de titelbalk):
   later, dan weigert de terminal te verbinden (bescherming tegen man-in-the-middle)
 - een terminal openen vraagt je 2FA-code als je langer dan 15 minuten niet bevestigd hebt;
   na 30 minuten zonder typen wordt de sessie gesloten; openen en sluiten komen in de audit-log
-- koppel een host aan een service, dan staat er een `>_`-knop in het mini dashboard van die service
+- koppel een host aan een service, dan staat er een `>_`-knop in het mini dashboard van die service (en 📁 voor zijn
+  bestanden)
 
 Fase 6, logs (knop `logs` in de titelbalk):
 
@@ -415,6 +416,31 @@ Later, deel 3 (Authentik en gsm):
     tegelijk, zoeken in de uitvoer (Ctrl+Shift+F), lettergrootte (Ctrl+scroll), tab dupliceren (Ctrl+Shift+D), van tab
     wisselen (Ctrl+Shift+←/→), klikbare links, de uitvoer opslaan als .log, bevestiging bij het plakken van meerdere
     regels, keepalive zodat een stille sessie niet wegvalt
+  - **📁 bestanden** (naast een host, of in een terminal-tab), zoals WinSCP: dezelfde login en hostsleutel als de
+    terminal, over SFTP, als die gebruiker (zonder sudo). Bladeren (sorteren, filter, verborgen bestanden, terug en
+    vooruit, een pad typen), bestanden en mappen van je pc in de lijst slepen of met ⇪ kiezen om te uploaden (met
+    voortgang, en de vraag wat te doen als een bestand al bestaat), downloaden (een map of meerdere bestanden als zip,
+    die al downloadend gemaakt wordt, hoogstens 100.000 items), nieuwe map of bestand, hernoemen of verplaatsen,
+    verwijderen, rechten (chmod) en tekstbestanden tot 1 MB bewerken (Ctrl+S, Windows-regeleindes blijven; bij
+    gemengde regeleindes zegt de editor dat bewaren ze gelijk maakt). Een map toont hoogstens 10.000 items. Toetsen:
+    Enter, Backspace, Delete, F2, F5, F7, Ctrl+A, pijltjes; rechtsklik voor een menu
+  - uploaden gaat in stukken van 3 MiB naar een verborgen `.<naam>.homepage-<nr>.part` naast het doel (alleen
+    leesbaar voor de login als het een bestaand bestand vervangt); pas als alles er is, vervangt het het oude bestand
+    in één keer (met diens rechten, als root diens eigenaar, anders zo mogelijk diens groep). Bewaren in de editor
+    werkt zo ook. Een upload die afbreekt laat het oude bestand dus staan; een half `.part`-bestand ruimt het
+    dashboard op (na 10 minuten stilte, ook als je het tabblad sluit; was de verbinding al weg, dan bij de volgende
+    verbinding met die host)
+  - de stukken passen onder elke limiet die ertussen staat (nginx in de container 4 MB, NPM, Cloudflare 100 MB);
+    weigert een proxy toch een stuk als te groot, dan probeert het venster kleinere stukken
+  - een venster openen vraagt wat een terminal vraagt (recente 2FA, van buitenaf de terminal aan). Het blijft open
+    tot het 30 minuten niet gebruikt is; afmelden, de sessie intrekken of je wachtwoord wijzigen (voor de andere
+    sessies) sluit het meteen (ook een download die loopt). Verandert de host intussen (adres, hostsleutel, of de
+    login wordt een andere gebruiker), dan zegt het venster dat en verbind je zelf opnieuw. Openen,
+    downloaden, uploaden (ook de mappen die een map-upload maakt), bewerken, hernoemen, verwijderen (ook als het
+    halverwege mislukt) en rechten komen in het auditlog, net als een hostsleutel die intussen veranderde. Een
+    download is een gewone link die één keer werkt, 60 seconden, vanaf hetzelfde IP; het tabblad sluiten laat een
+    lopende download afmaken, een verbinding die wegvalt breekt hem af (nooit een zip die volledig lijkt maar het
+    niet is)
 - **cron** (knop in de titelbalk): alles wat er gepland staat op al je machines, elk kwartier opnieuw gescand
   - via SSH (de standaard login, als root) op elke host waarvan je de hostsleutel al bevestigde; een Proxmox-node
     neemt ook zijn draaiende containers mee (`pct exec`). Gelezen worden crontabs, `/etc/cron.d`, cron.daily en

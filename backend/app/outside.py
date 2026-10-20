@@ -39,8 +39,8 @@ FORGED_EVERY = timedelta(hours=1)
 
 # Volgorde = volgorde in het scherm.
 FEATURES = {
-    "terminal": ("terminal", "SSH-terminal en zijn hosts, sleutels en snippets, cronjobs zelf starten of bewaken, "
-                             "rsyslog uitrollen"),
+    "terminal": ("terminal", "SSH-terminal en zijn hosts, sleutels en snippets, bestanden op die hosts bekijken, "
+                             "uploaden en downloaden, cronjobs zelf starten of bewaken, rsyslog uitrollen"),
     "updates": ("updates installeren", "updates installeren en terugdraaien, nachtelijke updates instellen"),
     "acties": ("acties", "VM's en containers aan of uit, Wake-on-LAN, zelfherstel, snapshots verwijderen, hersteltest, "
                          "API-calls die iets veranderen, API's instellen of calls uitproberen, een tegel met "

@@ -18,7 +18,7 @@
   import PushMonitor from './PushMonitor.svelte'
 
   // Mini dashboard van één service: gegevens van de integratie en de monitoring-historiek.
-  let { service, groups = [], onclose, onedit, onchanged, onterminal, oncleanup = null } = $props()
+  let { service, groups = [], onclose, onedit, onchanged, onterminal, onfiles = null, oncleanup = null } = $props()
 
   // "opruimen…" alleen voor een tegel op <naam>.<domein> (het domein van een nieuwe service, zonder call naar buiten).
   let domain = $state(null)
@@ -140,6 +140,7 @@
     <div class="row">
       {#each sshHosts as h (h.id)}
         <button class="mini" onclick={() => onterminal?.(h.id)} title="{h.username}@{h.host}">&gt;_ {h.name}</button>
+        {#if onfiles}<button class="mini" onclick={() => onfiles(h.id)} title="Bestanden op {h.name} (zoals WinSCP)">📁</button>{/if}
       {/each}
       {#if service.config?.mac}<button class="mini" onclick={wake} title="Wake-on-LAN naar {service.config.mac}">⏻ wekken</button>{/if}
       {#if service.check?.type}
