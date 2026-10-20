@@ -190,9 +190,10 @@
     error = ''
     try {
       const body = buildBody()
-      // Een ander adres of type voor een service met geheimen vraagt een recente 2FA.
+      // Een ander adres of type voor een service met geheimen vraagt een recente 2FA, net als (van buitenaf) een
+      // integratie met een nieuw adres, of de check stilleggen.
       if (service) await withReauth(() => api(`/services/${service.id}`, { method: 'PATCH', body }))
-      else await api('/services', { method: 'POST', body })
+      else await withReauth(() => api('/services', { method: 'POST', body }))
       onsaved()
       onclose()
     } catch (err) {

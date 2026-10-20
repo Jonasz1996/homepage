@@ -146,3 +146,17 @@ def notify(db: AsyncSession, title: str, body: str | None = None, level: str = "
                         recovers=recovers if level == "ok" else None))
     if source != "rapport":
         event(db, EVENT_KIND.get(source, "melding"), title, body, level, service_id, data)
+
+
+SILENCE_HINT = "Was jij dit niet, kijk dan in ⚿ naar de sessies."
+
+
+async def confirm_silence(db: AsyncSession, request: Request, sess: Session, user: User, title: str, action: str,
+                          service_id: int | None = None, **detail) -> None:
+    """Iets dat meldingen stillegt (onderhoud, een cronjob dempen, een webhook of logregel uit, een
+    beveiligingspunt negeren): net als een check pauzeren vraagt dat een recente 2FA, komt het in het auditlog en krijg
+    je er een melding van, ook op je gsm (bron auth, niveau warn). Anders is dat wat iemand met een gestolen sessie als
+    eerste zou doen. Aanroepen vóór de wijziging: zonder 2FA verandert er niets."""
+    await recent_auth(sess, user)
+    await audit(db, request, user, action, **detail)
+    notify(db, title, SILENCE_HINT, level="warn", source="auth", service_id=service_id)

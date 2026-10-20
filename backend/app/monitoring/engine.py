@@ -7,8 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import delete_before, ensure_state
 from ..deps import event, notify
-from ..models import (AppState, AuditLog, CheckResult, Event, Metric, Notification, Service, ServiceState, Session,
-                      UpdateRun)
+from ..models import (AppState, AuditLog, CheckResult, Event, Group, MaintenanceWindow, Metric, Notification, Service,
+                      ServiceState, Session, UpdateRun)
 from .checks import Outcome, target_for
 from .upgrade import DONE
 
@@ -82,7 +82,8 @@ def identity(check: dict | None, url: str | None) -> tuple | None:
 
 
 def silencing(old: dict | None, new: dict | None) -> str | None:
-    """Zet deze wijziging een lopende check stil? Dan wat er gebeurt, anders None."""
+    """Zet deze wijziging een lopende check stil? Dan wat er gebeurt, anders None. (Een nieuwe afhankelijkheid van
+    iets dat down of in onderhoud is: zie parent_silencing.)"""
     old, new = old or {}, new or {}
     if active(old) and not active(new):
         return "check gepauzeerd" if new.get("type") else "check verwijderd"
@@ -90,7 +91,82 @@ def silencing(old: dict | None, new: dict | None) -> str | None:
         return "meldingen uitgezet"
     if old.get("type") and new.get("type") and (old.get("notify") or "push") == "push" and new.get("notify") == "centrum":
         return "meldingen niet meer op je gsm"
+    # Leeg = aan (zie _cert_notes).
+    if old.get("type") and new.get("type") and new.get("cert_notify") is False and old.get("cert_notify") is not False:
+        return "certificaatmeldingen uitgezet"
     return None
+
+
+async def _silenced_below(db: AsyncSession, service: Service, check: dict | None, why: str, now: datetime,
+                          group_id: int | None = None) -> str | None:
+    """Een tegel zonder lopende check (geen of gepauzeerd) meldt zelf niets, maar wat eronder hangt wel: onderhoud geldt
+    ook voor alles eronder (in_maintenance), en een kind van een ouder die down is, meldt niets. Dan telt wat er (direct
+    of verder) onder hangt met een lopende check en nu niet al in onderhoud is; wat al in group_id zit, valt daar toch
+    al onder. `why` met die services erbij, anders None."""
+    if active(check):
+        return why
+    rows = (await db.execute(select(Service.id, Service.parent_id))).all()
+    children: dict[int, list[int]] = {}
+    for sid, parent in rows:
+        if parent:
+            children.setdefault(parent, []).append(sid)
+    names, seen, todo = [], {service.id}, [service.id]
+    while todo:
+        for c in children.get(todo.pop(), []):
+            if c in seen:
+                continue
+            seen.add(c)
+            todo.append(c)
+            s = await db.get(Service, c)
+            if active(s.check) and s.group_id != group_id and not await in_maintenance(db, s, now):
+                names.append(s.name)
+    if not names:
+        return None
+    names.sort()
+    return f"{why}, legt {names[0]}" + (f" en {len(names) - 1} andere" if len(names) > 1 else "") + " stil"
+
+
+async def parent_silencing(db: AsyncSession, service: Service, check: dict | None, parent_id: int | None,
+                           now: datetime | None = None) -> str | None:
+    """Wordt een lopende check stil doordat hij een nieuwe ouder krijgt die nu in onderhoud of down is? Onderhoud geldt
+    ook voor alles eronder (in_maintenance), en een kind van een ouder die down is, meldt niets (_parent_failing). Ook
+    zonder eigen check: dan voor wat eronder hangt (_silenced_below). Dan wat er gebeurt, anders None. Met de stand van
+    nu: vóór de wijziging aanroepen."""
+    if not parent_id or parent_id == service.parent_id:
+        return None
+    parent = await db.get(Service, parent_id)
+    if parent is None:
+        return None
+    now = now or datetime.now(timezone.utc)
+    if await in_maintenance(db, parent, now):
+        return await _silenced_below(db, service, check, f"afhankelijk van {parent.name} (in onderhoud)", now)
+    if await _failing(db, [parent, *await ancestors(db, parent)]):
+        return await _silenced_below(db, service, check, f"afhankelijk van {parent.name} (down)", now)
+    return None
+
+
+async def group_silencing(db: AsyncSession, service: Service, check: dict | None, group_id: int | None,
+                          now: datetime | None = None) -> str | None:
+    """Wordt een lopende check stil doordat hij naar een groep gaat met gepland onderhoud dat nu loopt of nog komt? Een
+    venster voor een groep geldt voor alles wat er op dat moment in zit (planned.targets): wie er vlak voor in gaat,
+    is er bij elke keer stil. Ook zonder eigen check: dan voor wat eronder hangt (_silenced_below). Dan wat er gebeurt,
+    anders None. Vóór de wijziging aanroepen."""
+    from . import planned  # planned importeert deze module zelf
+    if not group_id or group_id == service.group_id:
+        return None
+    now = now or datetime.now(timezone.utc)
+    windows = (await db.execute(select(MaintenanceWindow).where(MaintenanceWindow.group_id == group_id,
+                                                                MaintenanceWindow.enabled.is_(True)))).scalars().all()
+    # Liefst een venster dat nu loopt, anders het eerstvolgende.
+    nxt = {w.id: planned.next_run(w, now) for w in windows}
+    w = next((w for w in windows if planned.active(w, now)), None) or min(
+        (w for w in windows if nxt[w.id]), key=lambda w: nxt[w.id], default=None)
+    if w is None:
+        return None
+    when = " loopt" if planned.active(w, now) else f", volgende keer {planned._local(nxt[w.id]):%d/%m %H:%M}"
+    group = await db.get(Group, group_id)
+    return await _silenced_below(db, service, check, f"naar groep {group.name if group else group_id} "
+                                 f"(gepland onderhoud '{w.name}'{when})", now, group_id)
 
 
 def restarts(old: dict | None, new: dict | None) -> bool:
@@ -156,7 +232,11 @@ async def dependents_count(db: AsyncSession, service_id: int) -> int:
 
 
 async def _parent_failing(db: AsyncSession, service: Service) -> Service | None:
-    for a in await ancestors(db, service):
+    return await _failing(db, await ancestors(db, service))
+
+
+async def _failing(db: AsyncSession, chain: list[Service]) -> Service | None:
+    for a in chain:
         # Een ouder zonder (lopende) check zegt niets, ook al staat er nog een oude status. Een ouder met meldingen
         # uit ook niet: zijn storing komt nergens als melding, dus dan moet het kind zelf melden.
         if not active(a.check) or (a.check or {}).get("notify") == "uit":

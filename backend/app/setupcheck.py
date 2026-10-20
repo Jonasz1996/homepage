@@ -12,9 +12,10 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .config import get_settings
 from .health import scan as hw, security
 from .integrations import IntegrationError, build
-from .models import (AppState, CronJob, HealRule, LogEntry, PushMonitor, Service, ServiceState, SshHost,
+from .models import (AppState, CronJob, HealRule, LogEntry, PushMonitor, Service, ServiceState, SshHost, User,
                      WebhookSource)
 from .monitoring import (cluster, configs, coverage, devices, pbssync, restoretest, routes, upgrade, watchdog, webpush,
                          zabbix as zbx)
@@ -524,6 +525,37 @@ async def ssh_rows(db: AsyncSession, has_proxmox: bool) -> list[dict]:
     return out
 
 
+def lan_row() -> dict:
+    """Kan het hele LAN het dashboard rechtstreeks openen (http://IP: login en cookie onversleuteld), of alleen NPM?
+    install.sh schrijft in /etc/homepage/nginx wat nginx toelaat."""
+    title, env = "Dashboard alleen via NPM", "/etc/homepage/homepage.env"
+    run = "bash /opt/homepage/deploy/install.sh"
+    try:
+        text = get_settings().nginx_file.read_text()
+    except OSError:
+        return row("lan", "beveiliging", title, "none", "Onbekend: nginx is (nog) niet door install.sh van deze versie "
+                   "ingesteld.", [f"Werk het dashboard bij of voer {run} uit."])
+    st = {k.strip(): v.strip() for k, _, v in (line.partition("=") for line in text.splitlines())}
+    npm = st.get("npm") or "?"
+    if st.get("lan") == "dicht":
+        return row("lan", "beveiliging", title, "ok", f"nginx laat alleen NPM ({npm}) en de container zelf binnen; van "
+                   "het LAN alleen push-monitors, webhooks en /api/healthz.")
+    if st.get("reden") == "npm-onbekend":
+        todo = (f"Het IP van NPM was bij de installatie niet opgegeven, dus bleef het LAN open. Klopt HOMEPAGE_NPM_IP={npm} "
+                f"in {env} en werkt het dashboard via NPM, zet dan HOMEPAGE_LAN_OPEN=0 en voer {run} uit.")
+    elif st.get("reden") == "bijgewerkt":
+        # Een update van een installatie van voor deze regel: het vorige script bewaarde altijd een IP voor NPM, ook
+        # de standaard als er geen opgegeven was.
+        todo = (f"Bijgewerkt van een installatie van voor deze regel: het LAN bleef open, want HOMEPAGE_NPM_IP={npm} "
+                f"is nog niet nagekeken. Open het dashboard via zijn naam in NPM; werkt dat, zet dan "
+                f"HOMEPAGE_LAN_OPEN=0 in {env} en voer in de container {run} uit.")
+    else:
+        todo = (f"HOMEPAGE_LAN_OPEN=1 staat in {env}. Werkt het dashboard via NPM ({npm}), zet het dan op 0 en voer "
+                f"{run} uit.")
+    return row("lan", "beveiliging", title, "half", "Het hele LAN kan het dashboard rechtstreeks openen op http://IP: "
+               "je wachtwoord en sessiecookie gaan daar onversleuteld over het netwerk.", [todo])
+
+
 async def safety(db: AsyncSession, cfg: dict) -> list[dict]:
     out = []
     c = await security.check_2fa(db)
@@ -539,6 +571,7 @@ async def safety(db: AsyncSession, cfg: dict) -> list[dict]:
     c = await security.check_access(db)
     out.append(row("access", "beveiliging", "Slot voor het dashboard", "ok" if c["level"] == "ok" else "none", c["text"],
                    fix=c["fix"]))
+    out.append(lan_row())
     pin = await _state(db, PIN_KEY)
     res = [r.get("state") for r in (pin.get("hosts") or {}).values()]
     pinned, loose = res.count("vast"), res.count("los") + res.count("anders")
@@ -549,10 +582,33 @@ async def safety(db: AsyncSession, cfg: dict) -> list[dict]:
     out.append(row("outside", "beveiliging", "Van buitenaf", "half" if c["level"] == "warn" else "ok", c["text"],
                    fix={"window": "security", "tab": "outside"}))
     oidc = await _state(db, "oidc")
-    out.append(row("authentik", "beveiliging", "Inloggen via Authentik", "ok" if oidc.get("enabled") else "none",
-                   "Staat aan." if oidc.get("enabled") else "Inloggen gaat met je wachtwoord en 2FA.",
-                   [] if oidc.get("enabled") else ["Optioneel: sleutel-icoon → authentik, met client id en secret."],
-                   {"window": "security", "tab": "sso"}, optional=True))
+    sso = {"window": "security", "tab": "sso"}
+    q = select(func.count()).select_from(User).where(User.oidc_sub.is_not(None))
+    linked = (await db.execute(q)).scalar_one()
+    if oidc.get("iss"):
+        # Alleen koppelingen bij de issuer van nu tellen: inloggen zoekt daarop.
+        current = (await db.execute(q.where(User.oidc_issuer == oidc["iss"]))).scalar_one()
+        if oidc.get("enabled") and linked and not current:
+            out.append(row("authentik", "beveiliging", "Inloggen via Authentik", "half",
+                           "Je Authentik-account is gekoppeld bij een andere issuer dan die van nu: inloggen via "
+                           "Authentik werkt pas als je opnieuw koppelt. Wachtwoord en 2FA werken gewoon.",
+                           ["Ingelogd met wachtwoord en 2FA: sleutel-icoon → authentik → opnieuw koppelen."], sso,
+                           optional=True))
+            return out
+        linked = current
+    if oidc.get("enabled") and not linked:
+        # Het dashboard herkent een Authentik-account alleen nog aan zijn vaste ID: zonder koppeling geen login.
+        out.append(row("authentik", "beveiliging", "Inloggen via Authentik", "half",
+                       "Staat aan, maar er is nog geen Authentik-account gekoppeld: inloggen via Authentik werkt pas "
+                       "daarna. Wachtwoord en 2FA werken gewoon.",
+                       ["Ingelogd met wachtwoord en 2FA: sleutel-icoon → authentik → Koppel Authentik-account."], sso,
+                       optional=True))
+    else:
+        on = bool(oidc.get("enabled"))
+        out.append(row("authentik", "beveiliging", "Inloggen via Authentik", "ok" if on else "none",
+                       "Staat aan." if on else "Inloggen gaat met je wachtwoord en 2FA.",
+                       [] if on else ["Optioneel: sleutel-icoon → authentik, met client id en secret."], sso,
+                       optional=True))
     return out
 
 

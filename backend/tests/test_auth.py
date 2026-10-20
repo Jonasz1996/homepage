@@ -75,6 +75,14 @@ async def test_unknown_user_same_error(client):
     assert r.json()["detail"] == "Onjuiste gebruikersnaam of wachtwoord"
 
 
+async def test_login_username_case_insensitive(authed):
+    """Zoals de limieten en Authentik: 'Jonas' is dezelfde gebruiker als 'jonas'."""
+    await authed.post("/api/auth/logout")
+    code = pyotp.TOTP(authed.totp_secret).now()
+    r = await authed.post("/api/auth/login", json={"username": "Jonas", "password": PASSWORD, "code": code})
+    assert r.status_code == 200, r.text
+
+
 async def test_password_change(authed):
     r = await authed.post("/api/auth/password", json={"current": PASSWORD, "new": "nog-een-lang-wachtwoord"})
     assert r.status_code == 200

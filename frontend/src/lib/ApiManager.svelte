@@ -112,7 +112,8 @@
   async function test() {
     testResult = { busy: true }
     try {
-      const r = await api(`/apis/${sel.id}/try`, { method: 'POST', body: { call: { name: 'test', path: '' } } })
+      // Van buitenaf vraagt elk verzoek dat de server iets laat ophalen een verse 2FA (thuis niet).
+      const r = await withReauth(() => api(`/apis/${sel.id}/try`, { method: 'POST', body: { call: { name: 'test', path: '' } } }))
       testResult = r.ok ? { ok: true, text: `bereikbaar in ${r.ms} ms` } : { ok: false, text: r.error }
     } catch (e) { testResult = { ok: false, text: e.message } }
   }
@@ -173,10 +174,10 @@
     error = ''
     try {
       // Aanmelding, vaste headers en calls komen van het sjabloon op de server.
-      const r = await api('/apis', { method: 'POST', body: {
+      const r = await withReauth(() => api('/apis', { method: 'POST', body: {
         name: nw.name.trim() || nw.t.label, category: nw.category, kind: nw.t.kind, url: nw.url.trim(), template: nw.template,
         config: {}, secrets: Object.fromEntries(Object.entries(nw.secrets).filter(([, v]) => v)),
-      } })
+      } }))
       if (nw.tile) await api(`/apis/${r.id}/tiles`, { method: 'POST', body: { service_ids: [Number(nw.tile)] } })
       await load()
       open(data.apis.find((a) => a.id === r.id))
@@ -202,7 +203,7 @@
     try {
       const items = ready.map((m) => ({ service_id: m.service_id, template: m.template, url: bulk[m.service_id].url || null,
                                          secrets: Object.fromEntries(Object.entries(bulk[m.service_id].secrets).filter(([, v]) => v)) }))
-      const r = await api('/apis/bulk', { method: 'POST', body: { items } })
+      const r = await withReauth(() => api('/apis/bulk', { method: 'POST', body: { items } }))
       msg = `${r.created} API's aangemaakt en gekoppeld.`
       await Promise.all([load(), loadSuggest()])
       bulk = Object.fromEntries((sug?.matches || []).map((m) => [m.service_id, { on: true, secrets: {}, url: m.url }]))

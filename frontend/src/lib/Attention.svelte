@@ -28,7 +28,8 @@
   async function ignore(i, on = true) {
     busy = i.key
     try {
-      data = await api('/attention/ignore', { method: 'PUT', body: { key: i.key, sig: on ? i.sig : null } })
+      // Een beveiligingspunt negeren vraagt je 2FA (wie je sessie steelt, verbergt zo zijn eigen sessie niet).
+      data = await withReauth(() => api('/attention/ignore', { method: 'PUT', body: { key: i.key, sig: on ? i.sig : null } }))
       onchanged?.(data)
     } catch (e) { error = e.message } finally { busy = '' }
   }

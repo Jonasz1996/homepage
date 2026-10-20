@@ -3,16 +3,16 @@
 import asyncio
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import attention, setupcheck
 from ..db import ensure_state, get_db
-from ..deps import current_user
+from ..deps import confirm_silence, current_session, current_user
 from ..integrations import REGISTRY
-from ..models import Service, User
+from ..models import Service, Session, User
 from . import integrations as integ
 
 router = APIRouter(prefix="/api/attention", tags=["aandacht"])
@@ -37,7 +37,15 @@ class IgnoreIn(BaseModel):
 
 
 @router.put("/ignore")
-async def ignore(body: IgnoreIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+async def ignore(body: IgnoreIn, request: Request, sess: Session = Depends(current_session),
+                 user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    if body.sig and body.key.startswith("sec:"):
+        # Een beveiligingspunt (bv. een sessie van buitenaf) verbergen is wat wie je sessie steelt als eerste zou
+        # doen: dat vraagt een recente 2FA en geeft een melding, zoals een check pauzeren.
+        now = datetime.now(timezone.utc)
+        title = next((i["title"] for i in await attention.safety(db, now, {}) if i["key"] == body.key), body.key)
+        await confirm_silence(db, request, sess, user, f"Beveiligingswaarschuwing genegeerd: {title}",
+                              "attention_ignored", key=body.key, item=title)
     st = await ensure_state(db, attention.ACK_KEY, {})
     items = dict(st.value.get("items") or {})
     if body.sig:

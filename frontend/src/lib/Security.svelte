@@ -5,7 +5,7 @@
 
   // Beveiliging: waar je ingelogd bent, wat er gebeurd is (auditlog), je wachtwoord en wat er van buitenaf mag.
 
-  let { onclose, tab: initialTab = null } = $props()
+  let { onclose, tab: initialTab = null, error: oidcError = '' } = $props()
 
   let tab = $state(untrack(() => initialTab) || 'sessions')
   let sessions = $state([])
@@ -18,6 +18,12 @@
   let sso = $state(null)
   let ssoSecret = $state('')
   let ssoMsg = $state('')
+  // Fout van een koppeling: komt terug van Authentik via de adresbalk (?oidc_error=...).
+  let ssoErr = $state(untrack(() => oidcError) || '')
+  // Staat het opgeslagen aan (niet: is het vinkje net aangezet)? Pas dan kan je koppelen.
+  let ssoOn = $state(false)
+  // Authentik stuurt terug naar dit adres; het state-cookie staat alleen op het adres waar je nu bent.
+  const ssoHost = $derived.by(() => { try { return new URL(sso?.redirect_uri).host } catch { return '' } })
 
   async function loadSessions() {
     try { sessions = await api('/auth/sessions'); error = '' } catch (e) { error = e.message }
@@ -87,26 +93,46 @@
     } catch (e) { error = e.message }
   }
   async function loadSso() {
-    try { sso = await api('/auth/oidc/settings'); ssoSecret = ''; error = '' } catch (e) { error = e.message }
+    try { sso = await api('/auth/oidc/settings'); ssoOn = sso.enabled; ssoSecret = ''; error = '' } catch (e) { error = e.message }
   }
   async function saveSso(e) {
     e.preventDefault()
     ssoMsg = ''
     const body = { ...sso, client_secret: ssoSecret ? ssoSecret : null }
-    for (const k of ['has_secret', 'redirect_uri']) delete body[k]
+    for (const k of ['has_secret', 'redirect_uri', 'linked', 'linked_name', 'linked_issuer']) delete body[k]
     try {
       sso = await withReauth(() => api('/auth/oidc/settings', { method: 'PUT', body }))
+      ssoOn = sso.enabled
       ssoSecret = ''
       ssoMsg = sso.enabled ? 'Opgeslagen. Op het loginscherm staat nu een knop.' : 'Opgeslagen (staat uit).'
       error = ''
     } catch (err) { error = err.message }
+  }
+  // Koppelen: een login bij Authentik die terugkomt in dit venster en het account bewaart (vraagt een verse 2FA).
+  async function linkSso() {
+    ssoErr = ''
+    ssoMsg = ''
+    try {
+      const r = await withReauth(() => api('/auth/oidc/link', { method: 'POST' }))
+      location.href = r.url
+    } catch (e) { ssoErr = e.message }
+  }
+  async function unlinkSso() {
+    if (!confirm('Authentik-account ontkoppelen? Inloggen via Authentik werkt dan niet meer tot je opnieuw koppelt.')) return
+    ssoErr = ''
+    ssoMsg = ''
+    try {
+      const r = await withReauth(() => api('/auth/oidc/link', { method: 'DELETE' }))
+      sso = { ...sso, linked: r.linked, linked_name: r.linked_name, linked_issuer: r.linked_issuer, link_stale: r.link_stale }
+      ssoMsg = 'Ontkoppeld.'
+    } catch (e) { ssoErr = e.message }
   }
   async function changePw(e) {
     e.preventDefault()
     pwMsg = ''
     if (pw.new !== pw.again) { error = 'De nieuwe wachtwoorden zijn niet gelijk'; return }
     try {
-      await api('/auth/password', { method: 'POST', body: { current: pw.current, new: pw.new } })
+      await withReauth(() => api('/auth/password', { method: 'POST', body: { current: pw.current, new: pw.new } }))
       pw = { current: '', new: '', again: '' }
       pwMsg = 'Wachtwoord gewijzigd. Andere apparaten zijn afgemeld.'
       error = ''
@@ -158,6 +184,8 @@
     log_rule_changed: 'logregel gewijzigd', log_rule_deleted: 'logregel verwijderd', wol: 'Wake-on-LAN',
     outside_mode: 'van buitenaf aan/uit', outside_settings: 'thuisnetwerken gewijzigd', ssh_pin: 'SSH-sleutel vastgezet',
     ssh_unpin: 'SSH-sleutel losgemaakt', secret_key_saved: 'kopie van secret.key bevestigd',
+    oidc_linked: 'Authentik-account gekoppeld', oidc_unlinked: 'Authentik-account ontkoppeld', oidc_link_failed: 'Authentik koppelen mislukt',
+    password_change_failed: 'wachtwoord wijzigen mislukt', attention_ignored: 'beveiligingspunt genegeerd', check_silenced: 'check stilgelegd',
   }
   const BAD = /failed|mismatch|revoked|deleted/
   const detail = (d) => Object.entries(d || {}).map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join('  ')
@@ -217,6 +245,26 @@
     {#if more}<button class="mini more" onclick={() => loadAudit(true)}>meer laden</button>{/if}
   {:else if tab === 'sso'}
     {#if sso}
+      {#if ssoOn || sso.linked || sso.link_stale}
+        <div class="link" class:on={sso.linked}>
+          {#if sso.linked}
+            <span title={sso.linked_issuer}>Gekoppeld aan Authentik-gebruiker <b>{sso.linked_name || '(zonder naam)'}</b>.</span>
+            <button class="mini" onclick={linkSso} disabled={!ssoOn}>opnieuw koppelen</button>
+            <button class="mini x" onclick={unlinkSso}>ontkoppelen</button>
+          {:else if sso.link_stale}
+            <span title={sso.linked_issuer}>Gekoppeld bij een andere issuer dan die van nu: inloggen via Authentik werkt pas als je opnieuw koppelt.</span>
+            <button class="btn" onclick={linkSso} disabled={!ssoOn}>Opnieuw koppelen</button>
+            <button class="mini x" onclick={unlinkSso}>ontkoppelen</button>
+          {:else}
+            <span>Nog niet gekoppeld: inloggen via Authentik werkt pas na koppelen.</span>
+            <button class="btn" onclick={linkSso}>Koppel Authentik-account</button>
+          {/if}
+          {#if ssoOn && ssoHost && ssoHost !== location.host}
+            <small>Koppelen lukt alleen als je het dashboard via {ssoHost} open hebt: daar stuurt Authentik je naartoe terug.</small>
+          {/if}
+        </div>
+      {/if}
+      {#if ssoErr}<p class="err">{ssoErr}</p>{/if}
       <form onsubmit={saveSso}>
         <label class="chk"><input type="checkbox" bind:checked={sso.enabled} /> inloggen via Authentik toestaan</label>
         <label class="lbl" for="oi-iss">Issuer (OpenID Configuration Issuer van de provider)</label>
@@ -235,15 +283,16 @@
             <input id="oi-lbl" bind:value={sso.label} maxlength="40" />
           </div>
           <div>
-            <label class="lbl" for="oi-claim">Gebruikersnaam uit claim</label>
+            <label class="lbl" for="oi-claim">Naam tonen uit claim</label>
             <input id="oi-claim" bind:value={sso.username_claim} />
           </div>
         </div>
         <label class="chk"><input type="checkbox" bind:checked={sso.require_mfa} /> Authentik moet 2FA melden (amr-claim), anders weigeren</label>
         <label class="chk"><input type="checkbox" bind:checked={sso.insecure} /> zelfondertekend certificaat aanvaarden</label>
         <p class="hint">Redirect-URI om in Authentik in te vullen: <code class="uri">{sso.redirect_uri}</code><br />
-          Alleen bestaande gebruikers kunnen zo inloggen: de gebruikersnaam bij Authentik moet dezelfde zijn als hier.
-          Je eigen wachtwoord en 2FA blijven ook gewoon werken.</p>
+          Het dashboard herkent je Authentik-account aan zijn vaste ID (sub), niet aan de naam: koppel het één keer
+          hierboven, daarna mag je naam bij Authentik veranderen. Zet in Authentik bij de provider 'Subject mode' op
+          'Based on the User's hashed ID'. Je eigen wachtwoord en 2FA blijven ook gewoon werken.</p>
         {#if ssoMsg}<p class="ok">{ssoMsg}</p>{/if}
         <div class="row foot"><button class="btn">Opslaan</button></div>
       </form>
@@ -323,6 +372,12 @@
   .chk { display: flex; gap: 8px; align-items: center; font-size: 12.5px; color: var(--text); margin: 10px 0 }
   .chk input { width: auto }
   .uri { color: var(--ok); word-break: break-all }
+  .link { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; font-size: 13px; padding: 10px 12px;
+          border-radius: 10px; border: 1px solid rgba(230, 181, 107, .5); background: var(--fill); margin-bottom: 6px }
+  .link.on { border-color: rgba(143, 214, 164, .35) }
+  .link span { flex: 1; min-width: 200px }
+  .link b { color: var(--text-h); font-weight: 500 }
+  .link small { flex-basis: 100%; color: var(--muted); font-size: 11.5px }
   .where { font-size: 13px; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(143, 214, 164, .35); background: var(--fill) }
   .where.away { border-color: rgba(230, 181, 107, .5) }
   .feat { display: flex; gap: 12px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line) }

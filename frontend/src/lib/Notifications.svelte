@@ -8,6 +8,9 @@
   let { onopen, onwebhooks, onwebpush } = $props()
   let open = $state(false)
   let data = $state({ unread: 0, items: [] })
+  // "wis gelezen" laat staan wat nog niet op je gsm is, tot het verstuurd is: zo wist niemand "Login vanaf nieuw IP"
+  // voor jij het ziet. Hoeveel er bleven staan.
+  let kept = $state(0)
 
   const fmt = (ts) => new Date(ts).toLocaleString('nl-BE', { dateStyle: 'short', timeStyle: 'short' })
 
@@ -26,6 +29,7 @@
 
   async function toggle() {
     open = !open
+    kept = 0
     if (open) await load()
   }
 
@@ -46,7 +50,7 @@
 
   async function clearRead() {
     boom(undefined, 0.8)
-    try { await api('/notifications', { method: 'DELETE' }) } catch { /* volgende poging */ }
+    try { kept = (await api('/notifications', { method: 'DELETE' })).kept || 0 } catch { /* volgende poging */ }
     await load()
   }
 
@@ -69,6 +73,7 @@
         <button class="mini" onclick={readAll}>alles gelezen</button>
         <button class="mini x" onclick={clearRead}>wis gelezen</button>
       </div>
+      {#if kept}<p class="kept">{kept} {kept === 1 ? 'melding is' : 'meldingen zijn'} nog niet naar je gsm gestuurd: {kept === 1 ? 'die blijft' : 'die blijven'} staan tot dat gebeurd is.</p>{/if}
       <div class="items">
         {#each data.items as n (n.id)}
           <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -97,6 +102,7 @@
   }
   .head { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; font-size: 12px; color: var(--muted) }
   .head span { flex: 1 }
+  .kept { margin: 0 0 8px; font-size: 11.5px; color: var(--muted) }
   .items { max-height: 60vh; overflow: auto }
   .n {
     padding: 8px 10px; margin-bottom: 6px; border-radius: 8px; background: var(--fill);

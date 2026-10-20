@@ -375,6 +375,11 @@ async def test_monitor_run_now_and_patch(authed):
     r = await authed.post(f"/api/cron/jobs/{jid}/monitor", json={"on": False})
     assert r.status_code == 200, r.text
     assert node.files["root"].endswith("0 4 * * * /root/sync.sh\n")
+    # Niet meer bewaakt = geen melding meer als hij faalt: dat meldt het dashboard (ook op je gsm).
+    agen, db = await _db()
+    n = (await db.execute(select(Notification).where(Notification.title.like("Cronjob niet meer bewaakt%")))).scalar_one()
+    assert n.title == "Cronjob niet meer bewaakt: sync.sh op pve50" and n.source == "auth" and n.level == "warn"
+    await agen.aclose()
     assert (await authed.post(f"/api/cron/jobs/{jobs['back-up naar pbs-pi']['id']}/monitor",
                               json={"on": True})).status_code == 400
 

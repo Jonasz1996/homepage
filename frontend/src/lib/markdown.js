@@ -2,14 +2,18 @@
 // zo kan er nooit HTML uit de notitie zelf in de pagina belanden.
 const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
+const link = (href, text) => `<a href="${href}" target="_blank" rel="noopener noreferrer">${text}</a>`
+// [tekst](url) of een los adres, in één keer: een tweede vervanging zou ook de adressen in de net gemaakte <a> zien,
+// en dan een link in een link zetten, of zelfs in het href (zo kwamen er eigen attributen op de link).
+const LINK = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(^|[\s(])(https?:\/\/[^\s<)]+)/g
+
 function inline(s) {
   const codes = []
   s = s.replace(/`([^`]+)`/g, (_, c) => `\u0000${codes.push(c) - 1}\u0000`)
   s = s
     .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
     .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<i>$2</i>')
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
-    .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>')
+    .replace(LINK, (_, text, href, pre, bare) => (href ? link(href, text) : pre + link(bare, bare)))
   return s.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${codes[i]}</code>`)
 }
 

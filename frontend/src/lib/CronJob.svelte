@@ -27,9 +27,10 @@
   }
   onMount(() => { load(); return () => ws?.close() })
 
+  // Dempen (geen meldingen meer als hij faalt) vraagt je 2FA; een naam geven of weer melden niet.
   async function patch(body) {
     try {
-      await api(`/cron/jobs/${id}`, { method: 'PATCH', body })
+      await withReauth(() => api(`/cron/jobs/${id}`, { method: 'PATCH', body }))
       await load()
       onchanged?.()
     } catch (e) { error = e.message }

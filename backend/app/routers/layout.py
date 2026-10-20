@@ -5,11 +5,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import outside
 from ..db import get_db
-from ..deps import audit, current_session, current_user, notify, recent_auth
+from ..deps import audit, confirm_silence, current_session, current_user, notify, recent_auth
+from ..integrations import REGISTRY
 from ..layout import load_pages, pages_out, record_revision, restore_snapshot, service_out
 from ..models import ApiConnection, Group, Page, Revision, Service, Session, User
-from ..monitoring.engine import active, identity, reset_state, restarts, silencing
+from ..monitoring.engine import active, group_silencing, identity, parent_silencing, reset_state, restarts, silencing
 from ..schemas import GroupIn, OrderIn, PageIn, ServiceIn
 from ..security import decrypt_json, encrypt_json
 
@@ -154,11 +156,20 @@ async def _api_type(db: AsyncSession, data: ServiceIn) -> None:
         data.type = (await _get(db, ApiConnection, data.api_id)).kind
 
 
+def _fetches(data: ServiceIn) -> bool:
+    """Haalt de server voor deze tegel zelf iets op bij het adres van de tegel (een integratie zonder API uit
+    API-beheer)? Dan is een nieuw of gewijzigd adres van buitenaf een actie: zie outside.require."""
+    return data.type in REGISTRY and data.api_id is None
+
+
 @router.post("/services", status_code=201)
-async def create_service(data: ServiceIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+async def create_service(data: ServiceIn, request: Request, sess: Session = Depends(current_session),
+                         user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     await _get(db, Group, data.group_id)
     await _check_parent(db, None, data.parent_id)
     await _api_type(db, data)
+    if _fetches(data):
+        await outside.require(request, db, "acties", sess, user)
     service = Service(**data.model_dump(exclude={"secrets"}),
                       position=await _next_position(db, Service.position, Service.group_id, data.group_id))
     _apply_secrets(service, data.secrets)
@@ -185,9 +196,13 @@ async def update_service(service_id: int, data: ServiceIn, request: Request, ses
     if "api_id" not in data.model_fields_set:
         data.api_id = service.api_id
     await _api_type(db, data)
+    moved = _target(data.type, data.url, data.config) != _target(service.type, service.url, service.config)
+    # Van buitenaf: een integratie die een ander adres krijgt, ook door ze los te koppelen van haar API (dan haalt de
+    # tegel zelf op, bij zijn eigen adres).
+    if _fetches(data) and (moved or service.api_id is not None):
+        await outside.require(request, db, "acties", sess, user)
     # Bewaarde secrets naar een ander adres of type sturen = ze kunnen weglekken: vraagt een recente 2FA,
     # tenzij alle secrets in hetzelfde verzoek opnieuw ingegeven (of gewist) worden.
-    moved = _target(data.type, data.url, data.config) != _target(service.type, service.url, service.config)
     stored = set(decrypt_json(service.secrets)) if moved and service.secrets else set()
     if stored and not stored <= set(data.secrets or {}):
         await recent_auth(sess, user)
@@ -195,13 +210,17 @@ async def update_service(service_id: int, data: ServiceIn, request: Request, ses
                     type=data.type, old_url=service.url, old_type=service.type)
     await _check_parent(db, service_id, data.parent_id)
     # Een check pauzeren of zijn meldingen uitzetten is wat iemand met een gestolen sessie als eerste zou doen:
-    # dat vraagt een recente 2FA, en je krijgt er een melding van (ook op je gsm).
-    silenced = silencing(service.check, data.check)
+    # dat vraagt een recente 2FA, en je krijgt er een melding van (ook op je gsm). Ook de check onder een ouder hangen
+    # die down of in onderhoud is, of naar een groep verplaatsen met gepland onderhoud (nu of later): dan meldt hij
+    # zolang niets. Zonder eigen check geldt dat voor wat eronder hangt.
+    silenced = (silencing(service.check, data.check)
+                or await parent_silencing(db, service, data.check, data.parent_id)
+                or await group_silencing(db, service, data.check, data.group_id))
     if silenced:
         await recent_auth(sess, user)
         await audit(db, request, user, "check_silenced", service=service.name, what=silenced)
-        notify(db, f"{silenced.capitalize()}: {service.name}", "Was jij dit niet, kijk dan in ⚿ naar de sessies.",
-               level="warn", source="auth", service_id=service.id)
+        notify(db, f"{silenced[:1].upper()}{silenced[1:]}: {service.name}",
+               "Was jij dit niet, kijk dan in ⚿ naar de sessies.", level="warn", source="auth", service_id=service.id)
     if identity(service.check, service.url) != identity(data.check, data.url):
         await reset_state(db, service.id)
     restarted = restarts(service.check, data.check)
@@ -251,7 +270,16 @@ async def delete_service(service_id: int, request: Request, sess: Session = Depe
 # --- Volgorde (slepen) ------------------------------------------------------
 
 @router.put("/layout/order")
-async def set_order(data: OrderIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+async def set_order(data: OrderIn, request: Request, sess: Session = Depends(current_session),
+                    user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    # Een tegel naar een groep slepen met gepland onderhoud (nu of later), legt zijn check (of wat eronder hangt) dan
+    # stil: net als in update_service vraagt dat een recente 2FA en geeft het een melding. Eerst, vóór er iets verandert.
+    for group_id, service_ids in (data.services or {}).items():
+        for sid in service_ids:
+            s = await _get(db, Service, sid)
+            if why := await group_silencing(db, s, s.check, group_id):
+                await confirm_silence(db, request, sess, user, f"{why[:1].upper()}{why[1:]}: {s.name}",
+                                      "check_silenced", service_id=s.id, service=s.name, what=why)
     if data.pages is not None:
         for pos, pid in enumerate(data.pages):
             (await _get(db, Page, pid)).position = pos
@@ -290,8 +318,8 @@ async def restore_revision(revision_id: int, request: Request, sess: Session = D
         # Een oude versie terugzetten mag geen achterdeur zijn om checks stil te leggen.
         await recent_auth(sess, user)
         notify(db, f"Checks stil door een oude versie: {', '.join(silenced[:5])}"[:200],
-               "Gepauzeerd of meldingen uit. Was jij dit niet, kijk dan in ⚿ naar de sessies.", level="warn",
-               source="auth")
+               "Gepauzeerd, meldingen uit, of stil door een afhankelijkheid of gepland onderhoud in hun groep. Was jij "
+               "dit niet, kijk dan in ⚿ naar de sessies.", level="warn", source="auth")
     await audit(db, request, user, "revision_restored", revision=revision_id)
     await record_revision(db, user, label)
     await db.commit()
