@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, SmallInteger, String, Text
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, SmallInteger, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql.expression import false as sa_false
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -254,3 +254,22 @@ class AppState(Base):
     key: Mapped[str] = mapped_column(String(100), primary_key=True)
     value: Mapped[dict] = mapped_column(Json, default=dict)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+
+
+class Metric(Base):
+    """Gebruik van nodes, VM's/CT's en opslag, elke 10 minuten uit Proxmox. Met TimescaleDB een hypertable."""
+
+    __tablename__ = "metrics"
+
+    service_id: Mapped[int] = mapped_column(ForeignKey("services.id", ondelete="CASCADE"), primary_key=True)
+    # node | guest | storage
+    kind: Mapped[str] = mapped_column(String(8), primary_key=True)
+    # node: "pve50" · guest: "pve50/101" · storage: "pve50/local-lvm" of gedeeld "ceph"
+    name: Mapped[str] = mapped_column(String(120), primary_key=True)
+    ts: Mapped[datetime] = mapped_column(primary_key=True, default=utcnow, index=True)
+    label: Mapped[str | None] = mapped_column(String(120))
+    cpu: Mapped[float | None] = mapped_column(Float)
+    mem: Mapped[int | None] = mapped_column(BigInteger)
+    mem_total: Mapped[int | None] = mapped_column(BigInteger)
+    disk: Mapped[int | None] = mapped_column(BigInteger)
+    disk_total: Mapped[int | None] = mapped_column(BigInteger)

@@ -6,7 +6,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..deps import notify
-from ..models import AuditLog, CheckResult, Notification, Service, ServiceState, Session
+from ..models import AuditLog, CheckResult, Metric, Notification, Service, ServiceState, Session
 from .checks import Outcome
 
 # Pas na zoveel mislukte checks op rij is een service "down" (vermijdt valse meldingen).
@@ -136,6 +136,7 @@ async def record(db: AsyncSession, service: Service, outcome: Outcome, now: date
 async def cleanup(db: AsyncSession) -> None:
     cutoff = datetime.now(timezone.utc) - timedelta(days=KEEP_DAYS)
     await db.execute(delete(CheckResult).where(CheckResult.ts < cutoff))
+    await db.execute(delete(Metric).where(Metric.ts < cutoff))
 
 
 async def housekeeping(db: AsyncSession) -> None:

@@ -12,7 +12,8 @@ from ..db import get_engine
 from ..models import Service
 from .checks import HttpClients, run_check
 from .engine import cleanup, housekeeping, record
-from .watchers import watch_npm
+from .capacity import SAMPLE_EVERY, check_forecasts, sample
+from .watchers import watch_npm, watch_pbs
 
 log = logging.getLogger("homepage.worker")
 
@@ -87,6 +88,17 @@ class Worker:
         async with self.maker() as db:
             await watch_npm(db, self.http)
             await db.commit()
+        async with self.maker() as db:
+            await watch_pbs(db, self.http)
+            await db.commit()
+
+    async def capacity(self) -> None:
+        """Elke 10 minuten: gebruik uit Proxmox bewaren en kijken of er opslag vol dreigt te lopen."""
+        async with self.maker() as db:
+            await sample(db, self.http)
+            await db.commit()
+            await check_forecasts(db)
+            await db.commit()
 
     def spawn(self, coro) -> None:
         task = asyncio.create_task(coro)
@@ -100,6 +112,7 @@ class Worker:
         last_cleanup = 0.0
         # Eerste ronde na een minuut, daarna elk half uur.
         last_periodic = time.monotonic() - PERIODIC + 60
+        last_capacity = time.monotonic() - SAMPLE_EVERY + 30
         while True:
             try:
                 for sid, check, url in await self.due_services():
@@ -107,6 +120,9 @@ class Worker:
                 if time.monotonic() - last_periodic > PERIODIC:
                     last_periodic = time.monotonic()
                     self.spawn(self.periodic())
+                if time.monotonic() - last_capacity > SAMPLE_EVERY:
+                    last_capacity = time.monotonic()
+                    self.spawn(self.capacity())
                 if time.monotonic() - last_cleanup > 3600:
                     async with self.maker() as db:
                         if self.self_cleanup:

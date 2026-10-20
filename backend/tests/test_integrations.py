@@ -64,7 +64,15 @@ class Fake:
             now = datetime.now(timezone.utc).timestamp()
             return httpx.Response(200, json={"data": [
                 {"backup-type": "vm", "backup-id": "100", "last-backup": now - 3600, "backup-count": 7},
-                {"backup-type": "ct", "backup-id": "101", "last-backup": now - 5 * 86400, "backup-count": 3}]})
+                {"backup-type": "ct", "backup-id": "101", "last-backup": now - 5 * 86400, "backup-count": 3},
+                {"backup-type": "vm", "backup-id": "102", "last-backup": now - 30 * 3600, "backup-count": 2}]})
+        if p == "/api2/json/admin/datastore/hdd/snapshots":
+            now = datetime.now(timezone.utc).timestamp()
+            return httpx.Response(200, json={"data": [
+                {"backup-type": "vm", "backup-id": "100", "backup-time": now - 3600},
+                {"backup-type": "vm", "backup-id": "100", "backup-time": now - 90000, "verification": {"state": "failed"}},
+                {"backup-type": "vm", "backup-id": "100", "backup-time": now - 200000, "verification": {"state": "ok"}},
+                {"backup-type": "vm", "backup-id": "102", "backup-time": now - 30 * 3600, "verification": {"state": "ok"}}]})
         if p == "/api2/json/nodes/localhost/tasks":
             return httpx.Response(200, json={"data": [{"worker_type": "backup", "worker_id": "hdd:ct/101",
                                                        "starttime": 1, "status": "error: no space"},
@@ -241,6 +249,10 @@ async def test_pbs(authed, fake):
     assert w["fouten 24u"]["value"] == 1 and w["oudste"]["level"] == "err"
     d = (await authed.get(f"/api/services/{sid}/integration")).json()
     backups = d["sections"][1]["rows"]
-    assert [r[1]["v"] for r in backups] == ["ct/101", "vm/100"]
-    assert [r[3]["level"] for r in backups] == ["err", "ok"]
+    assert [r[1]["v"] for r in backups] == ["ct/101", "vm/100", "vm/102"]
+    # ct/101: laatste taak mislukt · vm/100: recent maar verify van de vorige mislukt · vm/102: 30 u oud
+    assert [r[3]["level"] for r in backups] == ["err", "err", "warn"]
+    assert backups[0][3]["v"] == "laatste taak mislukt"
+    assert [r[4]["v"] for r in backups] == ["—", "mislukt", "ok"]
+    assert w["verify"]["value"] == "1 fout"
     assert d["sections"][0]["items"][0]["note"] == {"full_at": 1900000000}

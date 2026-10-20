@@ -28,6 +28,16 @@ def client_country(request: HTTPConnection) -> str | None:
 SEEN_EVERY = timedelta(minutes=5)
 
 
+def secure_cookie(request: Request) -> bool:
+    mode = str(get_settings().cookie_secure).strip().lower()
+    if mode in ("true", "1", "yes"):
+        return True
+    if mode in ("false", "0", "no"):
+        return False
+    # uvicorn zet het schema uit X-Forwarded-Proto (NPM → nginx), anders http.
+    return request.url.scheme == "https"
+
+
 async def csrf_guard(conn: HTTPConnection) -> None:
     """Een ander domein kan geen eigen header meesturen zonder CORS-toestemming,
     dus deze header bewijst dat het verzoek van onze eigen frontend komt.
