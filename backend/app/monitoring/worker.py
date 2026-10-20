@@ -25,7 +25,7 @@ from .network import NETWORK_EVERY, PUBLIC_IP_EVERY, sample_power, watch_gateway
 from .report import weekly_notification
 from .updates import UPDATES_EVERY, run_updates
 from .upgrade import auto_updates, cleanup_snapshots, mark_interrupted
-from . import cluster, configs, containerlogs, coverage, devices, healing, planned, restoretest, zabbix
+from . import cluster, configs, containerlogs, coverage, devices, healing, planned, restoretest, routes, zabbix
 from .watchers import watch_npm, watch_pbs
 
 log = logging.getLogger("homepage.worker")
@@ -318,6 +318,8 @@ class Worker:
         last_cluster = start - cluster.CLUSTER_EVERY + 20
         last_docker = start - containerlogs.EVERY + 15
         last_zabbix = start - zabbix.EVERY + 10
+        # Meteen bij de start: daarna gaan de checks rechtstreeks (zonder DNS) naar wat NPM erachter heeft.
+        last_routes = start - routes.REFRESH_EVERY + 5
         while True:
             try:
                 for sid, check, url in await self.due_services():
@@ -362,6 +364,9 @@ class Worker:
                 if time.monotonic() - last_zabbix > zabbix.EVERY:
                     last_zabbix = time.monotonic()
                     self.job("zabbix", lambda: self.step("zabbix", lambda db: zabbix.run_zabbix(db, self.http)))
+                if time.monotonic() - last_routes > routes.REFRESH_EVERY:
+                    last_routes = time.monotonic()
+                    self.job("routes", lambda: self.step("routes via NPM", lambda db: routes.refresh(db, self.http)))
                 if time.monotonic() - last_lan > devices.DEVICES_EVERY:
                     last_lan = time.monotonic()
                     self.job("lan", self.lan)

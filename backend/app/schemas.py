@@ -33,6 +33,8 @@ class CheckIn(BaseModel):
     notify: Literal["push", "centrum", "uit"] | None = None
     cert_notify: bool | None = None
     paused: bool | None = None
+    # false = via de naam (DNS en NPM) checken, ook als NPM het IP erachter kent (monitoring/routes.py).
+    direct: bool | None = None
     # http
     insecure: bool | None = None
     keyword: str | None = Field(default=None, max_length=200)

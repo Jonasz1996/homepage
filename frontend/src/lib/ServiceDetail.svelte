@@ -185,6 +185,14 @@
         </div>
       </div>
 
+      {#if data.route}
+        <p class="route" class:warn={!!data.route.blocked}>
+          {data.route.direct ? `De check gaat rechtstreeks naar ${data.route.to}, zonder DNS.`
+            : data.route.npm ? `De check gaat via NPM op ${data.route.npm}, zonder DNS. Niet rechtstreeks: ${data.route.why}`
+            : `De check gaat via de naam: ${data.route.why}`}
+        </p>
+      {/if}
+
       {#if data.uptime_all}
         <div class="upall">
           <span class="lbl">uptime</span>
@@ -270,6 +278,8 @@
   .upall i { font-style: normal; color: var(--muted); font-size: 11.5px; margin-right: 2px }
   .upall .bad { color: var(--err) }
   .hint.warn { color: var(--mid) }
+  .route { margin: 8px 0 0; font-size: 12px; color: var(--muted) }
+  .route.warn { color: var(--mid) }
   .kpi.down b, .kpi.bad b { color: var(--err) }
   .tabs { display: flex; gap: 6px; margin: 16px 0 0 }
   .tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 6px }
