@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -24,6 +26,7 @@ class ServiceIn(BaseModel):
     config: dict = Field(default_factory=dict)
     # None = ongewijzigd laten. Een sleutel met lege waarde wordt verwijderd.
     secrets: dict[str, str | None] | None = None
+    parent_id: int | None = None
 
     @field_validator("url")
     @classmethod
@@ -46,6 +49,8 @@ class ServiceOut(BaseModel):
     type: str
     check: dict
     config: dict
+    parent_id: int | None = None
+    maintenance_until: datetime | None = None
     secret_keys: list[str] = []
 
 

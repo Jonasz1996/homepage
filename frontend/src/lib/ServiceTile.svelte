@@ -32,8 +32,11 @@
     })
     return d
   })
-  let health = $derived(status?.status || (service.check?.type ? 'unknown' : null))
-  const stateLabel = { up: 'bereikbaar', down: 'down', unknown: 'nog geen check' }
+  let maint = $derived(!!status?.maintenance_until)
+  let health = $derived(maint ? 'maint' : status?.status || (service.check?.type ? 'unknown' : null))
+  let certDays = $derived(status?.cert_expires_at ? Math.floor((new Date(status.cert_expires_at) - Date.now()) / 86400000) : null)
+  const until = (ts) => new Date(ts).toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' })
+  const stateLabel = { up: 'bereikbaar', down: 'down', unknown: 'nog geen check', maint: 'onderhoud' }
   let ms = $derived(status?.latency_ms == null ? '' : status.latency_ms < 10 ? status.latency_ms.toFixed(1) : Math.round(status.latency_ms))
 
   function detail(e) {
@@ -57,6 +60,7 @@
   class:drop-before={dropBefore}
   class:up={health === 'up'}
   class:down={health === 'down'}
+  class:maint
   href={service.url || undefined}
   target="_blank"
   rel="noopener noreferrer"
@@ -77,7 +81,10 @@
   <span class="txt">
     <span class="name">{service.name}</span>
     <span class="desc">
-      {#if health === 'down'}<span class="downtxt">down</span>{:else if ms !== ''}<span class="ms">{ms} ms</span>{/if}
+      {#if maint}<span class="mt">onderhoud tot {until(status.maintenance_until)}</span>
+      {:else if health === 'down'}<span class="downtxt">down</span>{#if status?.cause}<span class="cause">via {status.cause}</span>{/if}
+      {:else if ms !== ''}<span class="ms">{ms} ms</span>{/if}
+      {#if certDays !== null && certDays <= 21}<span class="cert" class:bad={certDays <= 3}>cert {certDays} d</span>{/if}
       {service.description || host}
     </span>
     {#if widget?.fields?.length}
@@ -129,6 +136,11 @@
   .tile.up { border-left-color: var(--ok) }
   .tile.down { border-left-color: var(--err); background: rgba(229, 139, 139, .08) }
   .ms { color: var(--text); margin-right: 4px }
+  .tile.maint { border-left-color: var(--mid); opacity: .7 }
+  .mt { color: var(--mid); margin-right: 4px }
+  .cause { color: var(--muted); margin-right: 4px }
+  .cert { color: var(--mid); margin-right: 4px }
+  .cert.bad { color: var(--err) }
   .downtxt { color: var(--err); margin-right: 4px; text-transform: uppercase; font-size: 10.5px; letter-spacing: .06em }
   .spark { position: absolute; left: 56px; right: 12px; bottom: 3px; width: calc(100% - 68px); height: 12px; pointer-events: none }
   .spark path { fill: none; stroke: rgba(255, 255, 255, .22); stroke-width: 1.2; vector-effect: non-scaling-stroke }

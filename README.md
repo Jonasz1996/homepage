@@ -75,6 +75,17 @@ Fase 6, logs (knop `logs` in de titelbalk):
 - **machines toevoegen**: kies een SSH-host en het dashboard installeert en configureert rsyslog. Op een
   Proxmox-node kan dat meteen voor alle draaiende containers (via `pct`). Of plak het getoonde script zelf
 
+Extra's, deel 1 (checks en meldingen):
+
+- **certificaten**: elke HTTPS-check leest de vervaldatum; op de tegel vanaf 21 dagen, melding 14 en 3 dagen vooraf
+- **onderhoud**: per service (mini dashboard) of per groep (⏸ in bewerkmodus) voor x minuten. Geen meldingen,
+  tegel oranje, telt niet mee voor de uptime, en geldt ook voor alles wat ervan afhangt
+- **afhankelijkheden**: kies bij een service "hangt af van" (bv. de Proxmox-node). Valt de node uit, dan krijg je
+  één melding "proxmox100 is down (23 services getroffen)" en tonen de andere tegels "down via proxmox100"
+- **slimmere checks**: woord op de pagina (of juist niet), JSON-veld met verwachte waarde, DNS-check via een
+  gekozen server (bv. AdGuard) met verwacht IP
+- **nieuwe hosts in NPM**: elk half uur kijkt de worker of er proxy hosts bij zijn die nog geen tegel hebben
+
 Optimalisaties:
 
 - je blijft ingelogd zolang je het dashboard gebruikt (sessie verlengt zich, na 14 dagen niets doen moet je opnieuw inloggen)

@@ -11,12 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
 from ..deps import audit, current_user, notify, recent_auth
-from ..integrations import REGISTRY, Integration, IntegrationError
+from ..integrations import REGISTRY, Integration, IntegrationError, build
 from ..integrations.npm import NginxProxyManager, host_url
 from ..layout import record_revision
 from ..models import Group, Service, User
 from ..monitoring.checks import HttpClients
-from ..security import decrypt_json
 
 router = APIRouter(prefix="/api", tags=["integrations"])
 
@@ -32,11 +31,7 @@ def _fingerprint(s: Service) -> tuple:
 
 
 def _integration(s: Service) -> Integration:
-    cls = REGISTRY.get(s.type)
-    if cls is None:
-        raise IntegrationError(f"Geen integratie voor type '{s.type}'")
-    client = clients.get(bool((s.config or {}).get("insecure")))
-    return cls(s.url, s.config or {}, decrypt_json(s.secrets), client)
+    return build(s, clients)
 
 
 async def _cached(s: Service, kind: str, ttl: int, fn) -> dict:

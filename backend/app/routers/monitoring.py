@@ -1,13 +1,14 @@
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import Integer, case, cast, func, select
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel, Field
+from sqlalchemy import Integer, and_, case, cast, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..deps import current_user
-from ..models import CheckResult, Service, ServiceState, User
+from ..deps import audit, current_user
+from ..models import CheckResult, Group, Service, ServiceState, User
 
 router = APIRouter(prefix="/api", tags=["monitoring"])
 
@@ -38,6 +39,10 @@ def _ok_count():
     return func.sum(case((CheckResult.ok, 1), else_=0))
 
 
+# Checks tijdens onderhoud tellen niet mee voor de uptime.
+NOT_MAINT = CheckResult.maintenance.is_not(True)
+
+
 @router.get("/status")
 async def all_status(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     now = datetime.now(timezone.utc)
@@ -46,7 +51,7 @@ async def all_status(user: User = Depends(current_user), db: AsyncSession = Depe
         sid: (ok / total if total else None)
         for sid, ok, total in (await db.execute(
             select(CheckResult.service_id, _ok_count(), func.count())
-            .where(CheckResult.ts >= now - timedelta(hours=24))
+            .where(CheckResult.ts >= now - timedelta(hours=24), NOT_MAINT)
             .group_by(CheckResult.service_id)
         )).all()
     }
@@ -58,7 +63,32 @@ async def all_status(user: User = Depends(current_user), db: AsyncSession = Depe
     )).all()
     for sid, latency, ok in rows:
         spark[sid].append(latency if ok else None)
-    return {
+
+    services = {sid: (name, parent, _aware(until)) for sid, name, parent, until in (await db.execute(
+        select(Service.id, Service.name, Service.parent_id, Service.maintenance_until))).all()}
+    by_id = {s.service_id: s for s in states}
+
+    def chain(sid: int):
+        seen = {sid}
+        parent = services.get(sid, (None, None, None))[1]
+        while parent and parent not in seen and parent in services:
+            seen.add(parent)
+            yield parent
+            parent = services[parent][1]
+
+    def maintenance(sid: int):
+        ends = [services[x][2] for x in [sid, *chain(sid)] if services.get(x) and services[x][2] and services[x][2] > now]
+        return max(ends) if ends else None
+
+    def cause(sid: int):
+        # De verste ouder die down is: de echte oorzaak (node), niet de CT ertussen.
+        root = None
+        for a in chain(sid):
+            if by_id.get(a) and by_id[a].status == "down":
+                root = services[a][0]
+        return root
+
+    out = {
         str(s.service_id): {
             "status": s.status,
             "since": _aware(s.since),
@@ -67,9 +97,17 @@ async def all_status(user: User = Depends(current_user), db: AsyncSession = Depe
             "last_error": s.last_error,
             "uptime_24h": uptime.get(s.service_id),
             "spark": spark[s.service_id][-SPARK_POINTS:],
+            "maintenance_until": maintenance(s.service_id),
+            "cause": cause(s.service_id) if s.status == "down" else None,
+            "cert_expires_at": _aware(s.cert_expires_at),
         }
         for s in states
     }
+    # Services zonder check maar wel in onderhoud (bv. een node waarvan alleen de kinderen gecheckt worden).
+    for sid in services:
+        if str(sid) not in out and maintenance(sid):
+            out[str(sid)] = {"status": None, "maintenance_until": maintenance(sid)}
+    return out
 
 
 @router.get("/services/{service_id}/history")
@@ -86,8 +124,8 @@ async def history(service_id: int, range: str = Query("24h", pattern="^(1h|24h|7
             func.avg(CheckResult.latency_ms),
             func.min(CheckResult.latency_ms),
             func.max(CheckResult.latency_ms),
-            _ok_count(),
-            func.count(),
+            func.sum(case((and_(CheckResult.ok, NOT_MAINT), 1), else_=0)),
+            func.sum(case((NOT_MAINT, 1), else_=0)),
         )
         .where(CheckResult.service_id == service_id, CheckResult.ts >= now - span)
         .group_by(bucket)
@@ -98,6 +136,7 @@ async def history(service_id: int, range: str = Query("24h", pattern="^(1h|24h|7
     total_ok = total = 0
     for b, avg, lo, hi, ok, n in rows:
         t = datetime.fromtimestamp(int(b) * size, timezone.utc)
+        ok, n = ok or 0, n or 0
         up = ok / n if n else None
         points.append({"t": t, "avg": avg, "min": lo, "max": hi, "up": up})
         total_ok += ok or 0
@@ -125,9 +164,47 @@ async def history(service_id: int, range: str = Query("24h", pattern="^(1h|24h|7
         "state": {
             "status": state.status, "since": _aware(state.since), "latency_ms": state.latency_ms,
             "last_error": state.last_error, "last_check": _aware(state.last_check),
+            "cert_expires_at": _aware(state.cert_expires_at),
         } if state else None,
         "recent": [
-            {"ts": _aware(r.ts), "ok": r.ok, "latency_ms": r.latency_ms, "status_code": r.status_code, "error": r.error}
+            {"ts": _aware(r.ts), "ok": r.ok, "latency_ms": r.latency_ms, "status_code": r.status_code, "error": r.error,
+             "maintenance": bool(r.maintenance)}
             for r in last
         ],
     }
+
+
+# --- Onderhoud ------------------------------------------------------------------
+
+class MaintenanceIn(BaseModel):
+    # 0 = onderhoud stoppen.
+    minutes: int = Field(ge=0, le=7 * 24 * 60)
+
+
+def _until(minutes: int) -> datetime | None:
+    return datetime.now(timezone.utc) + timedelta(minutes=minutes) if minutes else None
+
+
+@router.post("/services/{service_id}/maintenance")
+async def service_maintenance(service_id: int, data: MaintenanceIn, request: Request,
+                              user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    s = await db.get(Service, service_id)
+    if s is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Service niet gevonden")
+    s.maintenance_until = _until(data.minutes)
+    await audit(db, request, user, "maintenance", service=s.name, minutes=data.minutes)
+    await db.commit()
+    return {"maintenance_until": s.maintenance_until}
+
+
+@router.post("/groups/{group_id}/maintenance")
+async def group_maintenance(group_id: int, data: MaintenanceIn, request: Request,
+                            user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    g = await db.get(Group, group_id)
+    if g is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Groep niet gevonden")
+    until = _until(data.minutes)
+    await db.execute(update(Service).where(Service.group_id == group_id).values(maintenance_until=until))
+    await audit(db, request, user, "maintenance", group=g.name, minutes=data.minutes)
+    await db.commit()
+    return {"maintenance_until": until}

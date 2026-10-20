@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import JSON, BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, SmallInteger, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.sql.expression import false as sa_false
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 # JSONB op PostgreSQL, gewone JSON elders (tests draaien op SQLite).
@@ -94,6 +95,10 @@ class Service(Base):
     config: Mapped[dict] = mapped_column(Json, default=dict)
     # Versleutelde JSON met API-sleutels, wachtwoorden, ... Komt nooit in de browser.
     secrets: Mapped[str | None] = mapped_column(Text)
+    # Draait op / hangt af van (bv. de Proxmox-node). Valt die uit, dan één melding voor allemaal.
+    parent_id: Mapped[int | None] = mapped_column(ForeignKey("services.id", ondelete="SET NULL"), index=True)
+    # Onderhoud: geen meldingen en telt niet mee voor de uptime. Geldt ook voor wat ervan afhangt.
+    maintenance_until: Mapped[datetime | None]
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 
@@ -146,6 +151,8 @@ class CheckResult(Base):
     latency_ms: Mapped[float | None]
     status_code: Mapped[int | None]
     error: Mapped[str | None] = mapped_column(String(300))
+    # Tijdens onderhoud: bewaard, maar niet meegeteld in de uptime.
+    maintenance: Mapped[bool | None] = mapped_column(Boolean, default=False, server_default=sa_false())
 
 
 class ServiceState(Base):
@@ -161,6 +168,11 @@ class ServiceState(Base):
     latency_ms: Mapped[float | None]
     fail_count: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(String(300))
+    # Down zonder eigen melding, omdat iets waarvan hij afhangt al down was.
+    quiet: Mapped[bool] = mapped_column(Boolean, default=False, server_default=sa_false())
+    cert_expires_at: Mapped[datetime | None]
+    # Laatst gemelde drempel voor het certificaat (14 of 3 dagen), 0 = nog niets gemeld.
+    cert_notified: Mapped[int] = mapped_column(SmallInteger, default=0, server_default="0")
 
 
 class SshKey(Base):
@@ -226,3 +238,13 @@ class LogRule(Base):
     cooldown_minutes: Mapped[int] = mapped_column(Integer, default=10)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class AppState(Base):
+    """Kleine sleutel-waarde-opslag voor achtergrondtaken (bv. welke NPM-hosts al gezien zijn)."""
+
+    __tablename__ = "app_state"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[dict] = mapped_column(Json, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)

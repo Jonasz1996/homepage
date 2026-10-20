@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from 'svelte'
+  import { onMount, untrack } from 'svelte'
   import { api, poll } from './api.js'
   import IntegrationPanel from './IntegrationPanel.svelte'
   import LatencyChart from './LatencyChart.svelte'
@@ -49,6 +49,15 @@
     return m < 60 ? `${m} min` : `${Math.floor(m / 60)} u ${m % 60} min`
   }
   const statusText = { up: 'bereikbaar', down: 'down', unknown: 'onbekend' }
+
+  let maintUntil = $state(untrack(() => service.maintenance_until))
+  let maintActive = $derived(maintUntil && new Date(maintUntil) > new Date())
+  async function maintenance(minutes) {
+    const r = await api(`/services/${service.id}/maintenance`, { method: 'POST', body: { minutes } })
+    maintUntil = r.maintenance_until
+    onchanged?.()
+  }
+  let certDays = $derived(data?.state?.cert_expires_at ? Math.floor((new Date(data.state.cert_expires_at) - Date.now()) / 86400000) : null)
 </script>
 
 <Modal title={`stat ${service.name.toLowerCase()}`} {onclose} wide>
@@ -63,6 +72,18 @@
       {/each}
       <button class="mini" onclick={() => onedit(service)}>✎ bewerken</button>
     </div>
+  </div>
+
+  <div class="maint">
+    {#if maintActive}
+      <span class="on">onderhoud tot {when(maintUntil)}</span>
+      <button class="mini" onclick={() => maintenance(0)}>onderhoud stoppen</button>
+    {:else}
+      <span class="lbl">onderhoud</span>
+      {#each [[30, '30 min'], [60, '1 u'], [240, '4 u'], [1440, '1 dag']] as [m, l]}
+        <button class="mini" onclick={() => maintenance(m)}>{l}</button>
+      {/each}
+    {/if}
   </div>
 
   {#if service.type && service.type !== 'link'}
@@ -90,6 +111,13 @@
           <b>{pct(data.uptime)}</b>
           <small>{data.checks} checks</small>
         </div>
+        {#if certDays !== null}
+          <div class="kpi" class:bad={certDays <= 14}>
+            <small>certificaat</small>
+            <b>{certDays} dagen</b>
+            <small>tot {when(data.state.cert_expires_at)}</small>
+          </div>
+        {/if}
         <div class="kpi" class:bad={data.outages.length > 0}>
           <small>verstoringen {range}</small>
           <b>{data.outages.length}</b>
@@ -124,7 +152,7 @@
           {#each data.recent as r}
             <tr>
               <td>{when(r.ts)}</td>
-              <td class={r.ok ? 'o' : 'e'}>{r.ok ? 'ok' : 'fout'}</td>
+              <td class={r.ok ? 'o' : 'e'}>{r.ok ? 'ok' : 'fout'}{r.maintenance ? ' (onderhoud)' : ''}</td>
               <td>{ms(r.latency_ms)}</td>
               <td>{r.status_code ?? ''} {r.error ?? ''}</td>
             </tr>
@@ -138,6 +166,9 @@
 </Modal>
 
 <style>
+  .maint { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 0 0 12px }
+  .maint .lbl { margin: 0 4px 0 0 }
+  .maint .on { color: var(--mid); font-size: 12.5px }
   .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 10px }
   .url { color: var(--muted); font-size: 12.5px; word-break: break-all }
   .kgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; margin-top: 8px }
