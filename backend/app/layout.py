@@ -1,5 +1,7 @@
 """Lezen, bewaren en terugzetten van de volledige layout (pagina's, groepen, services)."""
 
+from datetime import datetime, timezone
+
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -72,9 +74,13 @@ async def record_revision(db: AsyncSession, user: User | None, summary: str) -> 
         await db.execute(delete(Revision).where(Revision.id.in_(old_ids)))
 
 
-async def restore_snapshot(db: AsyncSession, snap: dict) -> None:
+async def restore_snapshot(db: AsyncSession, snap: dict) -> list[str]:
     """Zet de layout terug zonder services te verwijderen die blijven bestaan,
-    zodat hun monitoring-historiek bewaard blijft."""
+    zodat hun monitoring-historiek bewaard blijft. Geeft de tegels terug waarvan de check daardoor stil valt
+    (gepauzeerd, verwijderd of meldingen uit)."""
+    from .monitoring.engine import active, identity, reset_state, restarts, silencing
+    silenced = []
+    changed = []
     page_ids, group_ids, service_ids = set(), set(), set()
     for p in snap["pages"]:
         page_ids.add(p["id"])
@@ -97,15 +103,30 @@ async def restore_snapshot(db: AsyncSession, snap: dict) -> None:
                 fields = {f: s.get(f) for f in SERVICE_FIELDS if f != "parent_id"}
                 if fields["api_id"] is not None and fields["api_id"] not in apis:
                     fields["api_id"], fields["type"] = None, "link"
+                now = await db.get(Service, s["id"])
+                if now is not None:
+                    if silencing(now.check, fields.get("check")):
+                        silenced.append(now.name)
+                    if identity(now.check, now.url) != identity(fields.get("check"), fields.get("url")):
+                        await reset_state(db, now.id)
+                    if restarts(now.check, fields.get("check")):
+                        changed.append(now.id)
                 await db.merge(Service(group_id=g["id"], parent_id=None, **fields))
     await db.flush()
+    stamp = datetime.now(timezone.utc)
+    for sid in changed:
+        (await db.get(Service, sid)).check_changed_at = stamp
     # Afhankelijkheden pas zetten als alle services bestaan.
     for sid, parent in parents.items():
         if parent in service_ids:
             (await db.get(Service, sid)).parent_id = parent
+    # Tegels die de oude versie niet had, verdwijnen: met een lopende check is dat ook de bewaking stilleggen.
+    gone = (await db.execute(select(Service.name, Service.check).where(Service.id.not_in(service_ids or {-1})))).all()
+    silenced += [name for name, check in gone if active(check)]
     await db.flush()
     # Eerst services, dan groepen, dan pagina's: wat verplaatst werd, hangt al onder de juiste ouder.
     await db.execute(delete(Service).where(Service.id.not_in(service_ids or {-1})))
     await db.execute(delete(Group).where(Group.id.not_in(group_ids or {-1})))
     await db.execute(delete(Page).where(Page.id.not_in(page_ids or {-1})))
     await db.flush()
+    return silenced

@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte'
-  import { api } from './api.js'
+  import { api, withReauth } from './api.js'
   import Modal from './Modal.svelte'
 
   let { onclose, ondone } = $props()
@@ -16,7 +16,8 @@
   async function restore(r) {
     if (!confirm(`Layout terugzetten naar "${r.summary}" (${fmt(r.created_at)})?`)) return
     try {
-      await api(`/revisions/${r.id}/restore`, { method: 'POST' })
+      // Zet de oude versie checks stil (gepauzeerd, verwijderd, meldingen uit), dan vraagt dat een recente 2FA.
+      await withReauth(() => api(`/revisions/${r.id}/restore`, { method: 'POST' }))
       ondone()
       await load()
     } catch (e) {

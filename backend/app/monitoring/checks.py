@@ -1,4 +1,4 @@
-"""De checks zelf: HTTP(S), ping en TCP. Elke check geeft een Outcome terug en gooit nooit."""
+"""De checks zelf: HTTP(S), ping, TCP en DNS. Elke check geeft een Outcome terug en gooit nooit."""
 
 import asyncio
 import ipaddress
@@ -31,6 +31,8 @@ class Outcome:
     status_code: int | None = None
     error: str | None = None
     cert_expires: datetime | None = None
+    # http: de host waar de pagina na doorverwijzingen eindigde, als dat een andere is (bv. de loginpagina).
+    redirected_to: str | None = None
 
 
 def target_for(check: dict, url: str | None) -> str | None:
@@ -101,28 +103,68 @@ def _content_error(check: dict, body: bytes) -> str | None:
     return None
 
 
+def _accept_rule(check: dict) -> str | None:
+    """Geldige statuscodes als tekst (200-299,401); oude checks hadden één code in expect_status."""
+    rule = str(check.get("accept") or check.get("expect_status") or "").replace(" ", "")
+    return rule or None
+
+
+def accepted(code: int, check: dict) -> bool:
+    rule = _accept_rule(check)
+    if not rule:
+        return code < 400
+    for part in rule.split(","):
+        lo, _, hi = part.partition("-")
+        try:
+            if int(lo) <= code <= int(hi or lo):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+BODY_TYPES = {"json": "application/json", "form": "application/x-www-form-urlencoded", "text": "text/plain"}
+
+
 async def check_http(target: str, check: dict, client: httpx.AsyncClient | None = None) -> Outcome:
-    expected = check.get("expect_status")
     need_body = bool((check.get("keyword") or "").strip() or (check.get("json_path") or "").strip())
+    method = check.get("method") if check.get("method") in ("GET", "HEAD", "POST") else "GET"
+    follow = check.get("follow_redirects") is not False
+    timeout = _seconds(check.get("timeout"), TIMEOUT)
+    headers = {"User-Agent": "homepage-monitor/1.0", **{str(k): str(v) for k, v in (check.get("headers") or {}).items()}}
+    body = check.get("body") if method == "POST" else None
+    if body is not None:
+        headers.setdefault("Content-Type", BODY_TYPES.get(check.get("body_type") or "", "application/json"))
     own = client is None
     client = client or httpx.AsyncClient(verify=not check.get("insecure"), timeout=TIMEOUT, follow_redirects=True)
     start = time.perf_counter()
     try:
-        async with client.stream("GET", target, headers={"User-Agent": "homepage-monitor/1.0"}) as r:
+        async with client.stream(method, target, headers=headers, content=body, timeout=timeout,
+                                 follow_redirects=follow) as r:
             ms = (time.perf_counter() - start) * 1000
             cert = _cert_expiry(r) if r.url.scheme == "https" else None
-            body = b""
-            if need_body:
+            data = b""
+            if need_body and method != "HEAD":
                 async for chunk in r.aiter_bytes():
-                    body += chunk
-                    if len(body) >= MAX_BODY:
+                    data += chunk
+                    if len(data) >= MAX_BODY:
                         break
-        ok = r.status_code == int(expected) if expected else r.status_code < 400
-        error = None if ok else f"HTTP {r.status_code}"
-        if ok and need_body:
-            error = _content_error(check, body)
+        # Doorverwezen naar een andere host: meestal de loginpagina van Authentik of Cloudflare Access. Die antwoordt
+        # 200, ook als de app erachter dood is.
+        start_host = (urlsplit(target).hostname or "").lower()
+        end_host = (r.url.host or "").lower()
+        if not follow and r.is_redirect:
+            end_host = (urlsplit(str(r.url.join(r.headers.get("location", "")))).hostname or "").lower()
+        moved = end_host if end_host and end_host != start_host else None
+        ok = accepted(r.status_code, check)
+        rule = _accept_rule(check)
+        error = None if ok else f"HTTP {r.status_code}" + (f" (verwacht {rule})" if rule else "")
+        if ok and moved and check.get("same_host"):
+            ok, error = False, f"Doorverwezen naar {moved} (loginpagina?)"
+        if ok and need_body and method != "HEAD":
+            error = _content_error(check, data)
             ok = error is None
-        return Outcome(ok, round(ms, 1), r.status_code, error, cert)
+        return Outcome(ok, round(ms, 1), r.status_code, error, cert, moved)
     except httpx.TimeoutException:
         return Outcome(False, error="Time-out")
     except httpx.HTTPError as e:
@@ -130,6 +172,14 @@ async def check_http(target: str, check: dict, client: httpx.AsyncClient | None 
     finally:
         if own:
             await client.aclose()
+
+
+def _seconds(value, default: float) -> float:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    return min(max(v, 1.0), 60.0)
 
 
 async def check_dns(target: str, check: dict) -> Outcome:
@@ -143,8 +193,11 @@ async def check_dns(target: str, check: dict) -> Outcome:
             resolver.nameservers = [str(ipaddress.ip_address(str(check["dns_server"]).strip()))]
         except ValueError:
             return Outcome(False, error="DNS-server moet een IP-adres zijn")
-    resolver.lifetime = 5
-    resolver.port = int(check.get("dns_port") or 53)
+    resolver.lifetime = _seconds(check.get("timeout"), 5)
+    try:
+        resolver.port = int(check.get("dns_port") or 53)
+    except (TypeError, ValueError):
+        return Outcome(False, error="DNS-poort klopt niet")
     start = time.perf_counter()
     try:
         answer = await resolver.resolve(name, "AAAA" if check.get("record") == "AAAA" else "A")
@@ -162,13 +215,13 @@ async def check_dns(target: str, check: dict) -> Outcome:
     return Outcome(True, ms)
 
 
-async def check_tcp(target: str) -> Outcome:
+async def check_tcp(target: str, timeout: float = 5) -> Outcome:
     host, _, port = target.rpartition(":")
     if not host or not port.isdigit():
         return Outcome(False, error="Doel moet host:poort zijn")
     start = time.perf_counter()
     try:
-        _, writer = await asyncio.wait_for(asyncio.open_connection(host.strip("[]"), int(port)), timeout=5)
+        _, writer = await asyncio.wait_for(asyncio.open_connection(host.strip("[]"), int(port)), timeout=timeout)
         ms = (time.perf_counter() - start) * 1000
         writer.close()
         return Outcome(True, round(ms, 1))
@@ -236,24 +289,54 @@ class HttpClients:
         self._clients.clear()
 
 
+# Deze soorten draaien niet hier: push wacht op een signaal (monitoring/push.py), container en api hebben de
+# database nodig voor de Portainer-tegel of de sleutels (monitoring/integrationchecks.py, via de worker).
+NOT_HERE = ("push", "container", "api")
+
+
 async def run_check(check: dict, url: str | None, clients: HttpClients | None = None) -> Outcome:
     try:
-        async with asyncio.timeout(CHECK_TIMEOUT):
+        async with asyncio.timeout(max(CHECK_TIMEOUT, _seconds(check.get("timeout"), 0) + 5)):
             return await _run_check(check, url, clients)
+    except TimeoutError:
+        return Outcome(False, error="Time-out")
+    except Exception as e:  # noqa: BLE001 - een fout in een check is een mislukte check, geen bevroren tegel
+        return Outcome(False, error=f"Interne fout in de check: {type(e).__name__}")
+
+
+async def check_service(maker, sid: int, check: dict, url: str | None, clients: HttpClients) -> Outcome:
+    """Eender welke check van tegel sid, ook de containercheck en de API van de tegel (die hebben de database nodig
+    voor de sleutels). Een push-check heeft niets om na te kijken: die wacht op signalen."""
+    if check.get("type") not in NOT_HERE:
+        return await run_check(check, url, clients)
+    if check.get("type") == "push":
+        return Outcome(False, error="Een push-check wacht op signalen")
+    from ..models import Service
+    from . import integrationchecks
+    try:
+        async with asyncio.timeout(CHECK_TIMEOUT + 35), maker() as db:
+            if check.get("type") == "container":
+                return await integrationchecks.check_container(db, check, clients)
+            service = await db.get(Service, sid)
+            if service is None:
+                return Outcome(False, error="Tegel bestaat niet meer")
+            return await integrationchecks.check_api(db, service, check, clients)
     except TimeoutError:
         return Outcome(False, error="Time-out")
 
 
 async def _run_check(check: dict, url: str | None, clients: HttpClients | None = None) -> Outcome:
+    kind = check.get("type")
+    if kind in NOT_HERE:
+        return Outcome(False, error=f"Check {kind} loopt via de worker")
     target = target_for(check, url)
     if not target:
         return Outcome(False, error="Geen doel ingesteld")
-    kind = check.get("type")
     if kind == "http":
         client = clients.get(bool(check.get("insecure"))) if clients else None
         return await check_http(target, check, client)
     if kind == "tcp":
-        return await check_tcp(target)
+        return await check_tcp(target, _seconds(check.get("timeout"), 5))
     if kind == "ping":
         return await check_ping(target)
     if kind == "dns":

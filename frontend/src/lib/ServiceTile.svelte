@@ -33,10 +33,18 @@
     return d
   })
   let maint = $derived(!!status?.maintenance_until)
-  let health = $derived(maint ? 'maint' : status?.status || (service.check?.type ? 'unknown' : null))
+  let paused = $derived(!!(status?.paused || service.check?.paused) && !!service.check?.type)
+  // Twijfel: de laatste check mislukte, maar nog niet genoeg op rij om down te zijn.
+  let doubt = $derived(status?.status === 'up' && status?.fail_count > 0)
+  let health = $derived(maint ? 'maint' : paused ? 'paused' : status?.stale ? 'stale' : doubt ? 'doubt'
+    : status?.status || (service.check?.type ? 'unknown' : null))
+  let uptime = $derived(status?.uptime_24h == null ? null : status.uptime_24h * 100)
+  const pct = (v) => (v >= 99.95 ? '100' : v.toFixed(v >= 99 ? 2 : 1)) + '%'
+
   let certDays = $derived(status?.cert_expires_at ? Math.floor((new Date(status.cert_expires_at) - Date.now()) / 86400000) : null)
   const until = (ts) => new Date(ts).toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' })
-  const stateLabel = { up: 'bereikbaar', down: 'down', unknown: 'nog geen check', maint: 'onderhoud' }
+  const stateLabel = { up: 'bereikbaar', down: 'down', unknown: 'nog geen check', maint: 'onderhoud', paused: 'check gepauzeerd',
+    stale: 'check loopt niet meer', doubt: 'twijfel' }
   let ms = $derived(status?.latency_ms == null ? '' : status.latency_ms < 10 ? status.latency_ms.toFixed(1) : Math.round(status.latency_ms))
 
   // Zabbix: rood als een host van deze service (of de node waarop ze draait) onbereikbaar is of een ernstig probleem heeft.
@@ -65,11 +73,15 @@
   class:up={health === 'up'}
   class:down={health === 'down'}
   class:maint
+  class:doubt={health === 'doubt'}
+  class:paused={health === 'paused' || health === 'stale'}
   href={service.url || undefined}
   target="_blank"
   rel="noopener noreferrer"
   draggable={editing}
-  title={[service.description || host || service.name, health && stateLabel[health], status?.last_error].filter(Boolean).join(' · ')}
+  title={[service.description || host || service.name, health && stateLabel[health], status?.last_error,
+          uptime != null && `uptime 24 u ${pct(uptime)}`, status?.redirected_to && `verwijst door naar ${status.redirected_to}`]
+    .filter(Boolean).join(' · ')}
   onclick={click}
   {...events}
 >
@@ -87,7 +99,11 @@
     <span class="desc">
       {#if maint}<span class="mt">onderhoud tot {until(status.maintenance_until)}</span>
       {:else if health === 'down'}<span class="downtxt">down</span>{#if status?.cause}<span class="cause">via {status.cause}</span>{/if}
+      {:else if health === 'paused'}<span class="ps">gepauzeerd</span>
+      {:else if health === 'stale'}<span class="ps">check loopt niet</span>
+      {:else if health === 'doubt'}<span class="dt" title={status.last_error}>twijfel ({status.fail_count}/{status.down_after || 3})</span>
       {:else if ms !== ''}<span class="ms">{ms} ms</span>{/if}
+      {#if uptime != null && uptime < 99.9 && (health === 'up' || health === 'doubt')}<span class="ut" class:bad={uptime < 99}>{pct(uptime)}</span>{/if}
       {#if zbx}<span class="zb" class:bad={zbx.level === 'err'} title={zbxTitle}><i></i>zbx</span>{/if}
       {#if updates?.count}<span class="upd" class:sec={updates.security} title="{updates.count} updates open{updates.security ? `, ${updates.security} beveiliging` : ''}">↑{updates.count}</span>{/if}
       {#if certDays !== null && certDays <= 21}<span class="cert" class:bad={certDays <= 3}>cert {certDays} d</span>{/if}
@@ -146,6 +162,12 @@
   .tile.down { border-left-color: var(--err); background: rgba(229, 139, 139, .08) }
   .ms { color: var(--text); margin-right: 4px }
   .tile.maint { border-left-color: var(--mid); opacity: .7 }
+  .tile.doubt { border-left-color: var(--mid) }
+  .tile.paused { border-left-color: #666; opacity: .65 }
+  .dt { color: var(--mid); margin-right: 4px }
+  .ps { color: var(--dim); margin-right: 4px }
+  .ut { color: var(--mid); margin-right: 4px }
+  .ut.bad { color: var(--err) }
   .mt { color: var(--mid); margin-right: 4px }
   .cause { color: var(--muted); margin-right: 4px }
   .cert { color: var(--mid); margin-right: 4px }

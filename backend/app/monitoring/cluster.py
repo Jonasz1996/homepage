@@ -161,17 +161,24 @@ async def run_cluster(db: AsyncSession, http: HttpClients) -> dict:
         for key, (level, text) in problems(c).items():
             now_bad[f"{scope}|{key}"] = {"level": level, "text": text, "service_id": c["service_id"],
                                          "name": c.get("cluster") or c.get("service")}
+    # Kon een tegel zijn cluster niet lezen (time-out, de node achter de tegel is weg), dan is niet bekend of wat hij
+    # vorige keer meldde opgelost is: het blijft staan. Anders volgt een vals "node is terug", en daarna weer "weg".
+    failed = {c["service_id"] for c in items if c.get("error")}
+    for k, v in alerts.items():
+        if v.get("service_id") in failed and k.split("|", 1)[0] not in seen:
+            now_bad.setdefault(k, v)
     for k, v in now_bad.items():
         old = alerts.get(k)
         if v["level"] == "info":
             continue
         if not old or old["level"] == "info" or (old["level"] == "warn" and v["level"] == "err"):
-            notify(db, v["text"], None, level=v["level"], source="cluster", service_id=v["service_id"])
+            notify(db, v["text"], None, level=v["level"], source="cluster", service_id=v["service_id"],
+                   key=f"cluster|{k}")
     for k, v in alerts.items():
         if k not in now_bad and v["level"] != "info":
             kind, _, key = k.split("|", 1)[1].partition(":")
             notify(db, OK_TEXT[kind].format(name=v["name"], key=key), None, level="ok", source="cluster",
-                   service_id=v.get("service_id"))
+                   service_id=v.get("service_id"), key=f"cluster|{k}", recovers=v["level"])
     value = {"at": now.isoformat(), "items": items, "alerts": now_bad}
     if st:
         st.value = value

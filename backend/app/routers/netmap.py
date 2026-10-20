@@ -86,7 +86,8 @@ async def netmap(user: User = Depends(current_user), db: AsyncSession = Depends(
 
     def status(sid: int | None) -> str:
         st = states.get(sid)
-        return st.status if st else "unknown"
+        # Een check die niets meer meldt, is niet "up": grijs, zoals op de tegel.
+        return "unknown" if st is None or st.stale else st.status
 
     # Nodes en gasten uit alle Proxmox-tegels (meerdere tegels naar dezelfde cluster: één keer).
     nodes: dict[str, dict] = {}

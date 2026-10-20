@@ -3,6 +3,25 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 29,
+    datum: '2026-10-05',
+    titel: 'Het dashboard vervangt Uptime Kuma',
+    items: [
+      'Nieuwe checks: push (een script of cronjob meldt zich op een eigen adres, zoals in Kuma), Docker-container via Portainer, en de API van de tegel met zijn eigen sleutels.',
+      'Per check: down na 1 tot 10 fouten, sneller opnieuw kijken bij twijfel, herinneringen zolang hij down is, melden op je gsm, alleen hier of niet, en pauzeren.',
+      'HTTP-checks: statuscodes, methode, body, headers, time-out, doorverwijzingen. De tegel ziet het als een check op de loginpagina van Authentik belandt.',
+      'Meldingen op je gsm met web push, zonder app of dienst ertussen.',
+      'Het dashboard bewaakt zichzelf: worker en API houden elkaar in het oog, vastgelopen checks worden grijs, en /api/healthz is er voor Zabbix.',
+      'Uptime over 24 u, 7 d, 30 d en 1 jaar in het mini dashboard.',
+    ],
+    instellen: [
+      'Zet de meldingen op je gsm aan: 🔔 → gsm.',
+      'Zet in Zabbix een web-scenario op http://<IP van de container>/api/healthz (README → Uptime Kuma vervangen).',
+      'Maak je push-monitors hier opnieuw en pas host en token aan in je scripts.',
+      'Kijk ! → instellingen → Checks op je tegels na, en zet Kuma pas daarna uit.',
+    ],
+  },
+  {
     nr: 28,
     datum: '2026-10-05',
     titel: 'Een node \'s nachts uit',

@@ -5,7 +5,7 @@
 
   // Eigen meldingencentrum: een klein teller-icoon in de titelbalk, uitklapbaar paneel.
   // Klik op een melding: het weekrapport, de updates of de service openen (onopen).
-  let { onopen, onwebhooks } = $props()
+  let { onopen, onwebhooks, onwebpush } = $props()
   let open = $state(false)
   let data = $state({ unread: 0, items: [] })
 
@@ -65,6 +65,7 @@
       <div class="head">
         <span>meldingen</span>
         {#if onwebhooks}<button class="mini" onclick={() => { open = false; onwebhooks() }} title="Meldingen van Proxmox, PBS, Uptime Kuma, ... ontvangen">webhooks</button>{/if}
+        {#if onwebpush}<button class="mini" onclick={() => { open = false; onwebpush() }} title="Meldingen op je gsm, ook als het dashboard dicht is (web push)">gsm</button>{/if}
         <button class="mini" onclick={readAll}>alles gelezen</button>
         <button class="mini x" onclick={clearRead}>wis gelezen</button>
       </div>

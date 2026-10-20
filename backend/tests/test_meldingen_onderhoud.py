@@ -120,9 +120,12 @@ class Cluster:
         self.quorate = 1
         self.ha = "started"
         self.fail = 0
+        self.broken = False
 
     def __call__(self, req: httpx.Request) -> httpx.Response:
         p = req.url.path
+        if p == "/api2/json/cluster/status" and self.broken:
+            return httpx.Response(500, json={"data": None})
         if p == "/api2/json/cluster/status":
             return httpx.Response(200, json={"data": [
                 {"type": "cluster", "name": "thuis", "quorate": self.quorate, "nodes": 2},
@@ -167,3 +170,29 @@ async def test_cluster_status_alerts(authed):
     got = [(t, lvl) for t, lvl, _ in await _notes(db, "cluster")]
     assert len(got) == 8 and ("Cluster thuis heeft weer quorum", "ok") in got
     assert (await authed.get("/api/cluster")).json()["summary"]["err"] == 0
+
+
+async def test_cluster_onleesbaar_is_geen_herstel(authed):
+    """Even geen antwoord van de cluster: "node is weg" blijft staan, geen vals "terug" en daarna weer "weg"."""
+    world = Cluster()
+    http = HttpClients(httpx.MockTransport(world))
+    g = await _group(authed)
+    await _svc(authed, g, "proxmox", "https://192.168.0.50:8006", secrets={"username": "a@pve!b", "password": "c"},
+               name="pve50")
+    agen, db = await _db()
+    await cluster.run_cluster(db, http)
+    world.quorate = 0
+    await cluster.run_cluster(db, http)
+    world.broken = True
+    v = await cluster.run_cluster(db, http)
+    assert "thuis|node:pve51" in v["alerts"]
+    world.broken = False
+    await cluster.run_cluster(db, http)
+    world.quorate = 1
+    await cluster.run_cluster(db, http)
+    await db.commit()
+    got = [t for t, _, _ in await _notes(db, "cluster")]
+    assert got.count("Node pve51 is weg uit cluster thuis") == 1
+    assert got.count("Node pve51 is terug in cluster thuis") == 1
+    assert got[-1] == "Node pve51 is terug in cluster thuis"
+    await agen.aclose()

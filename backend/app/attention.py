@@ -15,11 +15,12 @@ from .integrations import REGISTRY
 from .integrations.zabbix import RED_FROM
 from .models import AppState, CronJob, Device, MaintenanceWindow, Service, ServiceState, UpdateRun
 from .monitoring import cluster, coverage, planned, restoretest, updates as upd, zabbix as zbx
+from .monitoring.engine import MASS_KEY, active
 
 ACK_KEY = "attention_ack"
 RANK = {"err": 0, "warn": 1, "info": 2}
 # Bij gelijke ernst: wat het meeste stuk kan maken eerst.
-AREAS = ("services", "back-ups", "cluster", "hardware", "opslag", "netwerk", "homepage", "zabbix", "cron", "updates",
+AREAS = ("services", "checks", "back-ups", "cluster", "hardware", "opslag", "netwerk", "homepage", "zabbix", "cron", "updates",
          "certificaten", "domeinen", "integraties", "beveiliging", "apparaten", "snapshots", "onderhoud")
 CERT_DAYS = 14
 MAX_PER_AREA = 8
@@ -59,21 +60,23 @@ async def _state(db: AsyncSession, key: str) -> dict:
     return dict(st.value or {}) if st else {}
 
 
-def _cap(items: list[dict], area: str, title: str, fix: dict | None) -> list[dict]:
+def _cap(items: list[dict], area: str, title: str, fix: dict | None, key: str | None = None) -> list[dict]:
     """Heel veel punten van één soort: de eerste tonen en de rest samenvatten."""
     if len(items) <= MAX_PER_AREA:
         return items
     rest = items[MAX_PER_AREA - 1:]
     level = min((i["level"] for i in rest), key=RANK.__getitem__)
     names = ", ".join(i["title"] for i in rest[:4]) + (" …" if len(rest) > 4 else "")
-    return items[:MAX_PER_AREA - 1] + [item(f"{area}:meer", level, area, title.format(n=len(rest)), names, fix,
+    return items[:MAX_PER_AREA - 1] + [item(f"{key or area}:meer", level, area, title.format(n=len(rest)), names, fix,
                                             sig=len(rest))]
 
 
 async def services(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
-    """Services die down zijn (niet in onderhoud), gegroepeerd onder de verste ouder die ook down is."""
+    """Services die down zijn (niet in onderhoud), gegroepeerd onder de verste ouder die ook down is. Ook checks die
+    niet meer lopen, en (ter info) gepauzeerde checks, zodat je die niet vergeet."""
     svcs = {s.id: s for s in (await db.execute(select(Service))).scalars()}
-    states = {s.service_id: s for s in (await db.execute(select(ServiceState))).scalars() if s.service_id in svcs}
+    states = {s.service_id: s for s in (await db.execute(select(ServiceState))).scalars()
+              if s.service_id in svcs and active(svcs[s.service_id].check)}
     ctx["names"] = {i: s.name for i, s in svcs.items()}
     ctx["integrated"] = {i for i, s in svcs.items() if s.type in REGISTRY or s.api_id}
 
@@ -110,10 +113,22 @@ async def services(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
             text += f". Ook down: {', '.join(kids[:5])}" + (f" en {len(kids) - 5} meer" if len(kids) > 5 else "")
         out.append(item(f"down:{sid}", "err", "services", f"{svcs[sid].name} is down", text,
                         {"window": "detail", "service_id": sid}, sig=f"down:{since.isoformat()}", since=since))
+    stale = [item(f"stale:{sid}", "warn", "checks", f"De check van {svcs[sid].name} loopt niet meer",
+                  "Er kwam geen resultaat meer binnen; de tegel staat op grijs. Kijk in hw naar de worker of op de "
+                  "container: journalctl -u homepage-worker -n 50", {"window": "detail", "service_id": sid},
+                  sig=f"stale:{_aware(st.last_check).isoformat() if st.last_check else ''}",
+                  since=_aware(st.last_check))
+             for sid, st in sorted(states.items(), key=lambda x: svcs[x[0]].name.lower())
+             if st.stale and not maint(sid)]
+    paused = [item(f"paused:{i}", "info", "checks", f"Check van {s.name} staat gepauzeerd",
+                   "Zolang hij gepauzeerd is, merkt het dashboard niet als dit uitvalt.",
+                   {"window": "detail", "service_id": i})
+              for i, s in sorted(svcs.items(), key=lambda x: x[1].name.lower())
+              if (s.check or {}).get("type") and (s.check or {}).get("paused")]
     certs = []
     for sid, st in states.items():
         exp = _aware(st.cert_expires_at)
-        if not exp or maint(sid) or sid in down:
+        if not exp or maint(sid) or sid in down or svcs[sid].check.get("cert_notify") is False:
             continue
         days = (exp - now).total_seconds() / 86400
         if days > CERT_DAYS:
@@ -124,7 +139,9 @@ async def services(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
                           f"Geldig tot {exp.astimezone().strftime('%d/%m/%Y %H:%M')}. NPM vernieuwt normaal 30 dagen op "
                           "voorhand: kijk in NPM waarom dat niet lukte.", {"window": "detail", "service_id": sid},
                           sig=level))
-    return _cap(out, "services", "Nog {n} services down", None) + certs
+    return (_cap(out, "services", "Nog {n} services down", None)
+            + _cap(stale, "checks", "Nog {n} checks lopen niet", None, key="stale")
+            + _cap(paused, "checks", "Nog {n} checks gepauzeerd", None, key="paused") + certs)
 
 
 async def cron_jobs(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
@@ -288,6 +305,14 @@ async def homepage(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
         out.append(item("worker", "err", "homepage", "De worker van het dashboard draait niet",
                         f"Zonder worker geen checks, meldingen of back-ups: {worker['why']}. "
                         "In de container: systemctl status homepage-worker.", fix))
+    mass = await _state(db, MASS_KEY)
+    if mass.get("since"):
+        since = _aware(datetime.fromisoformat(mass["since"]))
+        out.append(item("massastoring", "err", "homepage", "Het dashboard bereikt bijna niets",
+                        f"Begon met {mass.get('failing')} van de {mass.get('total')} checks tegelijk mislukt, "
+                        f"{ago(now - since)} geleden. Zolang dit duurt, komt er geen melding per service. Het stopt "
+                        "vanzelf als minder dan 30% van de checks nog faalt.", {"window": "health", "tab": "homepage"},
+                        sig=mass["since"], since=since))
     s = await _state(db, sc.STATE_KEY)
     if s.get("stale"):
         out.append(item("selfbackup", "err", "homepage", "Geen recente back-up van het dashboard",

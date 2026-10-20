@@ -69,12 +69,14 @@ async def watch_gateways(db: AsyncSession, clients: HttpClients) -> None:
             g = next(x for x in gws if x["name"] == name)
             if new == "ok":
                 notify(db, f"{name} is weer online", f"Latency {g['delay_ms'] or 0:.0f} ms.", level="ok",
-                       source="netwerk", service_id=svc.id)
+                       source="netwerk", service_id=svc.id, key=f"gw{svc.id}:{name}",
+                       recovers=old if old in ("err", "warn") else "warn")
             else:
                 detail = f"{g['label']}" + (f", {g['loss_pct']:.0f}% verlies" if g["loss_pct"] else "") \
                     + (f", {g['delay_ms']:.0f} ms" if g["delay_ms"] else "")
                 notify(db, f"{name}: {'down' if new == 'err' else 'problemen'}", f"{detail} ({svc.name}).",
-                       level=new if new in ("err", "warn") else "warn", source="netwerk", service_id=svc.id)
+                       level=new if new in ("err", "warn") else "warn", source="netwerk", service_id=svc.id,
+                       key=f"gw{svc.id}:{name}")
         st.value = {"track": track, "items": gws, "checked_at": _now(), "error": None}
 
 
@@ -89,10 +91,12 @@ async def watch_tunnels(db: AsyncSession, clients: HttpClients) -> None:
         track, changes = debounce(st.value.get("track", {}), {t["name"]: t["status"] for t in tunnels})
         for name, old, new in changes:
             if new == "healthy":
-                notify(db, f"Tunnel {name} is weer gezond", None, level="ok", source="netwerk", service_id=svc.id)
+                notify(db, f"Tunnel {name} is weer gezond", None, level="ok", source="netwerk", service_id=svc.id,
+                       key=f"tun{svc.id}:{name}", recovers="err" if old in ("down", "inactive") else "warn")
             else:
                 notify(db, f"Tunnel {name}: {new}", f"Was {old}. Van buitenaf is het dashboard misschien niet bereikbaar.",
-                       level="err" if new in ("down", "inactive") else "warn", source="netwerk", service_id=svc.id)
+                       level="err" if new in ("down", "inactive") else "warn", source="netwerk", service_id=svc.id,
+                       key=f"tun{svc.id}:{name}")
         st.value = {"track": track, "items": tunnels, "checked_at": _now(), "error": None}
 
 

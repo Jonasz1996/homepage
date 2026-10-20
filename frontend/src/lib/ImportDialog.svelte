@@ -59,7 +59,9 @@
       {/if}
     </div>
     <p class="err">{error}</p>
-    {#if result}<p class="ok">Geïmporteerd: {result.groups} groepen, {result.services} services.</p>{/if}
+    {#if result}<p class="ok">Geïmporteerd: {result.groups} groepen, {result.services} services.</p>
+      {#if result.checks_skipped?.length}<p class="hint">{result.checks_skipped.length} checks overgeslagen (ongeldig): {result.checks_skipped.slice(0, 8).join(', ')}{result.checks_skipped.length > 8 ? ' …' : ''}. Zet ze opnieuw via bewerken.</p>{/if}
+    {/if}
     <div class="row">
       <button class="btn" disabled={busy || !text.trim()}>Importeren</button>
       <button type="button" class="btn alt" onclick={onclose}>Sluiten</button>
