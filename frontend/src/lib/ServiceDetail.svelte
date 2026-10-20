@@ -6,7 +6,11 @@
   import Modal from './Modal.svelte'
 
   // Mini dashboard van één service: gegevens van de integratie en de monitoring-historiek.
-  let { service, groups = [], onclose, onedit, onchanged } = $props()
+  let { service, groups = [], onclose, onedit, onchanged, onterminal } = $props()
+
+  // SSH-hosts die aan deze service gekoppeld zijn: knop om meteen een terminal te openen.
+  let sshHosts = $state([])
+  api('/ssh/hosts').then((hs) => (sshHosts = hs.filter((h) => h.service_id === service.id))).catch(() => {})
 
   const RANGES = ['1h', '24h', '7d', '30d', '1y']
   let range = $state('24h')
@@ -53,7 +57,12 @@
       <h3>{service.name}</h3>
       {#if service.url}<a class="url" href={service.url} target="_blank" rel="noopener noreferrer">{service.url}</a>{/if}
     </div>
-    <button class="mini" onclick={() => onedit(service)}>✎ bewerken</button>
+    <div class="row">
+      {#each sshHosts as h (h.id)}
+        <button class="mini" onclick={() => onterminal?.(h.id)} title="{h.username}@{h.host}">&gt;_ {h.name}</button>
+      {/each}
+      <button class="mini" onclick={() => onedit(service)}>✎ bewerken</button>
+    </div>
   </div>
 
   {#if service.type && service.type !== 'link'}

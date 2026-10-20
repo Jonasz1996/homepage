@@ -5,6 +5,7 @@
   import ImportDialog from './ImportDialog.svelte'
   import NameForm from './NameForm.svelte'
   import Notifications from './Notifications.svelte'
+  import ReauthDialog from './ReauthDialog.svelte'
   import Revisions from './Revisions.svelte'
   import ServiceForm from './ServiceForm.svelte'
   import ServiceDetail from './ServiceDetail.svelte'
@@ -23,6 +24,14 @@
   let searchEl = $state()
   let status = $state({})
   let widgets = $state({})
+  let termOpen = $state(false)
+  let termUsed = $state(false)
+  let termRequest = $state(null)
+  function openTerminal(hostId = null) {
+    termUsed = true
+    termOpen = true
+    if (hostId) termRequest = { hostId }
+  }
 
   // Slepen: wat er gesleept wordt en waar het zou landen.
   let drag = $state(null) // { kind: 'service' | 'group' | 'page', id }
@@ -32,6 +41,7 @@
   let groupOptions = $derived(
     layout.pages.flatMap((p) => p.groups.map((g) => ({ id: g.id, label: `${p.name} / ${g.name}` })))
   )
+  let allServices = $derived(layout.pages.flatMap((p) => p.groups.flatMap((g) => g.services)))
   let results = $derived.by(() => {
     const q = query.trim().toLowerCase()
     if (!q) return []
@@ -239,6 +249,7 @@
   <Card title="homepage" glow>
     {#snippet right()}
       <span class="clock">{clock}</span>
+      <button class="mini" onclick={() => openTerminal()} title="SSH-terminal">&gt;_</button>
       <Notifications />
       <button class="mini" class:on={editing} onclick={() => (editing = !editing)}>{editing ? '✓ klaar' : '✎ bewerken'}</button>
       <button class="mini x" onclick={logout} title="Uitloggen">⏻</button>
@@ -408,6 +419,7 @@
     service={modal.service}
     groups={groupOptions}
     onchanged={load}
+    onterminal={(hostId) => { modal = null; openTerminal(hostId) }}
     onclose={() => (modal = null)}
     onedit={(svc) => (modal = { kind: 'service', service: svc })}
   />
@@ -416,6 +428,14 @@
 {:else if modal?.kind === 'revisions'}
   <Revisions onclose={() => (modal = null)} ondone={load} />
 {/if}
+
+{#if termUsed}
+  <!-- xterm.js is groot: pas laden als je de terminal voor het eerst opent. -->
+  {#await import('./Terminal.svelte') then { default: Terminal }}
+    <Terminal open={termOpen} request={termRequest} services={allServices} onclose={() => (termOpen = false)} />
+  {/await}
+{/if}
+<ReauthDialog />
 
 <style>
   .wrap { max-width: 1240px; margin: 0 auto; padding: min(4vh, 32px) 14px 50px }

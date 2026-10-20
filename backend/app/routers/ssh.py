@@ -1,0 +1,316 @@
+"""SSH-terminal in de browser: sleutels, hosts en een WebSocket die een shell doorgeeft.
+
+Een shell openen is het gevoeligste wat het dashboard kan, dus de WebSocket eist een
+volledige sessie, een recente 2FA-bevestiging en een Origin van onze eigen site.
+"""
+
+import asyncio
+import contextlib
+import json
+import logging
+import time
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
+
+import asyncssh
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect, status
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..config import get_settings
+from ..db import get_db
+from ..deps import COOKIE, audit, current_user, recent_auth
+from ..models import AuditLog, Service, Session, SshHost, SshKey, User
+from ..security import decrypt, encrypt, token_id
+
+router = APIRouter(prefix="/api/ssh", tags=["ssh"])
+log = logging.getLogger("homepage.ssh")
+
+IDLE_SECONDS = 30 * 60
+CONNECT_TIMEOUT = 10
+
+
+# --- Sleutels ---------------------------------------------------------------
+
+class KeyIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    # Leeg = nieuw ed25519-sleutelpaar maken.
+    private_key: str | None = Field(default=None, max_length=20000)
+    passphrase: str | None = Field(default=None, max_length=256)
+
+
+def _key_out(k: SshKey) -> dict:
+    pub = asyncssh.import_public_key(k.public_key)
+    return {"id": k.id, "name": k.name, "public_key": k.public_key,
+            "fingerprint": pub.get_fingerprint("sha256"), "created_at": k.created_at}
+
+
+@router.get("/keys")
+async def list_keys(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    return [_key_out(k) for k in (await db.execute(select(SshKey).order_by(SshKey.id))).scalars()]
+
+
+@router.post("/keys", status_code=201)
+async def create_key(data: KeyIn, request: Request, user: User = Depends(recent_auth),
+                     db: AsyncSession = Depends(get_db)):
+    try:
+        if data.private_key and data.private_key.strip():
+            key = asyncssh.import_private_key(data.private_key.strip(), data.passphrase or None)
+        else:
+            key = asyncssh.generate_private_key("ssh-ed25519", comment=f"homepage-{data.name}")
+    except (asyncssh.KeyImportError, ValueError) as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Sleutel niet leesbaar: {e}") from e
+    key.set_comment(f"homepage-{data.name}")
+    k = SshKey(name=data.name, public_key=key.export_public_key().decode().strip(),
+               private_key=encrypt(key.export_private_key().decode()))
+    db.add(k)
+    await audit(db, request, user, "ssh_key_added", name=data.name, imported=bool(data.private_key))
+    await db.commit()
+    return _key_out(k)
+
+
+@router.delete("/keys/{key_id}")
+async def delete_key(key_id: int, request: Request, user: User = Depends(recent_auth),
+                     db: AsyncSession = Depends(get_db)):
+    k = await db.get(SshKey, key_id)
+    if k is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sleutel niet gevonden")
+    await db.delete(k)
+    await audit(db, request, user, "ssh_key_deleted", name=k.name)
+    await db.commit()
+    return {"ok": True}
+
+
+# --- Hosts ------------------------------------------------------------------
+
+class HostIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    host: str = Field(min_length=1, max_length=255)
+    port: int = Field(default=22, ge=1, le=65535)
+    username: str = Field(default="root", min_length=1, max_length=64)
+    key_id: int | None = None
+    # None = ongewijzigd, "" = wissen.
+    password: str | None = Field(default=None, max_length=256)
+    service_id: int | None = None
+
+    @field_validator("host")
+    @classmethod
+    def _host(cls, v: str) -> str:
+        v = v.strip()
+        if v.startswith("-") or any(c.isspace() for c in v):
+            raise ValueError("Ongeldige host")
+        return v
+
+
+def _host_out(h: SshHost) -> dict:
+    fp = None
+    if h.host_key:
+        with contextlib.suppress(Exception):
+            fp = asyncssh.import_public_key(h.host_key).get_fingerprint("sha256")
+    return {"id": h.id, "name": h.name, "host": h.host, "port": h.port, "username": h.username,
+            "key_id": h.key_id, "has_password": bool(h.password), "host_key_fingerprint": fp,
+            "service_id": h.service_id, "last_used_at": h.last_used_at}
+
+
+async def _get_host(db: AsyncSession, host_id: int) -> SshHost:
+    h = await db.get(SshHost, host_id)
+    if h is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Host niet gevonden")
+    return h
+
+
+async def _check_refs(db: AsyncSession, data: HostIn) -> None:
+    if data.key_id is not None and await db.get(SshKey, data.key_id) is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Sleutel bestaat niet")
+    if data.service_id is not None and await db.get(Service, data.service_id) is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Service bestaat niet")
+
+
+@router.get("/hosts")
+async def list_hosts(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    hosts = (await db.execute(select(SshHost).order_by(SshHost.position, SshHost.id))).scalars()
+    return [_host_out(h) for h in hosts]
+
+
+@router.post("/hosts", status_code=201)
+async def create_host(data: HostIn, request: Request, user: User = Depends(current_user),
+                      db: AsyncSession = Depends(get_db)):
+    await _check_refs(db, data)
+    pos = (await db.execute(select(func.coalesce(func.max(SshHost.position), -1)))).scalar_one() + 1
+    h = SshHost(**data.model_dump(exclude={"password"}), position=pos,
+                password=encrypt(data.password) if data.password else None)
+    db.add(h)
+    await audit(db, request, user, "ssh_host_added", name=h.name, host=h.host)
+    await db.commit()
+    return _host_out(h)
+
+
+@router.patch("/hosts/{host_id}")
+async def update_host(host_id: int, data: HostIn, request: Request, user: User = Depends(current_user),
+                      db: AsyncSession = Depends(get_db)):
+    h = await _get_host(db, host_id)
+    await _check_refs(db, data)
+    if (data.host, data.port) != (h.host, h.port):
+        h.host_key = None  # andere machine: hostsleutel opnieuw laten bevestigen
+    for k, v in data.model_dump(exclude={"password"}).items():
+        setattr(h, k, v)
+    if data.password is not None:
+        h.password = encrypt(data.password) if data.password else None
+    await audit(db, request, user, "ssh_host_changed", name=h.name)
+    await db.commit()
+    return _host_out(h)
+
+
+@router.delete("/hosts/{host_id}")
+async def delete_host(host_id: int, request: Request, user: User = Depends(current_user),
+                      db: AsyncSession = Depends(get_db)):
+    h = await _get_host(db, host_id)
+    await db.delete(h)
+    await audit(db, request, user, "ssh_host_deleted", name=h.name)
+    await db.commit()
+    return {"ok": True}
+
+
+@router.post("/hosts/{host_id}/forget-hostkey")
+async def forget_hostkey(host_id: int, request: Request, user: User = Depends(recent_auth),
+                         db: AsyncSession = Depends(get_db)):
+    h = await _get_host(db, host_id)
+    h.host_key = None
+    await audit(db, request, user, "ssh_hostkey_forgotten", name=h.name)
+    await db.commit()
+    return {"ok": True}
+
+
+@router.get("/ready")
+async def ready(user: User = Depends(recent_auth)):
+    """De frontend vraagt dit vóór het openen van een terminal; 403 = eerst 2FA bevestigen."""
+    return {"ok": True}
+
+
+# --- WebSocket ----------------------------------------------------------------
+
+async def _ws_user(ws: WebSocket, db: AsyncSession) -> tuple[User | None, str]:
+    origin = ws.headers.get("origin")
+    if not origin or urlsplit(origin).netloc != ws.headers.get("host"):
+        return None, "Verkeerde origin"
+    token = ws.cookies.get(COOKIE)
+    sess = await db.get(Session, token_id(token)) if token else None
+    now = datetime.now(timezone.utc)
+    aware = lambda dt: dt.replace(tzinfo=dt.tzinfo or timezone.utc)  # noqa: E731
+    if sess is None or aware(sess.expires_at) < now or not (sess.mfa_ok and sess.user.totp_enabled):
+        return None, "Niet ingelogd"
+    if now - aware(sess.auth_at) > timedelta(minutes=get_settings().reauth_minutes):
+        return None, "reauth_required"
+    return sess.user, ""
+
+
+async def _send(ws: WebSocket, **msg) -> None:
+    await ws.send_text(json.dumps(msg))
+
+
+@router.websocket("/ws/{host_id}")
+async def terminal(ws: WebSocket, host_id: int, cols: int = 100, rows: int = 30,
+                   db: AsyncSession = Depends(get_db)):
+    await ws.accept()
+    user, why = await _ws_user(ws, db)
+    if user is None:
+        await _send(ws, t="error", m=why)
+        await ws.close(4401)
+        return
+    h = await db.get(SshHost, host_id)
+    if h is None:
+        await _send(ws, t="error", m="Host niet gevonden")
+        await ws.close(4404)
+        return
+
+    ip = ws.client.host if ws.client else None
+    try:
+        # Eerste keer: hostsleutel tonen en laten bevestigen (zoals ssh het zelf vraagt).
+        if not h.host_key:
+            await _send(ws, t="status", m=f"Hostsleutel ophalen van {h.host}:{h.port}…")
+            server_key = await asyncio.wait_for(asyncssh.get_server_host_key(h.host, h.port), CONNECT_TIMEOUT)
+            await _send(ws, t="hostkey", fp=server_key.get_fingerprint("sha256"), alg=server_key.get_algorithm())
+            answer = json.loads(await asyncio.wait_for(ws.receive_text(), 120))
+            if answer.get("t") != "accept":
+                await _send(ws, t="error", m="Hostsleutel niet aanvaard")
+                await ws.close()
+                return
+            h.host_key = server_key.export_public_key().decode().strip()
+            db.add(AuditLog(user_id=user.id, action="ssh_hostkey_accepted", ip=ip,
+                            detail={"name": h.name, "fp": server_key.get_fingerprint("sha256")}))
+            await db.commit()
+
+        key = None
+        if h.key_id:
+            k = await db.get(SshKey, h.key_id)
+            key = asyncssh.import_private_key(decrypt(k.private_key)) if k else None
+        password = decrypt(h.password) if h.password else None
+        await _send(ws, t="status", m=f"Verbinden met {h.username}@{h.host}…")
+        conn = await asyncio.wait_for(asyncssh.connect(
+            h.host, port=h.port, username=h.username,
+            known_hosts=([asyncssh.import_public_key(h.host_key)], [], []),
+            client_keys=[key] if key else None, password=password,
+            agent_path=None, config=None, preferred_auth="publickey,password,keyboard-interactive",
+        ), CONNECT_TIMEOUT)
+    except asyncssh.HostKeyNotVerifiable:
+        db.add(AuditLog(user_id=user.id, action="ssh_hostkey_mismatch", ip=ip, detail={"name": h.name}))
+        await db.commit()
+        await _send(ws, t="error", m="De hostsleutel is veranderd! Verbinding geweigerd. Herinstalleerde je de "
+                                     "server, vergeet dan de oude sleutel bij deze host.")
+        await ws.close()
+        return
+    except asyncssh.PermissionDenied:
+        await _send(ws, t="error", m="Aanmelden geweigerd: controleer gebruiker, sleutel of wachtwoord")
+        await ws.close()
+        return
+    except (OSError, asyncio.TimeoutError, asyncssh.Error) as e:
+        await _send(ws, t="error", m=f"Verbinden mislukt: {getattr(e, 'reason', None) or e or type(e).__name__}")
+        await ws.close()
+        return
+    except WebSocketDisconnect:
+        return
+
+    started = time.monotonic()
+    h.last_used_at = datetime.now(timezone.utc)
+    db.add(AuditLog(user_id=user.id, action="ssh_open", ip=ip, detail={"name": h.name, "host": h.host}))
+    await db.commit()
+
+    async with conn:
+        proc = await conn.create_process(term_type="xterm-256color", term_size=(max(10, cols), max(4, rows)),
+                                         encoding=None, stderr=asyncssh.STDOUT)
+        await _send(ws, t="ready")
+
+        async def ssh_to_ws():
+            while True:
+                data = await proc.stdout.read(65536)
+                if not data:
+                    break
+                await ws.send_bytes(data)
+
+        async def ws_to_ssh():
+            while True:
+                msg = await asyncio.wait_for(ws.receive(), IDLE_SECONDS)
+                if msg["type"] == "websocket.disconnect":
+                    break
+                if msg.get("bytes") is not None:
+                    proc.stdin.write(msg["bytes"])
+                elif msg.get("text"):
+                    with contextlib.suppress(ValueError, KeyError, TypeError):
+                        m = json.loads(msg["text"])
+                        if m.get("t") == "r":
+                            proc.change_terminal_size(max(10, int(m["c"])), max(4, int(m["r"])))
+
+        tasks = [asyncio.create_task(ssh_to_ws()), asyncio.create_task(ws_to_ssh())]
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for t in pending:
+            t.cancel()
+        idle = any(isinstance(t.exception(), asyncio.TimeoutError) for t in done if not t.cancelled())
+        proc.close()
+
+    db.add(AuditLog(user_id=user.id, action="ssh_close", ip=ip,
+                    detail={"name": h.name, "seconds": round(time.monotonic() - started)}))
+    await db.commit()
+    with contextlib.suppress(Exception):
+        await _send(ws, t="closed", m="Afgemeld wegens 30 minuten inactiviteit" if idle else "Verbinding gesloten")
+        await ws.close()

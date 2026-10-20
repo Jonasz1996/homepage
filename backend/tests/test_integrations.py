@@ -129,7 +129,7 @@ async def test_action_needs_recent_2fa(authed, fake):
     sid = await _svc(authed, g, "proxmox", "https://pve.jbogaert.be",
                      secrets={"username": "homepage@pve!dash", "password": "geheim"})
     agen = app.dependency_overrides[get_db]()
-    db = await agen.__anext__()
+    db = await agen.__anext__()  # agen blijft in scope tot het einde van de test
     await db.execute(update(Session).values(auth_at=datetime.now(timezone.utc) - timedelta(hours=1)))
     await db.commit()
     body = {"action": "start", "params": {"node": "pve50", "type": "lxc", "vmid": 101}}

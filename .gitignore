@@ -6,3 +6,4 @@ node_modules/
 frontend/dist/
 *.db
 .env
+*.egg-info/
