@@ -88,13 +88,34 @@ async def check_ping(target: str) -> Outcome:
     return Outcome(False, error=(err.decode(errors="replace").strip() or "Geen antwoord")[:300])
 
 
-async def run_check(check: dict, url: str | None) -> Outcome:
+class HttpClients:
+    """Twee gedeelde clients (met en zonder certificaatcontrole), zodat verbindingen hergebruikt worden."""
+
+    def __init__(self) -> None:
+        self._clients: dict[bool, httpx.AsyncClient] = {}
+
+    def get(self, insecure: bool) -> httpx.AsyncClient:
+        if insecure not in self._clients:
+            self._clients[insecure] = httpx.AsyncClient(
+                verify=not insecure, timeout=TIMEOUT, follow_redirects=True,
+                limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+            )
+        return self._clients[insecure]
+
+    async def aclose(self) -> None:
+        for c in self._clients.values():
+            await c.aclose()
+        self._clients.clear()
+
+
+async def run_check(check: dict, url: str | None, clients: HttpClients | None = None) -> Outcome:
     target = target_for(check, url)
     if not target:
         return Outcome(False, error="Geen doel ingesteld")
     kind = check.get("type")
     if kind == "http":
-        return await check_http(target, check)
+        client = clients.get(bool(check.get("insecure"))) if clients else None
+        return await check_http(target, check, client)
     if kind == "tcp":
         return await check_tcp(target)
     if kind == "ping":

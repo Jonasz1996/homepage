@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte'
-  import { api } from './api.js'
+  import { api, poll } from './api.js'
 
   // Eigen meldingencentrum: een klein teller-icoon in de titelbalk, uitklapbaar paneel.
   let open = $state(false)
@@ -29,8 +29,7 @@
 
   onMount(() => {
     load()
-    const t = setInterval(load, 30000)
-    return () => clearInterval(t)
+    return poll(load, 30000)
   })
 </script>
 

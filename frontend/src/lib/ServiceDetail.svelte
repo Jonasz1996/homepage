@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte'
-  import { api } from './api.js'
+  import { api, poll } from './api.js'
   import LatencyChart from './LatencyChart.svelte'
   import Modal from './Modal.svelte'
 
@@ -27,8 +27,7 @@
   })
 
   onMount(() => {
-    const t = setInterval(load, 30000)
-    return () => clearInterval(t)
+    return poll(load, 30000)
   })
 
   const pct = (v) => (v == null ? '—' : `${(Math.floor(v * 1000) / 10).toFixed(1)}%`)

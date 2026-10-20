@@ -26,3 +26,12 @@ export async function api(path, { method = 'GET', body } = {}) {
   }
   return data
 }
+
+// Herhaalt fn elke ms milliseconden, maar niet zolang het tabblad verborgen is.
+// Komt het tabblad terug in beeld, dan meteen een verse lading. Geeft een stopfunctie terug.
+export function poll(fn, ms) {
+  const t = setInterval(() => { if (!document.hidden) fn() }, ms)
+  const vis = () => { if (!document.hidden) fn() }
+  document.addEventListener('visibilitychange', vis)
+  return () => { clearInterval(t); document.removeEventListener('visibilitychange', vis) }
+}

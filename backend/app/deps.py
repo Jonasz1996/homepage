@@ -32,10 +32,18 @@ async def optional_session(request: Request, db: AsyncSession = Depends(get_db))
     sess = await db.get(Session, token_id(token))
     if sess is None:
         return None
-    if sess.expires_at.replace(tzinfo=sess.expires_at.tzinfo or timezone.utc) < datetime.now(timezone.utc):
+    now = datetime.now(timezone.utc)
+    expires = sess.expires_at.replace(tzinfo=sess.expires_at.tzinfo or timezone.utc)
+    if expires < now:
         await db.delete(sess)
         await db.commit()
         return None
+    # Glijdende sessie: wie het dashboard gebruikt, blijft ingelogd.
+    lifetime = timedelta(days=get_settings().session_days)
+    if expires - now < lifetime / 2:
+        sess.expires_at = now + lifetime
+        await db.commit()
+        request.state.renew_cookie = (token, lifetime)
     return sess
 
 

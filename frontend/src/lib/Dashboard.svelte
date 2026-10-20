@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte'
-  import { api } from './api.js'
+  import { api, poll } from './api.js'
   import Card from './Card.svelte'
   import ImportDialog from './ImportDialog.svelte'
   import NameForm from './NameForm.svelte'
@@ -221,9 +221,9 @@
   onMount(() => {
     load()
     loadStatus()
-    const t = setInterval(() => (now = new Date()), 15000)
-    const s = setInterval(loadStatus, 30000)
-    return () => { clearInterval(t); clearInterval(s) }
+    const stopClock = poll(() => (now = new Date()), 15000)
+    const stopStatus = poll(loadStatus, 30000)
+    return () => { stopClock(); stopStatus() }
   })
 </script>
 

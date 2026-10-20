@@ -10,8 +10,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from ..db import get_engine
 from ..models import Service
-from .checks import run_check
-from .engine import cleanup, record
+from .checks import HttpClients, run_check
+from .engine import cleanup, housekeeping, record
 
 log = logging.getLogger("homepage.worker")
 
@@ -28,6 +28,7 @@ class Worker:
         self.sem = asyncio.Semaphore(PARALLEL)
         self.tasks: set[asyncio.Task] = set()
         self.self_cleanup = True
+        self.http = HttpClients()
 
     async def detect_timescale(self) -> None:
         async with self.maker() as db:
@@ -67,7 +68,7 @@ class Worker:
         self.running.add(sid)
         try:
             async with self.sem:
-                outcome = await run_check(check, url)
+                outcome = await run_check(check, url, self.http)
             async with self.maker() as db:
                 service = await db.get(Service, sid)
                 if service is None:
@@ -88,9 +89,11 @@ class Worker:
                     task = asyncio.create_task(self.run_one(sid, check, url))
                     self.tasks.add(task)
                     task.add_done_callback(self.tasks.discard)
-                if self.self_cleanup and time.monotonic() - last_cleanup > 3600:
+                if time.monotonic() - last_cleanup > 3600:
                     async with self.maker() as db:
-                        await cleanup(db)
+                        if self.self_cleanup:
+                            await cleanup(db)
+                        await housekeeping(db)
                         await db.commit()
                     last_cleanup = time.monotonic()
             except Exception:
