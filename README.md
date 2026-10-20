@@ -117,6 +117,67 @@ proxmox-backup-manager acl update / Audit --auth-id homepage@pbs
 proxmox-backup-manager acl update / Audit --auth-id 'homepage@pbs!dashboard'
 ```
 
+**Nieuwe service in één keer** (Beheer → **Nieuwe service**): één formulier maakt de proxy host in NPM (met het
+wildcardcertificaat of een eigen Let's Encrypt-certificaat), het record in Cloudflare (of een regel in de tunnel), de
+naam in AdGuard, een tegel met check en Zabbix, en zet de CT/VM in een back-upjob van PBS. Eerst een proef die zegt
+wat er zou gebeuren en wat ontbreekt; uitvoeren vraagt je 2FA. Stopt het halverwege, dan haalt **ongedaan maken**
+weg wat de run al maakte. Het tabblad **opruimen** (of **opruimen…** bij een tegel op `<naam>.jbogaert.be`) doet het
+omgekeerde: DNS eerst, de tegel als laatste, en alleen records en rewrites die naar NPM wijzen of van dit dashboard
+komen. Moet je na een run nog iets zelf doen (bv. de hostname in `config.yml` van een lokaal beheerde tunnel), dan
+zegt het venster dat in plaats van "werkt". Dit stel je één keer in:
+
+1. **NPM, een tweede gebruiker om te schrijven.** NPM → Users → Add User: naam `dashboard-acties`, **een echt
+   e-mailadres dat je leest** (Let's Encrypt registreert dat adres voor elk certificaat dat het dashboard vraagt; NPM
+   weigert Let's Encrypt zonder), **geen** Administrator. Rechten: Item Visibility **All Items**, Proxy Hosts
+   **Manage**, Certificates **Manage** (View volstaat als je nooit een Let's Encrypt-certificaat per naam wilt),
+   Access Lists **View**, Redirection Hosts en 404 Hosts **View**. Geef een wachtwoord. In API-beheer → de NPM-API:
+   `action_username` = dat e-mailadres, `action_password` = het wachtwoord. De huidige leesgebruiker blijft
+   `username`/`password`; geef die ook Item Visibility **All Items** (anders mist hw → routes de nieuwe hosts; de
+   proef waarschuwt).
+2. **Cloudflare, een DNS-token.** My Profile → API Tokens → Create Token → Custom token `homepage-dns`: Zone → Zone →
+   **Read**, Zone → DNS → **Edit**, Zone Resources: Include → Specific zone → `jbogaert.be`. Gaan de namen via een
+   Cloudflare Tunnel (de proef zegt dan "CNAME → ….cfargotunnel.com"), dan ook Account → Cloudflare Tunnel → **Edit**
+   (dat geldt voor elke tunnel van het account). Is je publieke IP thuis vast, zet dan Client IP Address Filtering op
+   dat IP. In API-beheer: nieuwe API, soort **Cloudflare DNS**, config `zone = jbogaert.be` (plus `account = <32
+   tekens>` voor de tunnel), geheim `token`. Het adres maakt niet uit: dit token gaat alleen naar
+   `api.cloudflare.com`. Het token van `cloudflared` blijft alleen-lezen.
+3. **Proxmox, alleen voor de back-up.** Twee manieren; de proef zegt welke een job nodig heeft.
+   - **Aanbevolen: een pool.** Laat de back-upjob naar PBS op een pool selecteren (Datacenter → Backup → Selection
+     mode "Pool based", bv. pool `backup`). Dan:
+     ```bash
+     pveum role add HomepagePool -privs "Pool.Allocate"
+     pveum aclmod /pool/backup -user homepage-acties@pve -role HomepagePool
+     ```
+     `VM.Allocate` op `/vms` zit al in `HomepageActies` hierboven. Zo kan het actietoken gasten aan die pool
+     toevoegen en eruit halen, en die pool wijzigen of verwijderen. Rechten die op die pool staan, gelden dan ook
+     voor de nieuwe gast.
+   - **Een job met een lijst VMID's:**
+     ```bash
+     pveum role add HomepageBackupJob -privs "Sys.Modify"
+     pveum aclmod / -user homepage-acties@pve -role HomepageBackupJob -propagate 0
+     pveum role add HomepageBackupOpslag -privs "Datastore.Allocate"
+     pveum aclmod /storage/pbs-pi -user homepage-acties@pve -role HomepageBackupOpslag
+     ```
+     (`pbs-pi` = de opslag van die job.) Proxmox vraagt precies deze rechten om een back-upjob te wijzigen. Eerlijk
+     gezegd: **`Sys.Modify` op `/`** laat het token ook andere instellingen van de cluster wijzigen die Proxmox op `/`
+     nakijkt (opties van het datacenter, de firewall van de cluster, de andere back-upjobs); `-propagate 0` houdt het
+     alleen weg van de paden onder `/`. **`Datastore.Allocate` op `/storage/pbs-pi`** laat het token die opslag
+     wijzigen of verwijderen (server, datastore, login) en elke back-up erop verwijderen via Proxmox. Is dat te veel,
+     neem dan de pool.
+   - Jobs met een `dumpdir` kan alleen root@pam wijzigen; die slaat het dashboard over. Zonder deze rechten slaat het
+     de stap over en zegt het welk recht ontbreekt; de service wordt wel gemaakt.
+4. **AdGuard, PBS en Zabbix**: niets nieuws.
+5. **Certificaten**: heeft NPM nog geen wildcard `*.jbogaert.be`, maak die dan één keer zelf in NPM met de
+   DNS-challenge (Cloudflare); het dashboard geeft zijn token niet aan NPM.
+6. **"Alleen thuis"**: een toegangslijst in NPM (bv. "LAN") met `allow 192.168.0.0/16` (plus het bereik van de VPN) en
+   verder niets, satisfy all. Ze moet ook het dashboard toelaten (het IP van de container, bv. 192.168.10.156), anders
+   kleurt de check van de tegel rood. Gaat `*.jbogaert.be` via de tunnel naar NPM, dan kan "alleen thuis" niet: elke
+   naam is dan publiek, en een toegangslijst helpt niet (dat verkeer komt van `cloudflared` op je LAN). Is dat niet na
+   te gaan (een lokaal beheerde tunnel, of een vangregel naar een naam die het dashboard niet kent), dan rekent het op
+   het ergste; zet de Docker-naam van NPM bij `npm_names` (API-beheer, NPM). Een toegangslijst is niet nodig als alle
+   namen via de tunnel gaan zonder wildcard; wijst er één (of `*.jbogaert.be`) naar je thuis-IP, dan wel.
+7. **Van buitenaf**: niets; het volgt ⚿ → van buitenaf → acties.
+
 Fase 5, SSH-terminal (knop `>_` in de titelbalk):
 
 - hosts beheren (naam, IP, poort, gebruiker, sleutel of wachtwoord), tabbladen met meerdere sessies tegelijk
@@ -492,8 +553,8 @@ Later, deel 3 (Authentik en gsm):
   Cloudflare of een tunnel), met een vervalste header van Cloudflare of vanaf een publiek IP, dan staan de terminal
   (ook cronjobs starten of bewaken, rsyslog uitrollen, sleutels vastzetten), updates installeren, acties (aan/uit,
   Wake-on-LAN, zelfherstel, snapshots verwijderen, hersteltest, API-calls die iets veranderen, poortscan, API's
-  instellen of calls uitproberen, een tegel met integratie maken, importeren of een ander adres geven) en
-  configuraties downloaden standaard uit. Die tegels en API's vragen van buitenaf ook altijd een verse 2FA-code,
+  instellen of calls uitproberen, een tegel met integratie maken, importeren of een ander adres geven, een nieuwe
+  service maken of opruimen) en configuraties downloaden standaard uit. Die tegels en API's vragen van buitenaf ook altijd een verse 2FA-code,
   ook als acties op *altijd aan* staat, want ze halen iets op bij een adres in je netwerk. Kijken kan altijd;
   bovenaan staat dan "buiten". Per functie: uit, één uur aan (ook onderweg, met je 2FA-code) of altijd aan (alleen
   thuis). Aanzetten geeft een melding. Je LAN, VPN en Tailscale tellen als thuis, net als je eigen publieke IP (wie

@@ -197,6 +197,8 @@
     password_change_failed: 'wachtwoord wijzigen mislukt', attention_ignored: 'beveiligingspunt genegeerd', check_silenced: 'check stilgelegd',
     device_forgotten: 'apparaat vergeten', check_paused: 'check gepauzeerd', check_resumed: 'check hervat',
     npm_routes: 'NPM rechtstreeks aan/uit',
+    nieuwe_service_proef: 'nieuwe service: proef bekeken', nieuwe_service_maken: 'nieuwe service gemaakt',
+    nieuwe_service_opruimen: 'service opgeruimd', nieuwe_service_ongedaan: 'nieuwe service ongedaan gemaakt',
     exposure_intended: 'bewust gemarkeerd (publiek)', exposure_intended_removed: 'niet meer bewust (publiek)',
     push_created: 'push-monitor aangemaakt', push_rotated: 'push-adres vernieuwd', push_changed: 'push-monitor gewijzigd',
     webpush_added: 'gsm-meldingen aangezet', webpush_changed: 'gsm-meldingen gewijzigd', webpush_removed: 'gsm-meldingen uitgezet',

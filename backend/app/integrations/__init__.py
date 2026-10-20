@@ -1,7 +1,7 @@
 """Register van alle integraties. Het type van een service kiest de integratie."""
 
 from .adguard import AdGuard
-from .cloudflare import CloudflareTunnel
+from .cloudflare import CloudflareDns, CloudflareTunnel
 from .homeassistant import HomeAssistant
 from .base import Integration, IntegrationError
 from .calls import call_dict
@@ -16,7 +16,7 @@ from .zabbix import Zabbix
 
 REGISTRY: dict[str, type[Integration]] = {
     cls.name: cls for cls in (Proxmox, ProxmoxBackupServer, AdGuard, NginxProxyManager, Portainer, OPNsense,
-                                CloudflareTunnel, HomeAssistant, Zabbix, RestApi, JsonApi, CustomApi)
+                                CloudflareTunnel, CloudflareDns, HomeAssistant, Zabbix, RestApi, JsonApi, CustomApi)
 }
 
 # Instellingen die van de API komen en die een tegel niet mag overschrijven (anders gaan de sleutels elders heen).
