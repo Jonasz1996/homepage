@@ -131,6 +131,7 @@
     { label: 'apparaten op het netwerk, poortscan', run: () => (modal = { kind: 'network', tab: 'apparaten' }) },
     { label: 'netwerkkaart: wat valt er mee uit', run: () => (modal = { kind: 'network', tab: 'kaart' }) },
     { label: 'hersteltest van back-ups (pbs)', run: () => (modal = { kind: 'restoretest' }) },
+    { label: 'api-beheer: api\'s, sleutels, eigen calls en endpoints', run: () => (modal = { kind: 'apis' }) },
     { label: 'configuratiewijzigingen: opnsense, npm, proxmox, bestanden (diff)', run: () => (modal = { kind: 'configs' }) },
     { label: 'gepland onderhoud: vensters plannen', run: () => (modal = { kind: 'planned' }) },
     { label: 'webhooks: meldingen van proxmox, pbs, uptime kuma, home assistant', run: () => (modal = { kind: 'webhooks' }) },
@@ -417,7 +418,7 @@
     history.replaceState(null, '', location.pathname)
     const kinds = { history: 'history', report: 'history', updates: 'updates', network: 'network', capacity: 'capacity',
                     security: 'security', configs: 'configs', webhooks: 'webhooks', planned: 'planned',
-                    hersteltest: 'restoretest' }
+                    hersteltest: 'restoretest', api: 'apis' }
     if (what === 'logs') openLogs()
     else if (what === 'cron') openCron()
     else if (what === 'health') openHealth()
@@ -464,6 +465,7 @@
         <button class="mini" onclick={() => (modal = { kind: 'network' })} title="Internet: publiek IP, WAN, tunnels, Wake-on-LAN">net{#if netLevel}<i class="nd {netLevel}"></i>{/if}</button>
         <button class="mini" onclick={() => (modal = { kind: 'history' })} title="Tijdlijn en weekrapport">history</button>
         <button class="mini" onclick={() => (modal = { kind: 'configs' })} title="Configuratiewijzigingen: OPNsense, NPM, Proxmox en je eigen bestanden">diff</button>
+        <button class="mini" onclick={() => (modal = { kind: 'apis' })} title="API-beheer: API's per categorie, eigen calls en welke tegel welke API gebruikt">api<span class="ml">API-beheer</span></button>
         <button class="mini" class:cronbad={cron.fout} onclick={() => openCron(cron.fout || cron.gemist ? { filter: 'probleem' } : null)}
                 title="Cronjobs, timers en Proxmox/PBS-jobs van alle machines">cron{#if cron.fout + cron.gemist}<b class="n">{cron.fout + cron.gemist}</b>{/if}</button>
         <button class="mini" class:cronbad={health.err} onclick={() => openHealth(health.problems?.length ? { tab: 'homepage' } : null)}
@@ -683,6 +685,8 @@
   <Lazy load={() => import('./History.svelte')} tab={modal.tab} onclose={() => (modal = null)} />
 {:else if modal?.kind === 'network'}
   <Lazy load={() => import('./Network.svelte')} initialTab={modal.tab} initialQuery={modal.q} onclose={() => (modal = null)} onchanged={(d) => (net = d)} />
+{:else if modal?.kind === 'apis'}
+  <Lazy load={() => import('./ApiManager.svelte')} onclose={() => { modal = null; load(); loadWidgets() }} />
 {:else if modal?.kind === 'webhooks'}
   <Lazy load={() => import('./Webhooks.svelte')} services={allServices} onclose={() => (modal = null)} />
 {:else if modal?.kind === 'planned'}

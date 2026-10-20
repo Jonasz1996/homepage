@@ -112,6 +112,7 @@
     heal_rule_added: 'zelfherstel-regel toegevoegd', heal_rule_changed: 'zelfherstel-regel gewijzigd', heal_rule_deleted: 'zelfherstel-regel verwijderd', heal_rule_tested: 'zelfherstel getest',
     webhook_added: 'webhook toegevoegd', webhook_changed: 'webhook gewijzigd', webhook_rotated: 'nieuw webhook-adres', webhook_deleted: 'webhook verwijderd',
     maintenance_planned: 'onderhoud gepland', maintenance_unplanned: 'gepland onderhoud verwijderd', incident_note: 'incidentnotitie', restoretest_settings: 'hersteltest ingesteld', restoretest_run: 'hersteltest gestart',
+    api_created: 'API toegevoegd', api_target_changed: 'adres van API gewijzigd', api_secrets_changed: 'sleutels van API gewijzigd', api_deleted: 'API verwijderd', api_bulk: "API's voor tegels ingesteld", api_adopt: 'tegels naar API-beheer verhuisd',
     service_target_changed: 'adres van service met geheimen gewijzigd',
     config_download: 'oude configuratie gedownload', config_settings: 'configuratie-opvolging ingesteld', device_changed: 'apparaat aangepast', device_scan: 'poortscan gestart',
     ssh_open: 'terminal geopend', ssh_close: 'terminal gesloten', ssh_key_added: 'SSH-sleutel toegevoegd',

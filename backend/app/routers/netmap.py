@@ -142,7 +142,9 @@ async def netmap(user: User = Depends(current_user), db: AsyncSession = Depends(
             continue
         guest = how = None
         via_npm = False
-        for h in (_host(s.url), _host((s.check or {}).get("target")), _host((s.config or {}).get("url"))):
+        api = s.__dict__.get("api") if s.api_id else None
+        for h in (_host(s.url), _host((s.check or {}).get("target")), _host((s.config or {}).get("url")),
+                  _host(api.url if api else None)):
             if h and h in npm:
                 guest, _ = resolve(npm[h])
                 if guest:

@@ -15,7 +15,11 @@ class AdGuard(Integration):
     label = "AdGuard Home"
     config_help = {"url": "https://adguard.jbogaert.be"}
     secret_help = {"username": "gebruikersnaam", "password": "wachtwoord"}
+    call_prefix = "/control"
     actions = {"protection"}
+
+    async def call_auth(self) -> dict:
+        return {"auth": self.auth()}
 
     def auth(self):
         return tuple(self.need("username", "password"))

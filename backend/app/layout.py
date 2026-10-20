@@ -5,12 +5,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from .config import get_settings
-from .models import Group, Page, Revision, Service, User
+from .models import ApiConnection, Group, Page, Revision, Service, User
 from .schemas import PageOut, ServiceOut
 from .security import decrypt_json
 
 SERVICE_FIELDS = ("id", "name", "description", "url", "icon", "position", "type", "check", "config", "secrets",
-                  "parent_id", "notes")
+                  "parent_id", "notes", "api_id")
 
 
 async def load_pages(db: AsyncSession) -> list[Page]:
@@ -87,12 +87,16 @@ async def restore_snapshot(db: AsyncSession, snap: dict) -> None:
                                  position=g["position"], collapsed=g.get("collapsed", False)))
     await db.flush()
     parents = {}
+    # Een API die intussen verwijderd is: de tegel wordt weer een gewone snelkoppeling.
+    apis = set((await db.execute(select(ApiConnection.id))).scalars())
     for p in snap["pages"]:
         for g in p["groups"]:
             for s in g["services"]:
                 service_ids.add(s["id"])
                 parents[s["id"]] = s.get("parent_id")
                 fields = {f: s.get(f) for f in SERVICE_FIELDS if f != "parent_id"}
+                if fields["api_id"] is not None and fields["api_id"] not in apis:
+                    fields["api_id"], fields["type"] = None, "link"
                 await db.merge(Service(group_id=g["id"], parent_id=None, **fields))
     await db.flush()
     # Afhankelijkheden pas zetten als alle services bestaan.

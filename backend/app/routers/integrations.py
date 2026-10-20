@@ -6,12 +6,13 @@ from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
 from ..deps import audit, current_user, notify, recent_auth
-from ..integrations import REGISTRY, Integration, IntegrationError, build
+from ..integrations import REGISTRY, Integration, IntegrationError, build, calls
+from ..integrations.rest import RestApi
 from ..integrations.npm import NginxProxyManager, host_url
 from ..layout import record_revision
 from ..models import Group, Service, User
@@ -30,7 +31,8 @@ _cache: dict[tuple[int, str], tuple[float, tuple, dict]] = {}
 
 
 def _fingerprint(s: Service) -> tuple:
-    return (s.type, s.url, repr(s.config), s.secrets)
+    api = s.__dict__.get("api")
+    return (s.type, s.url, repr(s.config), s.secrets, s.api_id, api.updated_at if api else None)
 
 
 def _integration(s: Service) -> Integration:
@@ -82,7 +84,18 @@ async def widgets(user: User = Depends(current_user), db: AsyncSession = Depends
 
 
 async def _fields(i: Integration) -> dict:
-    return {"fields": await i.summary()}
+    fields = await i.summary()
+    # Eigen calls op een ingebouwde integratie (bv. een extra endpoint van Proxmox) komen erachter.
+    if i.calls and not isinstance(i, RestApi):
+        fields = (fields + await calls.tile_fields(i))[:calls.MAX_TILE_FIELDS + 4]
+    return {"fields": fields}
+
+
+async def _detail(i: Integration) -> dict:
+    data = await i.detail()
+    if i.calls and not isinstance(i, RestApi):
+        data = {**data, "sections": [*data.get("sections", []), *await calls.sections(i)]}
+    return data
 
 
 @router.get("/services/{service_id}/integration")
@@ -91,8 +104,9 @@ async def integration_detail(service_id: int, user: User = Depends(current_user)
     if s.type not in REGISTRY:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Deze service heeft geen integratie")
     await db.close()
-    data = await _cached(s, "detail", DETAIL_TTL, lambda i: i.detail())
-    return {"label": REGISTRY[s.type].label, **data}
+    data = await _cached(s, "detail", DETAIL_TTL, _detail)
+    api = s.__dict__.get("api")
+    return {"label": REGISTRY[s.type].label + (f" · {api.name}" if api else ""), "api_id": s.api_id, **data}
 
 
 class ActionIn(BaseModel):
@@ -106,9 +120,12 @@ async def integration_action(service_id: int, data: ActionIn, request: Request,
     s = await _service(db, service_id)
     try:
         integ = _integration(s)
-        if data.action not in integ.actions:
+        if data.action.startswith("call:"):
+            message = await calls.action(integ, data.action)
+        elif data.action not in integ.actions:
             raise IntegrationError("Onbekende actie")
-        message = await integ.action(data.action, data.params)
+        else:
+            message = await integ.action(data.action, data.params)
     except IntegrationError as e:
         await audit(db, request, user, "integration_action_failed", service=s.name, op=data.action, error=str(e))
         await db.commit()
@@ -124,8 +141,8 @@ async def integration_action(service_id: int, data: ActionIn, request: Request,
 @router.get("/actions")
 async def quick_actions(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """Alle acties van alle integraties, voor de zoekbalk. Uitvoeren gaat via de actie-endpoint hierboven."""
-    services = (await db.execute(select(Service).where(
-        Service.type.in_([n for n, c in REGISTRY.items() if c.actions])))).scalars().all()
+    services = (await db.execute(select(Service).where(or_(
+        Service.type.in_([n for n, c in REGISTRY.items() if c.actions]), Service.api_id.is_not(None))))).scalars().all()
     every = (await db.execute(select(Service))).scalars().all()
     await db.close()
     sem = asyncio.Semaphore(10)
@@ -145,7 +162,10 @@ async def quick_actions(user: User = Depends(current_user), db: AsyncSession = D
 
 
 async def _actions(i: Integration) -> dict:
-    return {"items": await i.quick_actions()}
+    # Eigen acties uit API-beheer staan vast: daarvoor hoeft niets opgevraagd te worden.
+    own = [{"id": f"call:{c['id']}", "label": c["name"], "confirm": bool(c["confirm"]), "danger": c["method"] == "DELETE"}
+           for c in i.calls if c["show"] == "action"]
+    return {"items": [*(await i.quick_actions() if i.actions else []), *own]}
 
 
 # --- NPM: proxy hosts als tegels importeren ------------------------------------

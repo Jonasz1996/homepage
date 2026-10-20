@@ -17,7 +17,11 @@ class Portainer(Integration):
         "logs": "false om de containerlogs niet in de logviewer op te halen",
     }
     secret_help = {"key": "API-sleutel (My account → Access tokens)"}
+    call_prefix = "/api"
     actions = {"start", "stop", "restart"}
+
+    async def call_auth(self) -> dict:
+        return {"headers": self.headers()}
 
     def headers(self) -> dict:
         return {"X-API-Key": self.need("key")[0]}

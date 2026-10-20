@@ -276,6 +276,27 @@ Later, deel 3 (Authentik en gsm):
   PVEAuditor: VM.Allocate, VM.Config.Disk, VM.Config.Network, VM.Config.Options, VM.PowerMgmt en
   Datastore.AllocateSpace op de doelopslag, Datastore.Audit op de PBS-opslag. Bevoorrechte (privileged) CT's en
   CT's met bind mounts kan alleen root@pam terugzetten: kies dan onder "instellingen" alleen de gewone CT's
+- **api** (API-beheer, knop in de titelbalk of `Ctrl+K` → "api-beheer"): alle API's op één plek, per categorie (Proxmox
+  en back-up, netwerk, media, downloads, ...). Een API heeft een adres, een aanmelding (sleutel in een header, Bearer,
+  `?apikey=` in de url of gebruikersnaam en wachtwoord) en sleutels, die versleuteld bewaard worden en nooit naar de
+  browser gaan. Eén API kan door meerdere tegels gebruikt worden (bv. één Proxmox-cluster voor elke node-tegel, met
+  `node` in de instellingen van de tegel). Bij een tegel kies je de API onder **bewerken → Integratie en API**, of je
+  koppelt hier veel tegels tegelijk.
+  - **⚡ tegels herkennen**: tegels die op een bekende app lijken (Sonarr, Radarr, Lidarr, Readarr, Prowlarr, Bazarr,
+    SABnzbd, Jellyfin/Emby, Plex, Tautulli, Overseerr/Jellyseerr, Audiobookshelf, Immich, Nextcloud, Paperless-ngx,
+    Syncthing, Pi-hole v5, Traefik, Prometheus, Grafana, Glances, Healthchecks, changedetection.io, Frigate) krijgen
+    in één keer elk een eigen API met calls die meteen werken; je vult per tegel alleen de sleutel in. Tegels die hun
+    sleutels nog zelf hebben (Proxmox, PBS, AdGuard, ...) verhuis je met één knop: tegels met hetzelfde adres en
+    dezelfde sleutels delen daarna één API
+  - **calls**: eigen endpoints per API. Kies methode en pad (met `{node}` of een andere instelling van de tegel), druk
+    op ▶ probeer en klik in het antwoord op wat je wil zien: een waarde wordt een veld op de tegel, bij een lijst kies
+    je "# aantal" of "▦ tabel" (een tabel in het mini dashboard). Per veld een formaat (bytes, procent, duur, datum,
+    som of aantal over alle items met `*`, ...) en drempels voor geel en rood; is geel groter dan rood, dan is lager
+    slechter (bv. vrije ruimte). Ook op de ingebouwde integraties kan je extra calls zetten (het pad komt dan na
+    `/api2/json` bij Proxmox, `/api` bij Portainer, ...)
+  - alles behalve GET is altijd een knop (actie) in het mini dashboard en in `Ctrl+K`, en vraagt een recente 2FA.
+    Het adres, de soort of de aanmelding van een API met sleutels wijzigen vraagt ook een recente 2FA, tenzij je de
+    sleutels opnieuw ingeeft. Een pad blijft altijd op het adres van de API
 - **effecten** zoals in aiverslag: een achtergrond van punten en 0/1 die voor de muis wijken, een ripple op elke knop,
   bliksem en vonken bij een geslaagde actie (herstarten, wekken), een vuurbal met flits en schudden bij verwijderen
   en uitloggen, en een bliksem op het belletje als er een nieuwe storing binnenkomt. Uit te zetten met `Ctrl+K` →
@@ -288,7 +309,7 @@ Later, deel 3 (Authentik en gsm):
 - **Android-app (WebView)**: laad `https://homepage.jbogaert.be/` en zet `javaScriptEnabled`, `domStorageEnabled` en
   cookies aan (`CookieManager.setAcceptCookie(true)`). Third-party cookies zijn niet nodig:
   alles blijft op dezelfde site als Authentik op een subdomein staat. Rechtstreeks openen kan met
-  `/?open=history`, `updates`, `network`, `devices`, `configs`, `webhooks`, `planned`, `cron`, `health` of `terminal`. Links naar andere services kan de app in dezelfde WebView
+  `/?open=history`, `updates`, `network`, `devices`, `configs`, `webhooks`, `planned`, `api`, `cron`, `health` of `terminal`. Links naar andere services kan de app in dezelfde WebView
   openen (`shouldOverrideUrlLoading` false teruggeven voor `*.jbogaert.be`)
 
 Optimalisaties:

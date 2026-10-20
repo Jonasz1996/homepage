@@ -107,10 +107,14 @@ class Service(Base):
     maintenance_until: Mapped[datetime | None]
     # Eigen notities in Markdown (wachtwoordloze uitleg, poorten, hoe herstellen, ...).
     notes: Mapped[str | None] = mapped_column(Text)
+    # API uit API-beheer: adres, sleutels en eigen calls komen dan daarvandaan (zie integrations.build).
+    api_id: Mapped[int | None] = mapped_column(ForeignKey("api_connections.id", ondelete="SET NULL"), index=True)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 
     group: Mapped[Group] = relationship(back_populates="services")
+    # Altijd meteen mee geladen: build() heeft ze nodig, ook nadat de sessie dicht is.
+    api: Mapped["ApiConnection | None"] = relationship(lazy="selectin")
 
 
 class Revision(Base):
@@ -520,3 +524,52 @@ class WebhookSource(Base):
     last_at: Mapped[datetime | None]
     count: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(String(300))
+
+
+class ApiConnection(Base):
+    """Een API in API-beheer: adres, soort (proxmox, ..., of "rest" voor een eigen API), aanmelding en sleutels.
+    Eén verbinding kan door meerdere tegels gebruikt worden (bv. één Proxmox-cluster voor elke node-tegel)."""
+
+    __tablename__ = "api_connections"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(80))
+    category: Mapped[str] = mapped_column(String(40), default="overig")
+    kind: Mapped[str] = mapped_column(String(40), default="rest")
+    # Sjabloon waaruit ze gemaakt is (bv. "radarr"), alleen ter info.
+    template: Mapped[str | None] = mapped_column(String(40))
+    url: Mapped[str] = mapped_column(String(500))
+    # Niet geheim: insecure, auth {type, name}, vaste headers, en instellingen van de ingebouwde integratie.
+    config: Mapped[dict] = mapped_column(Json, default=dict)
+    secrets: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+
+    calls: Mapped[list["ApiCall"]] = relationship(lazy="selectin", order_by="ApiCall.position, ApiCall.id",
+                                                   cascade="all, delete-orphan", back_populates="connection")
+
+
+class ApiCall(Base):
+    """Een eigen call op een API: wat op de tegel komt (velden), een tabel in het mini dashboard, of een actie."""
+
+    __tablename__ = "api_calls"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    connection_id: Mapped[int] = mapped_column(ForeignKey("api_connections.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    method: Mapped[str] = mapped_column(String(8), default="GET")
+    # Pad achter het adres van de API, met {variabelen} uit de instellingen van de tegel (bv. {node}).
+    path: Mapped[str] = mapped_column(String(500), default="")
+    query: Mapped[dict] = mapped_column(Json, default=dict)
+    headers: Mapped[dict] = mapped_column(Json, default=dict)
+    body: Mapped[str | None] = mapped_column(Text)
+    # tile = velden op de tegel (en in het mini dashboard), detail = alleen mini dashboard, action = knop
+    show: Mapped[str] = mapped_column(String(8), default="tile")
+    # [{label, path, format, suffix, warn, err}]
+    fields: Mapped[list] = mapped_column(Json, default=list)
+    # {path, columns: [{label, path, format}]} of {}
+    table: Mapped[dict] = mapped_column(Json, default=dict)
+    confirm: Mapped[bool] = mapped_column(Boolean, default=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+
+    connection: Mapped[ApiConnection] = relationship(back_populates="calls")

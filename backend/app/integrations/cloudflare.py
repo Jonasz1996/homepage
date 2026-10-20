@@ -20,6 +20,9 @@ class CloudflareTunnel(Integration):
     }
     secret_help = {"token": "API-token met het recht Account → Cloudflare Tunnel → Read"}
 
+    async def call_auth(self) -> dict:
+        return {"headers": {"Authorization": f"Bearer {self.need('token')[0]}"}}
+
     def __init__(self, url: str | None, config: dict, secrets: dict, client: httpx.AsyncClient):
         # De tegel mag naar het Cloudflare-dashboard linken; de API staat altijd op api.cloudflare.com.
         super().__init__(config.get("url") or API, config, secrets, client)

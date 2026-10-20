@@ -27,6 +27,10 @@ class ProxmoxBackupServer(Integration):
         "username": "token-id, bv. homepage@pbs!dashboard (rechten: Datastore.Audit, Sys.Audit)",
         "password": "geheim van het token",
     }
+    call_prefix = "/api2/json"
+
+    async def call_auth(self) -> dict:
+        return {"headers": self.headers()}
 
     def headers(self) -> dict:
         user, secret = self.need("username", "password")

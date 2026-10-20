@@ -19,7 +19,11 @@ class Proxmox(Integration):
         "username": "token-id, bv. homepage@pve!dashboard",
         "password": "geheim van het token",
     }
+    call_prefix = "/api2/json"
     actions = {"start", "shutdown", "reboot", "stop"}
+
+    async def call_auth(self) -> dict:
+        return {"headers": self.headers()}
 
     def headers(self) -> dict:
         user, secret = self.need("username", "password")
