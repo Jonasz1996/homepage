@@ -93,6 +93,8 @@
       if (initial.host) host = initial.host
       if (initial.q) q = qLive = initial.q
     })
+    // Vanuit de instellingen-checklist: meteen rsyslog uitrollen.
+    if (initial?.setup) untrack(() => (modal = 'setup'))
   })
 
   onMount(() => {

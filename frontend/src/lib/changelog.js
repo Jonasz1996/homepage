@@ -3,6 +3,20 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 26,
+    datum: '2026-10-05',
+    titel: 'Aandacht en instellingen op één plek',
+    items: [
+      'Nieuwe knop ! in de titelbalk: alles wat nu je aandacht vraagt, van alle vensters samen en gesorteerd op ernst. Services down, mislukte back-ups en cronjobs, schijven, cluster, opslag die volloopt, WAN en tunnels, Zabbix, updates, certificaten, domeinen, nieuwe apparaten, API\'s die een fout geven.',
+      'Bovenaan het dashboard staan de rode en oranje punten meteen; klik erop en je komt in het venster waar je het oplost. ✕ verbergt de strook tot er iets verandert.',
+      '"negeren" verbergt één punt tot het verandert of opgelost is.',
+      'Tabblad instellingen: per functie of ze werkt, half ingesteld is (met wat er ontbreekt) of nog niet. Het kijkt ook na welke rechten je Proxmox-tokens missen.',
+    ],
+    instellen: [
+      'Open ! → instellingen en werk af wat rood of oranje staat.',
+    ],
+  },
+  {
     nr: 25,
     datum: '2026-10-05',
     titel: 'Veiliger van buitenaf',

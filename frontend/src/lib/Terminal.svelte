@@ -151,13 +151,14 @@
     if (t) start(t.host)
   }
 
-  // Vraag van buitenaf (bv. knop in het mini dashboard): open een sessie naar deze host.
+  // Vraag van buitenaf (bv. knop in het mini dashboard): open een sessie naar deze host, of een venster
+  // van de terminal (keys, defaults, discover) vanuit de veiligheidscheck of de instellingen-checklist.
   let handled = null
   $effect(() => {
     if (!request || request === handled) return
     handled = request
     load().then(() => {
-      if (request.keys) { modal = { kind: 'keys' }; return }
+      if (request.modal) { modal = { kind: request.modal }; return }
       const h = hosts.find((x) => x.id === request.hostId)
       if (h) start(h)
     })

@@ -6,7 +6,7 @@ from fastapi import Depends, FastAPI, Request
 from .config import get_settings
 from .db import get_maker
 from .deps import COOKIE, csrf_guard, secure_cookie
-from .routers import (apis, auth, capacity, configs, cron, heal, health, hooks, importexport, integrations, layout, logs, monitoring, network, notifications,
+from .routers import (apis, attention, auth, capacity, configs, cron, heal, health, hooks, importexport, integrations, layout, logs, monitoring, network, notifications,
                       netmap, oidc, outside, planning, restoretest, search, securitycheck, ssh, timeline, upgrade, versie, zabbix)
 
 log = logging.getLogger("homepage.api")
@@ -69,6 +69,7 @@ app.include_router(zabbix.router)
 app.include_router(versie.router)
 app.include_router(outside.router)
 app.include_router(securitycheck.router)
+app.include_router(attention.router)
 
 
 @app.middleware("http")

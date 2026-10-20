@@ -71,10 +71,12 @@ async def watch_pbs(db: AsyncSession, clients: HttpClients) -> None:
             body = "\n".join(new[:8]) + (f"\n… en {len(new) - 8} meer" if len(new) > 8 else "")
             notify(db, f"{svc.name}: {len(new)} back-up{'s' if len(new) > 1 else ''} met een probleem", body,
                    level="err" if any("mislukt" in n for n in new) else "warn", source="backup", service_id=svc.id)
+        # De teksten erbij voor het aandacht-overzicht.
+        value = {"keys": sorted(problems), "items": problems}
         if state:
-            state.value = {"keys": sorted(problems)}
+            state.value = value
         else:
-            db.add(AppState(key=key, value={"keys": sorted(problems)}))
+            db.add(AppState(key=key, value=value))
 
 
 async def _new_backups(db: AsyncSession, svc: Service, groups: list[dict]) -> None:
