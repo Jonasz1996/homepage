@@ -36,7 +36,9 @@ def _smart_nvme(used=12):
                                                   "critical_warning": 0, "temperature": 41}}
 
 
-def node_text(realloc=0, pending=0, cpu_milli=52000, used=12, scrub="Sun Sep 14 00:24:01 2026", health="ONLINE"):
+def node_text(realloc=0, pending=0, cpu_milli=52000, used=12, scrub=None, health="ONLINE"):
+    # De laatste scrub vijf dagen geleden (een vaste datum werd na 35 dagen "laatste scrub ... geleden").
+    scrub = scrub or (datetime.now() - timedelta(days=5)).strftime("%a %b %d %H:%M:%S %Y")
     lsblk = {"blockdevices": [
         {"name": "sda", "model": "WDC WD40EFRX", "serial": "WD-1", "size": 4_000_000_000_000, "rota": True},
         {"name": "sdb", "model": "ST2000", "serial": "ZFL", "size": 2_000_000_000_000, "rota": True},
@@ -62,7 +64,7 @@ PI_TEXT = "\n".join(["@@VIRT none", "@@MODEL Raspberry Pi 5 Model B Rev 1.0|", "
 
 
 def test_parse_disks_pools_temps_and_throttle():
-    m = probe.parse(node_text(realloc=8))
+    m = probe.parse(node_text(realloc=8, scrub="Sun Sep 14 00:24:01 2026"))
     sda, sdb, nv = m["disks"]
     assert (sda["serial"], sda["realloc"], sda["ssd"], sda["temp"], sda["hours"]) == ("WD-1", 8, False, 35, 31000)
     assert probe.disk_level(sda) == ("warn", ["8 sectoren vervangen"])
