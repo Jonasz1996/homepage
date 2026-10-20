@@ -27,6 +27,14 @@
   let termOpen = $state(false)
   let termUsed = $state(false)
   let termRequest = $state(null)
+  let logsOpen = $state(false)
+  let logsUsed = $state(false)
+  let logsHost = $state(null)
+  function openLogs(host = null) {
+    logsUsed = true
+    logsOpen = true
+    logsHost = host
+  }
   function openTerminal(hostId = null) {
     termUsed = true
     termOpen = true
@@ -249,6 +257,7 @@
   <Card title="homepage" glow>
     {#snippet right()}
       <span class="clock">{clock}</span>
+      <button class="mini" onclick={() => openLogs()} title="Logs van je machines">logs</button>
       <button class="mini" onclick={() => openTerminal()} title="SSH-terminal">&gt;_</button>
       <Notifications />
       <button class="mini" class:on={editing} onclick={() => (editing = !editing)}>{editing ? '✓ klaar' : '✎ bewerken'}</button>
@@ -433,6 +442,11 @@
   <!-- xterm.js is groot: pas laden als je de terminal voor het eerst opent. -->
   {#await import('./Terminal.svelte') then { default: Terminal }}
     <Terminal open={termOpen} request={termRequest} services={allServices} onclose={() => (termOpen = false)} />
+  {/await}
+{/if}
+{#if logsUsed}
+  {#await import('./Logs.svelte') then { default: Logs }}
+    <Logs open={logsOpen} initialHost={logsHost} onclose={() => (logsOpen = false)} />
   {/await}
 {/if}
 <ReauthDialog />

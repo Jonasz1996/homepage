@@ -74,6 +74,11 @@ if [ ! -f "$CONF_DIR/homepage.env" ]; then
   install -m 640 -o root -g homepage "$APP_DIR/deploy/homepage.env.example" "$CONF_DIR/homepage.env"
 fi
 
+# IP van deze container voor de rsyslog-configuratie op andere machines (fase 6).
+if ! grep -q '^HOMEPAGE_SYSLOG_TARGET=' "$CONF_DIR/homepage.env"; then
+  echo "HOMEPAGE_SYSLOG_TARGET=$(hostname -I | awk '{print $1}')" >> "$CONF_DIR/homepage.env"
+fi
+
 say "Backend (Python)"
 [ -d "$APP_DIR/.venv" ] || python3 -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/pip" install -q --upgrade pip
@@ -101,12 +106,13 @@ systemctl enable nginx
 systemctl reload nginx || systemctl restart nginx
 
 say "Services"
-install -m 644 "$APP_DIR/deploy/homepage-api.service" "$APP_DIR/deploy/homepage-worker.service" /etc/systemd/system/
+install -m 644 "$APP_DIR/deploy/homepage-api.service" "$APP_DIR/deploy/homepage-worker.service" \
+  "$APP_DIR/deploy/homepage-syslog.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/homepage-backup.service" "$APP_DIR/deploy/homepage-backup.timer" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now homepage-backup.timer
-systemctl enable homepage-api homepage-worker
-systemctl restart homepage-api homepage-worker
+systemctl enable homepage-api homepage-worker homepage-syslog
+systemctl restart homepage-api homepage-worker homepage-syslog
 sleep 2
 if curl -fsS http://127.0.0.1/api/health >/dev/null; then
   echo "API draait."

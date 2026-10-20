@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, SmallInteger, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -192,3 +192,37 @@ class SshHost(Base):
     position: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     last_used_at: Mapped[datetime | None]
+
+
+class LogEntry(Base):
+    """Eén syslog-regel. Op PostgreSQL met TimescaleDB is dit een hypertable op ts."""
+
+    __tablename__ = "log_entries"
+    __table_args__ = (Index("ix_log_entries_host_ts", "host", "ts"),)
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    ts: Mapped[datetime] = mapped_column(default=utcnow, index=True)
+    host: Mapped[str] = mapped_column(String(255))
+    source_ip: Mapped[str | None] = mapped_column(String(64))
+    facility: Mapped[int] = mapped_column(SmallInteger, default=1)
+    # 0 emerg, 1 alert, 2 crit, 3 err, 4 warning, 5 notice, 6 info, 7 debug
+    severity: Mapped[int] = mapped_column(SmallInteger, default=6)
+    app: Mapped[str | None] = mapped_column(String(64))
+    msg: Mapped[str] = mapped_column(Text)
+
+
+class LogRule(Base):
+    """Melding als een logregel overeenkomt (bv. 'Out of memory' of alles vanaf 'crit')."""
+
+    __tablename__ = "log_rules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(80))
+    pattern: Mapped[str | None] = mapped_column(String(500))
+    host: Mapped[str | None] = mapped_column(String(255))
+    # Alleen regels met severity <= deze waarde (0 = emerg ... 7 = debug).
+    max_severity: Mapped[int] = mapped_column(SmallInteger, default=7)
+    level: Mapped[str] = mapped_column(String(8), default="warn")
+    cooldown_minutes: Mapped[int] = mapped_column(Integer, default=10)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
