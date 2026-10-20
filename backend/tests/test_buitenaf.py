@@ -77,6 +77,7 @@ def test_welke_routes_van_buitenaf_uit_staan():
         "PATCH /api/ssh/hosts/{host_id}": "terminal", "DELETE /api/ssh/hosts/{host_id}": "terminal",
         "POST /api/ssh/hosts/{host_id}/forget-hostkey": "terminal", "PUT /api/ssh/defaults": "terminal",
         "PUT /api/ssh/snippets": "terminal", "POST /api/ssh/import": "terminal",
+        "POST /api/backups/sync/create": "terminal",
     }
     ws = {r.path for r in _routes() if isinstance(r, WebSocketRoute)}
     assert ws == {"/api/ssh/ws/{host_id}", "/api/cron/ws/run/{job_id}", "/api/cron/ws/tail/{target}"}

@@ -14,7 +14,7 @@ from ..config import get_settings
 from ..db import get_db
 from ..deps import audit, current_user, recent_auth
 from ..health import domains as dom, scan as hw, selfcheck as sc, snapshots as snap
-from ..monitoring import cluster
+from ..monitoring import cluster, coverage
 from ..integrations import IntegrationError
 from ..models import AppState, Reading, Service, User
 from .integrations import clients
@@ -64,9 +64,12 @@ def _summary(hardware: dict, snaps: dict, domains: dict, selfc: dict, worker: di
 
 
 async def _with_cluster(db: AsyncSession, summ: dict) -> dict:
-    """Problemen met de Proxmox-cluster tellen mee in de knop hw (tabblad cluster)."""
+    """Problemen met de Proxmox-cluster tellen mee in de knop hw (tabblad cluster); van de back-updekking alleen
+    wat rood is (VM/CT's op maar één PBS zijn er vaak veel, die staan op het tabblad back-ups)."""
     c = cluster.summary(await _value(db, cluster.STATE_KEY))
-    return {**summ, "err": summ["err"] + c["err"], "warn": summ["warn"] + c["warn"], "cluster": c}
+    b = coverage.counts(await _value(db, coverage.STATE_KEY))
+    return {**summ, "err": summ["err"] + c["err"] + b["err"], "warn": summ["warn"] + c["warn"], "cluster": c,
+            "backups": b}
 
 
 @router.get("")

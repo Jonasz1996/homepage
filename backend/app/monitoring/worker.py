@@ -24,7 +24,7 @@ from .network import NETWORK_EVERY, PUBLIC_IP_EVERY, sample_power, watch_gateway
 from .report import weekly_notification
 from .updates import UPDATES_EVERY, run_updates
 from .upgrade import auto_updates, cleanup_snapshots, mark_interrupted
-from . import cluster, configs, containerlogs, devices, healing, planned, restoretest, zabbix
+from . import cluster, configs, containerlogs, coverage, devices, healing, planned, restoretest, zabbix
 from .watchers import watch_npm, watch_pbs
 
 log = logging.getLogger("homepage.worker")
@@ -121,6 +121,7 @@ class Worker:
         """Trage taken (externe API's) los van de checks, elk half uur."""
         await self.step("NPM bekijken", lambda db: watch_npm(db, self.http))
         await self.step("PBS bekijken", lambda db: watch_pbs(db, self.http))
+        await self.step("back-updekking", lambda db: coverage.run_coverage(db, self.http))
         await self.step("weekoverzicht", weekly_notification)
 
     async def network(self, with_ip: bool) -> None:

@@ -267,9 +267,25 @@ Later, deel 3 (Authentik en gsm):
   Kuma via een Webhook-melding, Home Assistant via `rest_command`. Wat binnenkomt wordt een melding met de juiste
   ernst, eventueel gekoppeld aan een service. Het venster toont per tool de exacte instellingen om te plakken. Een
   adres kan je vernieuwen (het oude werkt dan meteen niet meer); max. 60 meldingen per minuut per adres
-- **hw → cluster**: quorum, welke nodes corosync ziet, HA-resources en replicatie-jobs, elke 2 minuten via de
-  Proxmox-API (rol PVEAuditor volstaat). Een melding als de cluster zijn quorum verliest, een node wegvalt, een
-  HA-resource in error staat of een replicatie mislukt, en opnieuw als het weer in orde is
+- **hw → cluster**: quorum, welke nodes corosync ziet, de Proxmox-versie per node, de stemmen en de QDevice,
+  HA-resources en replicatie-jobs, elke 2 minuten via de Proxmox-API (rol PVEAuditor volstaat). Een melding als de
+  cluster zijn quorum verliest, een node wegvalt, nodes een andere Proxmox-versie draaien (8.2 naast 8.3; alleen een
+  andere patch is een tip), de QDevice niet verbonden is, een HA-resource in error staat of een replicatie mislukt, en
+  opnieuw als het weer in orde is. Bij een even aantal stemmen zonder QDevice legt het tabblad uit waarom dat riskant
+  is en geeft het de drie commando's om een QDevice op de PBS-Pi te zetten (`corosync-qnetd` op de Pi,
+  `corosync-qdevice` op elke node, `pvecm qdevice setup <IP>` op één node)
+- **hw → back-ups**: per VM/CT in welke back-upjob van Proxmox hij zit, op hoeveel PBS'en een kopie staat (ook in
+  namespaces), hoe oud de nieuwste is en wanneer hij voor het laatst met de hersteltest is teruggezet. Rood: in geen
+  enkele job (dan komen er ook geen nieuwe back-ups) of op geen enkele PBS; oranje: maar op één PBS, of een gestopte
+  VM/CT zonder job. Elk half uur; de rode staan ook in **!** en tellen mee in de knop hw. Rechten: het Proxmox-leestoken
+  (PVEAuditor) en per PBS een tegel met DatastoreAudit
+- **PBS-sync** (hw → back-ups): het dashboard stelt voor dat je tweede PBS elke nacht een kopie ophaalt van de PBS
+  waar Proxmox naartoe schrijft: welke datastores, een uur waarop geen back-up loopt en of het past. Je krijgt de
+  `proxmox-backup-manager`-commando's om te plakken (een gebruiker `homepage-sync@pbs` met alleen leesrecht op de
+  bron, een remote en een sync-job op het doel), of één knop die ze zelf via SSH uitvoert (beide PBS'en als SSH-host
+  in de terminal, als root; vraagt je 2FA-code, staat van buitenaf uit, komt in het auditlog). Een sync die al bestaat
+  ziet het dashboard alleen als het PBS-token ook de rol RemoteAudit op `/remote` heeft. Zet op het doel ook een
+  prune-job, anders blijft de kopie groeien
 - **gepland onderhoud**: in het mini dashboard van een service (of `Ctrl+K` → "gepland onderhoud" voor groepen)
   onderhoud vooraf plannen: eenmalig, elke dag of op vaste weekdagen (bv. elke zondag 3:00 tot 4:00 tijdens de
   back-up). Tijdens het venster geen meldingen en telt de uptime het niet mee; het begin komt op de tijdlijn
