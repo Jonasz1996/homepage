@@ -53,16 +53,18 @@
         try { await requestReauth(); connect() } catch { term.write(red('Bevestiging geannuleerd')); setState('fout') }
       }
       else if (m.t === 'error' && m.m.startsWith('buiten:')) { term.write(red(outsideMessage(m.m))); setState('fout'); signalOutside(m.m) }
-      else if (m.t === 'error') { term.write(red(m.m)); setState('fout') }
+      else if (m.t === 'error') { hostkey = null; term.write(red(m.m)); setState('fout') }
       else if (m.t === 'closed') { term.write('\r\n' + dim(m.m)); setState('gesloten') }
     }
     ws.onclose = () => {
       if (sock !== ws) return
+      hostkey = null
       if (phase === 'verbonden' || phase === 'verbinden') { term.write('\r\n' + dim('Verbinding gesloten')); setState('gesloten') }
     }
   }
 
   function answer(ok) {
+    if (ws?.readyState !== 1) { term.write(red('Verbinding al gesloten: verbind opnieuw')); hostkey = null; return }
     ws.send(JSON.stringify({ t: ok ? 'accept' : 'reject' }))
     term.write(dim(ok ? `Hostsleutel ${hostkey.fp} aanvaard en bewaard.` : 'Hostsleutel geweigerd.'))
     hostkey = null
@@ -223,7 +225,9 @@
     <div class="hk card">
       <p>Eerste verbinding met <b>{host.name}</b> ({host.host}). Klopt deze hostsleutel?</p>
       <code class="fp">{hostkey.alg} {hostkey.fp}</code>
-      <p class="hint">Controleer op de server met <code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code>.</p>
+      <p class="hint">Dit is de vingerafdruk van de server zelf, geen login-sleutel. Na Aanvaarden meldt het dashboard
+        aan met de gebruiker en het wachtwoord of de sleutel van deze host (✎), anders met ⚙ standaard.
+        Controleer op de server met <code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code>.</p>
       <div class="row">
         <button class="btn" onclick={() => answer(true)}>Aanvaarden</button>
         <button class="btn alt" onclick={() => answer(false)}>Weigeren</button>

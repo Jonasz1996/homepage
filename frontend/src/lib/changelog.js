@@ -3,6 +3,17 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 42,
+    datum: '2026-10-17',
+    titel: 'Terminal: zegt waarom verbinden niet lukt',
+    items: [
+      'Bij de eerste verbinding met een host staat er nu dat het dashboard de vingerafdruk van de server ophaalt, nog voor het aanmelden: dat is geen login-sleutel. Daarna zie je waarmee het aanmeldt, bijvoorbeeld "wachtwoord uit ⚙ standaard" of "sleutel van deze host".',
+      'Antwoordt een host niet, dan stond er na 10 s alleen "Verbinden mislukt:". Nu zie je welk IP en welke poort, en of er geen antwoord kwam (machine uit of firewall), de verbinding geweigerd werd, er geen route is, de naam onbekend is, of de server wel antwoordt maar het aanmelden te lang duurt. Wordt het aanmelden geweigerd, dan staat erbij wat je nakijkt (wachtwoord, sleutel in authorized_keys, of root met wachtwoord in sshd). Hetzelfde overal waar het dashboard via SSH werkt (cron, updates, diff, hw, back-ups, syslog instellen).',
+      'Typen of het venster vergroten terwijl de vraag "Klopt deze hostsleutel?" openstaat, telt niet meer als Weigeren en sluit de verbinding niet meer af.',
+    ],
+    instellen: [],
+  },
+  {
     nr: 41,
     datum: '2026-10-17',
     titel: 'Toestellen uit Proxmox: sneller en duidelijker',

@@ -24,7 +24,7 @@ from ..db import job_lock
 from ..deps import event
 from ..integrations import IntegrationError, build
 from ..models import AppState, Service, SshHost
-from ..ssh_login import Login, defaults, login_for
+from ..ssh_login import Login, TcpVolger, defaults, geweigerd, login_for, waarom
 from .checks import HttpClients
 
 log = logging.getLogger("homepage.worker")
@@ -33,6 +33,7 @@ UPDATES_EVERY = 6 * 3600
 KEY = "updates"
 MAX_PACKAGES = 300
 SSH_TIMEOUT = 900
+CONNECT_TIMEOUT = 10
 
 # Draait op de machine zelf en in elke container: pakketlijst verversen (als root) en tonen wat kan.
 PROBE = r"""
@@ -199,19 +200,27 @@ async def from_ssh(h: SshHost, login: Login) -> list[dict]:
         return [target(key, h.name, "host", h.service_id,
                        error="Open eerst één keer een terminal naar deze host om de hostsleutel te bevestigen")]
     command = "sh -s" if login.username == "root" else "sudo -n sh -s"
+    tcp, connected = TcpVolger(), False
     try:
         async with asyncio.timeout(SSH_TIMEOUT):
             async with asyncssh.connect(
                 h.host, port=h.port, username=login.username,
                 known_hosts=([asyncssh.import_public_key(h.host_key)], [], []),
                 client_keys=[login.key] if login.key else None, password=login.password,
-                agent_path=None, config=None, connect_timeout=10,
+                agent_path=None, config=None, connect_timeout=CONNECT_TIMEOUT, client_factory=tcp,
             ) as conn:
+                connected = True
                 result = await conn.run(command, input=script(h.updates == "cts"), check=False)
     except asyncssh.HostKeyNotVerifiable:
         return [target(key, h.name, "host", h.service_id, error="Hostsleutel klopt niet meer, verbinding geweigerd")]
+    except asyncssh.PermissionDenied:
+        return [target(key, h.name, "host", h.service_id, error=geweigerd(login))]
     except (OSError, asyncssh.Error, TimeoutError) as e:
-        return [target(key, h.name, "host", h.service_id, error=f"SSH mislukt: {getattr(e, 'reason', None) or e}")]
+        if connected and isinstance(e, TimeoutError):
+            why = f"verbonden, maar het nakijken liep langer dan {int(SSH_TIMEOUT // 60)} min"
+        else:
+            why = waarom(e, h.host, h.port, CONNECT_TIMEOUT, tcp.tcp)
+        return [target(key, h.name, "host", h.service_id, error=f"SSH mislukt: {why}")]
     out = []
     for kind, name, packages in parse_output(str(result.stdout or "")):
         if kind == "host":
