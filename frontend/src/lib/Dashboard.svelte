@@ -23,6 +23,7 @@
   // Wordt bij elke poll volledig vervangen, nooit aangepast: geen diepe proxy nodig.
   let status = $state.raw({})
   let widgets = $state.raw({})
+  let zbx = $state.raw({})
   let updates = $state.raw({ total: 0, security: 0, by_service: {} })
   let net = $state(null)
   let menuOpen = $state(false)
@@ -258,6 +259,8 @@
   }
   async function loadWidgets() {
     try { widgets = await api('/widgets') } catch { /* volgende poging over 60 s */ }
+    // Zabbix rood/groen per tegel (de worker houdt dit elke minuut bij).
+    try { zbx = (await api('/zabbix')).services } catch { /* idem */ }
   }
 
   async function act(fn) {
@@ -561,7 +564,7 @@
       {#each foundGroups.filter((g) => g.kind === 'lookup') as g (g.kind)}{@render foundGroup(g)}{/each}
       <div class="tiles pad">
         {#each results as s (s.id)}
-          <ServiceTile service={s} status={status[s.id]} widget={widgets[s.id]} updates={updates.by_service[s.id]} {editing} onedit={(svc) => (modal = { kind: 'service', service: svc })}
+          <ServiceTile service={s} status={status[s.id]} widget={widgets[s.id]} updates={updates.by_service[s.id]} zbx={zbx[s.id]} {editing} onedit={(svc) => (modal = { kind: 'service', service: svc })}
                        ondetail={(svc) => (modal = { kind: 'detail', service: svc })} />
         {:else}
           {#if !actionResults.length && !foundGroups.length}<p class="hint">Niets gevonden.</p>{/if}
@@ -613,6 +616,7 @@
                     status={status[s.id]}
                     widget={widgets[s.id]}
                     updates={updates.by_service[s.id]}
+                    zbx={zbx[s.id]}
                     {editing}
                     onedit={(svc) => (modal = { kind: 'service', service: svc })}
                     ondetail={(svc) => (modal = { kind: 'detail', service: svc })}

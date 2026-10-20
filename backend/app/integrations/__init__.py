@@ -12,10 +12,11 @@ from .pbs import ProxmoxBackupServer
 from .portainer import Portainer
 from .proxmox import Proxmox
 from .rest import RestApi
+from .zabbix import Zabbix
 
 REGISTRY: dict[str, type[Integration]] = {
     cls.name: cls for cls in (Proxmox, ProxmoxBackupServer, AdGuard, NginxProxyManager, Portainer, OPNsense,
-                                CloudflareTunnel, HomeAssistant, RestApi, JsonApi, CustomApi)
+                                CloudflareTunnel, HomeAssistant, Zabbix, RestApi, JsonApi, CustomApi)
 }
 
 # Instellingen die van de API komen en die een tegel niet mag overschrijven (anders gaan de sleutels elders heen).

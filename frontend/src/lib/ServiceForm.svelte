@@ -29,9 +29,12 @@
   let parentId = $state(s.parent_id ?? null)
   // Kandidaten voor "hangt af van": alles behalve zichzelf.
   let parents = $derived(services.filter((x) => x.id !== s.id).sort((a, b) => a.name.localeCompare(b.name)))
-  // MAC-adres (Wake-on-LAN) heeft een eigen veld; de rest van config staat als JSON.
-  const { mac: initialMac, ...restConfig } = s.config || {}
+  // MAC-adres (Wake-on-LAN) en de Zabbix-hosts hebben een eigen veld; de rest van config staat als JSON.
+  const { mac: initialMac, zabbix: initialZabbix, ...restConfig } = s.config || {}
   let mac = $state(initialMac || '')
+  let zabbixHosts = $state(initialZabbix || '')
+  let zabbix = $state.raw(null)
+  api('/zabbix').then((r) => (zabbix = r)).catch(() => {})
   let configText = $state(Object.keys(restConfig).length ? JSON.stringify(restConfig, null, 2) : '')
   let secretKeys = $state([...(s.secret_keys || [])])
   let removed = $state([])
@@ -63,6 +66,8 @@
       try { config = JSON.parse(configText) } catch { throw new Error('Instellingen zijn geen geldige JSON') }
     }
     delete config.mac
+    delete config.zabbix
+    if (zabbixHosts.trim()) config.zabbix = zabbixHosts.trim()
     if (mac.trim()) {
       if (!/^([0-9a-f]{2}[:-]?){5}[0-9a-f]{2}$/i.test(mac.trim())) throw new Error('MAC-adres klopt niet (bv. aa:bb:cc:dd:ee:ff)')
       config.mac = mac.trim()
@@ -220,6 +225,14 @@
         <input id="sf-mac" bind:value={mac} placeholder="aa:bb:cc:dd:ee:ff" autocomplete="off" />
         <p class="help">Dan kan je de machine wekken vanuit het mini dashboard, het netwerkoverzicht (<code>net</code>) of met <code>Ctrl+K</code> → "wekken".</p>
       </div>
+      {#if (zabbix?.configured || zabbixHosts) && type !== 'zabbix'}
+        <div class="dep">
+          <label class="lbl" for="sf-zabbix">Zabbix-hosts</label>
+          <input id="sf-zabbix" bind:value={zabbixHosts} list="sf-zabbix-hosts" placeholder="automatisch (op IP, DNS-naam of naam)" autocomplete="off" />
+          <datalist id="sf-zabbix-hosts">{#each zabbix?.hosts || [] as h}<option value={h}></option>{/each}</datalist>
+          <p class="help">Leeg = automatisch. Of zelf kiezen met de naam in Zabbix, meerdere met komma's (<code>pve50, plex</code>), of <code>-</code> om Zabbix bij deze tegel uit te zetten.</p>
+        </div>
+      {/if}
       <p class="help">Een service is pas down na 3 mislukte checks op rij. Bij HTTPS wordt ook het certificaat gevolgd (melding 14 en 3 dagen vooraf).</p>
     </details>
 
