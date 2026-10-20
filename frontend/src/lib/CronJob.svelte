@@ -1,6 +1,6 @@
 <script>
   import { onMount, tick } from 'svelte'
-  import { api, requestReauth, withReauth } from './api.js'
+  import { api, outsideMessage, requestReauth, signalOutside, withReauth } from './api.js'
   import Modal from './Modal.svelte'
   import { KIND, STATUS, STATUS_HINT, dur, full, rel, wsUrl } from './cronfmt.js'
 
@@ -68,6 +68,9 @@
         live.running = false
         if (m.m === 'reauth_required' && !retried) {
           try { await requestReauth(); start(true) } catch { live.out += 'Geannuleerd.\n' }
+        } else if (m.m.startsWith('buiten:')) {
+          live.out += `\n${outsideMessage(m.m)}\n`
+          signalOutside(m.m)
         } else live.out += `\n${m.m}\n`
       }
     }

@@ -16,8 +16,10 @@ class Proxmox(Integration):
         "insecure": "true bij een zelfondertekend certificaat",
     }
     secret_help = {
-        "username": "token-id, bv. homepage@pve!dashboard",
-        "password": "geheim van het token",
+        "username": "token-id om te lezen, bv. homepage@pve!dashboard (rol PVEAuditor)",
+        "password": "geheim van dat token",
+        "action_username": "optioneel, token-id voor acties, snapshots, updates en de hersteltest, bv. homepage-acties@pve!acties",
+        "action_password": "geheim van het actietoken",
     }
     call_prefix = "/api2/json"
     actions = {"start", "shutdown", "reboot", "stop"}
@@ -25,12 +27,21 @@ class Proxmox(Integration):
     async def call_auth(self) -> dict:
         return {"headers": self.headers()}
 
-    def headers(self) -> dict:
-        user, secret = self.need("username", "password")
+    async def write_auth(self) -> dict:
+        return {"headers": self.headers(write=True)}
+
+    @property
+    def split(self) -> bool:
+        """Twee tokens: lezen (monitoring, kaart, capaciteit) en een apart token voor wat iets verandert."""
+        return bool(self.secrets.get("action_username") and self.secrets.get("action_password"))
+
+    def headers(self, write: bool = False) -> dict:
+        # Zonder actietoken doet het ene token alles, zoals vroeger.
+        user, secret = self.need(*(("action_username", "action_password") if write and self.split else ("username", "password")))
         return {"Authorization": f"PVEAPIToken={user}={secret}"}
 
-    async def get(self, path: str):
-        data = await self.request("GET", "/api2/json" + path, headers=self.headers())
+    async def get(self, path: str, write: bool = False):
+        data = await self.request("GET", "/api2/json" + path, headers=self.headers(write))
         return (data or {}).get("data") or []
 
     async def resources(self) -> list[dict]:
@@ -127,5 +138,5 @@ class Proxmox(Integration):
             vmid = int(vmid)
         except (TypeError, ValueError) as e:
             raise IntegrationError("Ongeldig vmid") from e
-        await self.request("POST", f"/api2/json/nodes/{node}/{kind}/{vmid}/status/{action}", headers=self.headers())
+        await self.request("POST", f"/api2/json/nodes/{node}/{kind}/{vmid}/status/{action}", headers=self.headers(write=True))
         return f"{action} gestart voor {vmid} op {node}"

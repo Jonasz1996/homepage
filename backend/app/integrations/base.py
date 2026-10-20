@@ -106,6 +106,10 @@ class Integration:
         """Aanmelding voor een eigen call: {"headers": ..., "auth": ..., "params": ...}."""
         raise IntegrationError(f"Eigen calls zijn voor {self.label} nog niet mogelijk")
 
+    async def write_auth(self) -> dict:
+        """Aanmelding voor een eigen call die iets verandert (POST, DELETE, ...). Proxmox gebruikt daar een apart token."""
+        return await self.call_auth()
+
     def need(self, *keys: str) -> list[str]:
         missing = [k for k in keys if not self.secrets.get(k)]
         if missing:

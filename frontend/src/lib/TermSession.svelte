@@ -5,7 +5,7 @@
   import { Terminal } from '@xterm/xterm'
   import '@xterm/xterm/css/xterm.css'
   import { onMount } from 'svelte'
-  import { requestReauth } from './api.js'
+  import { outsideMessage, requestReauth, signalOutside } from './api.js'
 
   // Eén SSH-sessie: xterm.js in de browser, de shell zelf loopt via de WebSocket van de API.
   // Zoals PuTTY: selecteren = kopiëren, rechtsklik = plakken, middenklik = de laatste selectie plakken.
@@ -51,6 +51,7 @@
         // Na 15 minuten vraagt opnieuw verbinden weer de 2FA-code.
         try { await requestReauth(); connect() } catch { term.write(red('Bevestiging geannuleerd')); setState('fout') }
       }
+      else if (m.t === 'error' && m.m.startsWith('buiten:')) { term.write(red(outsideMessage(m.m))); setState('fout'); signalOutside(m.m) }
       else if (m.t === 'error') { term.write(red(m.m)); setState('fout') }
       else if (m.t === 'closed') { term.write('\r\n' + dim(m.m)); setState('gesloten') }
     }

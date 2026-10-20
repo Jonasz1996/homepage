@@ -61,7 +61,7 @@ async def run(integ: Integration, call: dict) -> Any:
         raise IntegrationError("Onbekende methode")
     values = {k: v for k, v in integ.config.items() if isinstance(v, (str, int, float, bool))}
     path = check_path(render(call.get("path") or "", values, encode=True))
-    kw = await integ.call_auth()
+    kw = await (integ.call_auth() if method == "GET" else integ.write_auth())
     headers = {**(kw.pop("headers", None) or {})}
     for k, v in (call.get("headers") or {}).items():
         headers.setdefault(str(k), render(str(v), values))  # de aanmelding van de API gaat voor

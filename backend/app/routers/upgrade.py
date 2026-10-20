@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import outside
 from ..db import get_db
 from ..deps import audit, current_user, recent_auth
 from ..models import AppState, UpdateRun, User
@@ -86,7 +87,7 @@ class InstallIn(BaseModel):
     snapshot: bool = True
 
 
-@router.post("/install", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/install", status_code=status.HTTP_202_ACCEPTED, dependencies=[outside.guard("updates")])
 async def install(body: InstallIn, request: Request, user: User = Depends(recent_auth),
                   db: AsyncSession = Depends(get_db)):
     st = await db.get(AppState, UPDATES_KEY)
@@ -115,7 +116,7 @@ async def install(body: InstallIn, request: Request, user: User = Depends(recent
     return {"runs": [run_out(r) for r in runs], "refused": refused}
 
 
-@router.post("/runs/{run_id}/rollback", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/runs/{run_id}/rollback", status_code=status.HTTP_202_ACCEPTED, dependencies=[outside.guard("updates")])
 async def rollback(run_id: int, request: Request, user: User = Depends(recent_auth),
                    db: AsyncSession = Depends(get_db)):
     r = await db.get(UpdateRun, run_id)
@@ -141,7 +142,7 @@ async def get_settings_(user: User = Depends(current_user), db: AsyncSession = D
     return await upgrade.settings(db)
 
 
-@router.put("/settings")
+@router.put("/settings", dependencies=[outside.guard("updates")])
 async def put_settings(body: SettingsIn, request: Request, user: User = Depends(recent_auth),
                        db: AsyncSession = Depends(get_db)):
     st = await db.get(AppState, upgrade.SETTINGS_KEY)

@@ -7,6 +7,7 @@
   import Lazy from './Lazy.svelte'
   import NameForm from './NameForm.svelte'
   import Notifications from './Notifications.svelte'
+  import OutsideDialog from './OutsideDialog.svelte'
   import ReauthDialog from './ReauthDialog.svelte'
   import ServiceTile from './ServiceTile.svelte'
 
@@ -63,10 +64,23 @@
   async function loadHealth() {
     try { health = await api('/health/summary') } catch { /* volgende poging */ }
   }
-  function openTerminal(hostId = null) {
+  function openTerminal(hostId = null, keys = false) {
     termUsed = true
     termOpen = true
-    if (hostId) termRequest = { hostId }
+    if (hostId || keys) termRequest = { hostId, keys }
+  }
+  // Van buitenaf (via Cloudflare of een publiek IP)? Dan staan terminal, updates, acties en downloads uit.
+  let where = $state.raw(null)
+  async function loadWhere() {
+    try { where = await api('/outside') } catch { /* oudere backend */ }
+  }
+  // Knoppen uit de veiligheidscheck (hw → beveiliging): het venster dat het oplost.
+  function openFix(fix) {
+    if (fix.window === 'security') modal = { kind: 'security', tab: fix.tab }
+    else if (fix.window === 'net') modal = { kind: 'network', tab: fix.tab }
+    else if (fix.window === 'api') modal = { kind: 'apis' }
+    else if (fix.window === 'ssh-keys') openTerminal(null, true)
+    else if (fix.window === 'health') openHealth({ tab: fix.tab })
   }
 
   // Slepen: wat er gesleept wordt en waar het zou landen.
@@ -125,6 +139,9 @@
     { label: 'cron: alle geplande taken, agenda, verbanden', run: () => openCron() },
     { label: 'gezondheid: schijven, temperatuur, snapshots, domeinen, back-up', run: () => openHealth() },
     { label: 'beveiliging: sessies en auditlog', run: () => (modal = { kind: 'security' }) },
+    { label: 'van buitenaf: wat mag er via cloudflare (terminal, updates, acties)', run: () => (modal = { kind: 'security', tab: 'outside' }) },
+    { label: 'veiligheidscheck: 2fa, tokens, sessies, ssh-sleutel', run: () => openHealth({ tab: 'beveiliging' }) },
+    { label: 'firewall: welke poorten het dashboard gebruikt', run: () => (modal = { kind: 'network', tab: 'firewall' }) },
     { label: 'capaciteit: opslag, cpu en ram', run: () => (modal = { kind: 'capacity' }) },
     { label: 'tijdlijn: storingen, herstarts, back-ups', run: () => (modal = { kind: 'history' }) },
     { label: 'weekrapport', run: () => (modal = { kind: 'history', tab: 'report' }) },
@@ -463,6 +480,7 @@
     loadNet()
     loadCron()
     loadHealth()
+    loadWhere()
     const stopCron = poll(loadCron, 120000)
     const stopHealth = poll(loadHealth, 120000)
     const stopNet = poll(loadNet, 120000)
@@ -480,6 +498,10 @@
   <Card title="homepage" glow>
     {#snippet right()}
       <span class="clock">{clock}</span>
+      {#if where?.outside}
+        <button class="mini buiten" onclick={() => (modal = { kind: 'security', tab: 'outside' })}
+                title="Je bent van buitenaf verbonden ({where.why}): terminal, updates, acties en downloads staan uit, tenzij je ze aanzet">buiten</button>
+      {/if}
       <Notifications onopen={openNotification} onwebhooks={() => (modal = { kind: 'webhooks' })} />
       <button class="mini burger" class:on={menuOpen} onclick={() => (menuOpen = !menuOpen)} aria-label="Menu" aria-expanded={menuOpen}>☰</button>
       <!-- Op de gsm klapt dit open onder ☰; op een groot scherm staan de knoppen gewoon in de titelbalk. -->
@@ -725,7 +747,7 @@
 {:else if modal?.kind === 'updates'}
   <Lazy load={() => import('./Updates.svelte')} onclose={() => (modal = null)} onchanged={loadUpdates} />
 {:else if modal?.kind === 'security'}
-  <Lazy load={() => import('./Security.svelte')} onclose={() => (modal = null)} />
+  <Lazy load={() => import('./Security.svelte')} tab={modal.tab} onclose={() => { modal = null; loadWhere() }} />
 {:else if modal?.kind === 'news'}
   <Lazy load={() => import('./Changelog.svelte')} entries={modal.entries} version={modal.version}
         onclose={() => { modal = null; markNews() }} />
@@ -751,7 +773,7 @@
 {/if}
 {#if healthUsed}
   {#await import('./Health.svelte') then { default: Health }}
-    <Health open={healthOpen} initial={healthInitial} onclose={() => (healthOpen = false)} />
+    <Health open={healthOpen} initial={healthInitial} onclose={() => (healthOpen = false)} onfix={openFix} />
   {:catch}
     <Lazy load={() => Promise.reject()} />
   {/await}
@@ -763,12 +785,14 @@
     <Lazy load={() => Promise.reject()} />
   {/await}
 {/if}
+<OutsideDialog onsettings={() => (modal = { kind: 'security', tab: 'outside' })} />
 <ReauthDialog />
 
 <style>
   /* Volle schermbreedte; op brede schermen komen er gewoon meer groepen naast elkaar. */
   .wrap { padding: min(4vh, 32px) clamp(14px, 2vw, 36px) 50px }
   .clock { color: var(--text); margin-right: 4px }
+  .buiten { color: var(--mid); border-color: rgba(255, 190, 90, .45) }
   .n { margin-left: 5px; color: var(--text-h); font-size: 11px; font-weight: 500 }
   .upd .n { color: var(--mid) }
   .cronbad .n { color: var(--err) }

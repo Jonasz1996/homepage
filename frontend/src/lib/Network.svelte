@@ -4,6 +4,7 @@
   import Modal from './Modal.svelte'
   import { storm } from './fx.js'
   import Devices from './Devices.svelte'
+  import Firewall from './Firewall.svelte'
   import NetMap from './NetMap.svelte'
 
   // Internet: publiek IP, WAN-gateways (OPNsense), Cloudflare-tunnels en Wake-on-LAN; en de apparaten op het LAN.
@@ -52,11 +53,14 @@
     <button class="mini" class:on={tab === 'internet'} onclick={() => (tab = 'internet')}>internet</button>
     <button class="mini" class:on={tab === 'apparaten'} onclick={() => (tab = 'apparaten')}>apparaten</button>
     <button class="mini" class:on={tab === 'kaart'} onclick={() => (tab = 'kaart')}>kaart</button>
+    <button class="mini" class:on={tab === 'firewall'} onclick={() => (tab = 'firewall')}>firewall</button>
   </div>
   {#if tab === 'apparaten'}
     <Devices {initialQuery} />
   {:else if tab === 'kaart'}
     <NetMap />
+  {:else if tab === 'firewall'}
+    <Firewall />
   {:else}
   {#if error}<p class="err">{error}</p>{/if}
   {#if data}

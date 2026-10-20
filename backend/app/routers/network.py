@@ -4,9 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import outside
 from ..db import get_db
 from ..deps import audit, current_user, event, recent_auth
 from ..models import AppState, Service, ServiceState, User
+from ..monitoring import ports
 from ..monitoring.network import power_overview, watch_gateways, watch_public_ip, watch_tunnels
 from .. import wol
 from .integrations import clients
@@ -55,7 +57,13 @@ async def refresh_network(user: User = Depends(current_user), db: AsyncSession =
     return await _overview(db)
 
 
-@router.post("/services/{service_id}/wol")
+@router.get("/network/ports")
+async def port_list(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Welke IP's en poorten het dashboard gebruikt: voor de firewallregel tussen de VLAN's."""
+    return await ports.overview(db)
+
+
+@router.post("/services/{service_id}/wol", dependencies=[outside.guard("acties")])
 async def wake(service_id: int, request: Request, user: User = Depends(recent_auth), db: AsyncSession = Depends(get_db)):
     s = await db.get(Service, service_id)
     if s is None:

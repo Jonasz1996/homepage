@@ -300,7 +300,7 @@
               <input id="an-cat" bind:value={nw.category} list="api-cats" maxlength="40" />
               {#each nw.t.secrets as k}
                 <label class="lbl" for="an-s-{k}">{k}{nw.t.secret && nw.t.secrets.length === 1 ? ` · ${nw.t.secret}` : nw.t.secret_help[k] ? ` · ${nw.t.secret_help[k]}` : ''}</label>
-                <input id="an-s-{k}" type={k === 'username' ? 'text' : 'password'} bind:value={nw.secrets[k]} autocomplete="new-password" />
+                <input id="an-s-{k}" type={k.endsWith('username') ? 'text' : 'password'} bind:value={nw.secrets[k]} autocomplete="new-password" />
               {/each}
               <label class="lbl" for="an-tile">Meteen koppelen aan tegel (optioneel)</label>
               <select id="an-tile" bind:value={nw.tile}>
@@ -337,7 +337,7 @@
                         <td><input class="u" bind:value={b.url} aria-label="Adres voor {m.name}" /></td>
                         <td class="sec">
                           {#each tplSecrets(m.template) as k}
-                            <input type={k === 'username' ? 'text' : 'password'} bind:value={b.secrets[k]} placeholder={k === 'token' ? (templates[m.template]?.secret || 'sleutel') : k}
+                            <input type={k.endsWith('username') ? 'text' : 'password'} bind:value={b.secrets[k]} placeholder={k === 'token' ? (templates[m.template]?.secret || 'sleutel') : k}
                                    autocomplete="new-password" aria-label="{k} voor {m.name}" />
                           {:else}<small>geen nodig</small>{/each}
                         </td>
@@ -410,7 +410,7 @@
               {:else if form.removed.includes(k)}
                 <span class="gone">wordt gewist</span><button class="mini" onclick={() => (form.removed = form.removed.filter((x) => x !== k))}>herstel</button>
               {:else}
-                <input type={k === 'username' ? 'text' : 'password'} bind:value={form.secrets[k]} autocomplete="new-password"
+                <input type={k.endsWith('username') ? 'text' : 'password'} bind:value={form.secrets[k]} autocomplete="new-password"
                        placeholder={kinds[form.kind]?.secrets?.[k] || (k === 'token' ? 'API-sleutel' : k)} aria-label="Sleutel {k}" />
               {/if}
             </div>

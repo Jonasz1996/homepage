@@ -67,7 +67,7 @@ def next_run(value: dict | None, now: datetime) -> datetime | None:
 
 
 async def _call(px, method: str, path: str, **kw):
-    data = await px.request(method, "/api2/json" + path, headers=px.headers(), **kw)
+    data = await px.request(method, "/api2/json" + path, headers=px.headers(write=method != "GET"), **kw)
     return (data or {}).get("data")
 
 

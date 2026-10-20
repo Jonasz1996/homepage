@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import outside
 from ..db import get_db
 from ..deps import audit, current_user, recent_auth
 from ..integrations import IntegrationError
@@ -53,7 +54,7 @@ async def _clean(db: AsyncSession, body: RuleIn) -> dict:
         raise HTTPException(422, str(e)) from e
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED, dependencies=[outside.guard("acties")])
 async def create(body: RuleIn, request: Request, user: User = Depends(recent_auth), db: AsyncSession = Depends(get_db)):
     action = await _clean(db, body)
     r = HealRule(service_id=body.service_id, enabled=body.enabled, after=body.after, max_per_hour=body.max_per_hour,
@@ -72,7 +73,7 @@ async def _rule(db: AsyncSession, rule_id: int) -> HealRule:
     return r
 
 
-@router.put("/{rule_id}")
+@router.put("/{rule_id}", dependencies=[outside.guard("acties")])
 async def update(rule_id: int, body: RuleIn, request: Request, user: User = Depends(recent_auth),
                  db: AsyncSession = Depends(get_db)):
     r = await _rule(db, rule_id)
@@ -92,7 +93,7 @@ async def remove(rule_id: int, request: Request, user: User = Depends(recent_aut
     await db.commit()
 
 
-@router.post("/{rule_id}/test")
+@router.post("/{rule_id}/test", dependencies=[outside.guard("acties")])
 async def test(rule_id: int, request: Request, user: User = Depends(recent_auth), db: AsyncSession = Depends(get_db)):
     """De actie nu één keer uitvoeren, om te zien of ze werkt."""
     r = await _rule(db, rule_id)

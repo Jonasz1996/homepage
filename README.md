@@ -37,19 +37,38 @@ Acties (VM herstarten, AdGuard uitzetten, ...) vragen je 2FA-code als je langer 
 niet bevestigd hebt, en komen in de audit-log en het meldingencentrum. Widgets uit je homepage.dev-import
 gebruiken dezelfde namen (`url`, `username`, `password`) en werken meteen zodra de geheimen kloppen.
 
-Een token voor Proxmox VE (op een node, alleen-lezen plus aan/uitzetten):
+**Twee tokens voor Proxmox VE** (aanbevolen, op een node): een alleen-lezen token voor monitoring, capaciteit, de
+kaart en de cluster, en een apart token voor wat iets verandert (aan/uit, snapshots, updates, de hersteltest). Lekt
+het leestoken, dan kan niemand iets uitzetten. Het dashboard kiest per verzoek het juiste:
+
+```bash
+# alleen lezen
+pveum user add homepage@pve
+pveum aclmod / -user homepage@pve -role PVEAuditor
+pveum user token add homepage@pve dashboard --privsep 0
+# acties
+pveum user add homepage-acties@pve
+pveum role add HomepageActies -privs "VM.Audit VM.PowerMgmt VM.Snapshot VM.Snapshot.Rollback VM.Allocate VM.Config.Disk VM.Config.Network VM.Config.Options Sys.Audit Sys.Modify Datastore.Audit Datastore.AllocateSpace"
+pveum aclmod /vms -user homepage-acties@pve -role HomepageActies
+pveum aclmod /nodes -user homepage-acties@pve -role HomepageActies
+pveum aclmod /storage -user homepage-acties@pve -role HomepageActies
+pveum user token add homepage-acties@pve acties --privsep 0
+```
+
+Bij de Proxmox-API (of -tegel): `username` = `homepage@pve!dashboard` en `password` = het geheim van dat token;
+`action_username` = `homepage-acties@pve!acties` en `action_password` = het geheim van het tweede. `Sys.Modify` is
+er voor de lijst met updates (Proxmox vraagt dat recht om ze te lezen), `VM.Allocate`, `VM.Config.*` en
+`Datastore.AllocateSpace` alleen voor de hersteltest. **hw → beveiliging** kijkt na of het leestoken echt niets
+kan veranderen.
+
+Eén token voor alles werkt ook nog (zonder `action_username`), maar dat token heeft dan schrijfrechten:
 
 ```bash
 pveum user add homepage@pve
 pveum aclmod / -user homepage@pve -role PVEAuditor
-pveum role add HomepagePower -privs VM.PowerMgmt && pveum aclmod /vms -user homepage@pve -role HomepagePower
+pveum role add HomepagePower -privs VM.PowerMgmt,VM.Snapshot,VM.Snapshot.Rollback && pveum aclmod /vms -user homepage@pve -role HomepagePower
 pveum user token add homepage@pve dashboard --privsep 0
 ```
-
-Snapshots verwijderen vanuit **hw → snapshots** vraagt daarnaast `VM.Snapshot`
-(`pveum role modify HomepagePower -privs VM.PowerMgmt,VM.Snapshot,VM.Snapshot.Rollback`, Rollback is voor updates terugdraaien; bestaat de rol al met meer rechten, voeg het er dan bij).
-
-Gebruik `homepage@pve!dashboard` als `username` en het getoonde geheim als `password`.
 Voor PBS (alleen lezen):
 
 ```bash
@@ -64,6 +83,12 @@ Fase 5, SSH-terminal (knop `>_` in de titelbalk):
 - hosts beheren (naam, IP, poort, gebruiker, sleutel of wachtwoord), tabbladen met meerdere sessies tegelijk
 - sleutels maken (ed25519) of een bestaande plakken; de private sleutel staat versleuteld in de database
   en komt nooit in de browser. Kopieer de publieke sleutel naar `~/.ssh/authorized_keys` op de host
+- **vastzetten** (sleutels → vastzetten op het dashboard): zet `from="<IP van het dashboard>"` voor de sleutel in
+  `authorized_keys` op elke host, zodat een gestolen sleutel alleen nog vanaf de dashboard-container werkt. Het IP
+  is wat de host zelf als afzender ziet (`SSH_CLIENT`). Het oude bestand blijft als
+  `~/.ssh/authorized_keys.homepage-bak`; kan het dashboard er daarna niet meer in, dan zet het dat meteen terug. Op
+  een Proxmox-node is `authorized_keys` een link naar `/etc/pve/priv` en geldt het voor de hele cluster. Gebruik je
+  een geïmporteerde sleutel ook vanaf je pc, zet hem dan niet vast
 - hostsleutel wordt bij de eerste verbinding getoond en pas na jouw bevestiging bewaard; verandert hij
   later, dan weigert de terminal te verbinden (bescherming tegen man-in-the-middle)
 - een terminal openen vraagt je 2FA-code als je langer dan 15 minuten niet bevestigd hebt;
@@ -129,8 +154,9 @@ Later, deel 1 (tijdlijn, weekrapport en updates):
   welke containers een nieuwer image hebben (Portainer 2.20 of nieuwer). Beveiligingsupdates in het oranje.
   Containers krijgen hun teller op de tegel met dezelfde naam
 
-  Rechten: het Proxmox-token heeft voor de lijst met updates `Sys.Modify` op `/nodes` nodig
-  (`pveum role add HomepageApt -privs Sys.Modify && pveum aclmod /nodes -user homepage@pve -role HomepageApt`); het
+  Rechten: Proxmox vraagt voor de lijst met updates `Sys.Modify` op `/nodes`. Met twee tokens gebruikt het dashboard
+  daar het actietoken (dat heeft het al); met één token: `pveum role add HomepageApt -privs Sys.Modify && pveum aclmod
+  /nodes -user homepage@pve -role HomepageApt`. Het
   PBS-token van hierboven mag het al. Zonder die rechten staat er een duidelijke melding bij die machine en werkt de
   rest gewoon
 - **updates installeren** (in `apt`): vink machines en containers aan en klik *installeren*. Eerst een snapshot
@@ -307,6 +333,21 @@ Later, deel 3 (Authentik en gsm):
   (Gebruikers → API-tokens, voor een gebruiker die alle hosts mag lezen, bv. een eigen gebruiker in een groep met
   leesrechten op alle hostgroepen) en als adres de webinterface (`https://zabbix.jbogaert.be`, zonder
   `/api_jsonrpc.php`). Gebruikt alleen lezen: host.get, trigger.get, item.get en trend.get
+- **van buitenaf** (⚿ → van buitenaf): komt een bezoek via Cloudflare (NPM gaf een `CF-Connecting-IP` door) of
+  vanaf een publiek IP, dan staan de terminal (ook cronjobs starten of bewaken, rsyslog uitrollen, sleutels
+  vastzetten), updates installeren, acties (aan/uit, Wake-on-LAN, zelfherstel, snapshots verwijderen, hersteltest,
+  API-calls die iets veranderen, poortscan) en configuraties downloaden standaard uit. Kijken kan altijd; bovenaan
+  staat dan "buiten". Per functie: uit, één uur aan (ook onderweg, met je 2FA-code) of altijd aan (alleen thuis).
+  Aanzetten geeft een melding. Je LAN, VPN en Tailscale tellen als thuis, net als je eigen publieke IP (wie thuis via
+  Cloudflare surft); extra thuisnetwerken (bv. je IPv6-voorvoegsel) stel je daar ook in, alleen thuis
+- **net → firewall**: welke IP's en poorten het dashboard echt gebruikt (uit de tegels, API-beheer, de SSH-hosts en
+  de DNS-server), wat er binnenkomt, en een voorstel voor aliassen en regels in OPNsense voor de firewall tussen de
+  VLAN's. Bovenaan staat of er een slot voor het dashboard stond bij het laatste bezoek van buitenaf: Cloudflare
+  Access (header `Cf-Access-Jwt-Assertion`) of de forward-auth van Authentik in NPM (`X-authentik-username`)
+- **hw → beveiliging**: een veiligheidscheck. Staat 2FA overal aan (ook via Authentik), is er een kopie van
+  `secret.key` buiten de container, werkt de kopie van de back-up, zijn er sessies vanaf een publiek IP, wat staat
+  er aan van buitenaf, stond er een slot voor het dashboard, is de SSH-sleutel vastgezet en hebben de Proxmox-tokens
+  niet te veel rechten. Elk punt heeft een knop naar het venster dat het oplost
 - **effecten** zoals in aiverslag: een achtergrond van punten en 0/1 die voor de muis wijken, een ripple op elke knop,
   bliksem en vonken bij een geslaagde actie (herstarten, wekken), een vuurbal met flits en schudden bij verwijderen
   en uitloggen, en een bliksem op het belletje als er een nieuwe storing binnenkomt. Uit te zetten met `Ctrl+K` →

@@ -178,7 +178,7 @@ async def wait_task(px, node: str, upid: str, timeout: float = 600) -> None:
 
 
 async def _px_call(px, method: str, path: str, **kw) -> str:
-    data = await px.request(method, "/api2/json" + path, headers=px.headers(), **kw)
+    data = await px.request(method, "/api2/json" + path, headers=px.headers(write=method != "GET"), **kw)
     return (data or {}).get("data") or ""
 
 

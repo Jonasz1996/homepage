@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import outside
 from ..db import get_db
 from ..deps import audit, current_user, notify, recent_auth
 from ..integrations import REGISTRY, Integration, IntegrationError, build, calls
@@ -114,7 +115,7 @@ class ActionIn(BaseModel):
     params: dict = Field(default_factory=dict)
 
 
-@router.post("/services/{service_id}/integration/action")
+@router.post("/services/{service_id}/integration/action", dependencies=[outside.guard("acties")])
 async def integration_action(service_id: int, data: ActionIn, request: Request,
                              user: User = Depends(recent_auth), db: AsyncSession = Depends(get_db)):
     s = await _service(db, service_id)

@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import outside
 from ..cron import views, wrap
 from ..cron.probe import wid_for
 from ..cron.scan import STATE_KEY, run_scan, spec_of
@@ -181,7 +182,7 @@ class MonitorIn(BaseModel):
     on: bool
 
 
-@router.post("/jobs/{job_id}/monitor")
+@router.post("/jobs/{job_id}/monitor", dependencies=[outside.guard("terminal")])
 async def monitor(job_id: int, body: MonitorIn, request: Request, user: User = Depends(recent_auth),
                   db: AsyncSession = Depends(get_db)):
     job = await _job(db, job_id)
@@ -240,6 +241,10 @@ async def run_now(ws: WebSocket, job_id: int, db: AsyncSession = Depends(get_db)
     if user is None:
         await _send(ws, t="error", m=why)
         await ws.close(4401)
+        return
+    if why := await outside.blocked(ws, db, "terminal"):
+        await _send(ws, t="error", m=why)
+        await ws.close(4403)
         return
     job = await db.get(CronJob, job_id)
     if job is None or job.kind not in views.RUNNABLE or not job.host_id:

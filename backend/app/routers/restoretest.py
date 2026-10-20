@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import outside
 from ..db import ensure_state, get_db
 from ..deps import audit, current_user, recent_auth
 from ..integrations import IntegrationError, build
@@ -59,7 +60,7 @@ class SettingsIn(BaseModel):
     only: list[int] = Field(default_factory=list, max_length=200)
 
 
-@router.put("/settings")
+@router.put("/settings", dependencies=[outside.guard("acties")])
 async def put_settings(body: SettingsIn, request: Request, user: User = Depends(recent_auth),
                        db: AsyncSession = Depends(get_db)):
     if body.service_id is not None:
@@ -73,7 +74,7 @@ async def put_settings(body: SettingsIn, request: Request, user: User = Depends(
     return _out(st.value)
 
 
-@router.post("/run", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/run", status_code=status.HTTP_202_ACCEPTED, dependencies=[outside.guard("acties")])
 async def run_now(request: Request, user: User = Depends(recent_auth), db: AsyncSession = Depends(get_db)):
     global _task
     st = await db.get(AppState, restoretest.STATE_KEY)

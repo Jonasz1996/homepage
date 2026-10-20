@@ -1,11 +1,13 @@
 <script>
+  import { untrack } from 'svelte'
   import { api, withReauth } from './api.js'
   import Modal from './Modal.svelte'
 
-  // Beveiliging: waar je ingelogd bent, wat er gebeurd is (auditlog) en je wachtwoord.
-  let { onclose } = $props()
+  // Beveiliging: waar je ingelogd bent, wat er gebeurd is (auditlog), je wachtwoord en wat er van buitenaf mag.
 
-  let tab = $state('sessions')
+  let { onclose, tab: initialTab = null } = $props()
+
+  let tab = $state(untrack(() => initialTab) || 'sessions')
   let sessions = $state([])
   let audit = $state([])
   let more = $state(false)
@@ -38,7 +40,38 @@
     if (tab === 'sessions') loadSessions()
     else if (tab === 'audit') { filter; loadAudit() }
     else if (tab === 'sso') loadSso()
+    else if (tab === 'outside') loadOutside()
   })
+
+  // Van buitenaf: per functie uit, één uur aan of altijd aan; en wat als thuis telt.
+  let out = $state(null)
+  let nets = $state('')
+  let outMsg = $state('')
+  async function loadOutside() {
+    try { out = await api('/outside'); nets = out.networks.join('\n'); error = '' } catch (e) { error = e.message }
+  }
+  async function setMode(f, mode) {
+    outMsg = ''
+    try {
+      const r = await withReauth(() => api(`/outside/features/${f.key}`, { method: 'PUT', body: { mode } }))
+      out = { ...out, features: r.features }
+      error = ''
+    } catch (e) { error = e.message }
+  }
+  async function saveHome(e) {
+    e.preventDefault()
+    outMsg = ''
+    try {
+      const r = await withReauth(() => api('/outside/settings', { method: 'PUT',
+        body: { home_ip: out.home_ip, networks: nets.split(/[\s,]+/).filter(Boolean) } }))
+      out = { ...out, ...r }
+      nets = r.networks.join('\n')
+      outMsg = 'Opgeslagen.'
+      error = ''
+    } catch (err) { error = err.message }
+  }
+  const until = (ts) => new Date(ts).toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' })
+  const ACCESS = { 'cloudflare-access': 'Cloudflare Access', authentik: 'Authentik' }
 
   async function revoke(s) {
     try {
@@ -122,6 +155,8 @@
     syslog_rollout: 'rsyslog uitgerold', login_failed_oidc: 'login via Authentik mislukt', oidc_settings_changed: 'Authentik-instellingen gewijzigd', maintenance: 'onderhoud', revision_restored: 'versie teruggezet',
     page_deleted: 'pagina verwijderd', group_deleted: 'groep verwijderd', log_rule_added: 'logregel toegevoegd',
     log_rule_changed: 'logregel gewijzigd', log_rule_deleted: 'logregel verwijderd', wol: 'Wake-on-LAN',
+    outside_mode: 'van buitenaf aan/uit', outside_settings: 'thuisnetwerken gewijzigd', ssh_pin: 'SSH-sleutel vastgezet',
+    ssh_unpin: 'SSH-sleutel losgemaakt', secret_key_saved: 'kopie van secret.key bevestigd',
   }
   const BAD = /failed|mismatch|revoked|deleted/
   const detail = (d) => Object.entries(d || {}).map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join('  ')
@@ -133,6 +168,7 @@
     <button class="mini" class:on={tab === 'audit'} onclick={() => (tab = 'audit')}>auditlog</button>
     <button class="mini" class:on={tab === 'password'} onclick={() => (tab = 'password')}>wachtwoord</button>
     <button class="mini" class:on={tab === 'sso'} onclick={() => (tab = 'sso')}>authentik</button>
+    <button class="mini" class:on={tab === 'outside'} onclick={() => (tab = 'outside')}>van buitenaf</button>
   </div>
   <p class="err">{error}</p>
 
@@ -211,6 +247,44 @@
         <div class="row foot"><button class="btn">Opslaan</button></div>
       </form>
     {/if}
+  {:else if tab === 'outside'}
+    {#if out}
+      <p class="where" class:away={out.outside}>
+        {#if out.outside}
+          Dit bezoek komt <b>van buitenaf</b> ({out.why}, {out.ip}{out.country ? ` · ${flag(out.country)} ${out.country}` : ''}).
+          {out.access ? `Er stond ${ACCESS[out.access]} voor.` : 'Er stond geen Cloudflare Access of Authentik voor.'}
+        {:else}
+          Dit bezoek komt <b>van thuis</b> ({out.why}{out.ip ? `, ${out.ip}` : ''}).
+        {/if}
+      </p>
+      <p class="hint">Van buitenaf = via Cloudflare of vanaf een publiek IP. Dan staan deze functies standaard uit, zodat
+        wie je login overneemt er niets mee kan. Kijken kan altijd. Aanzetten vraagt je 2FA-code en geeft een melding;
+        <i>altijd</i> kan alleen thuis.</p>
+      {#each out.features as f (f.key)}
+        <div class="feat">
+          <div class="fw"><b>{f.label}</b><small>{f.help}</small></div>
+          <div class="seg" role="group" aria-label="{f.label} van buitenaf">
+            <button class="mini" class:on={f.mode === 'uit'} onclick={() => setMode(f, 'uit')}>uit</button>
+            <button class="mini" class:on={f.mode === 'uur'} onclick={() => setMode(f, 'uur')}>{f.mode === 'uur' ? `aan tot ${until(f.until)}` : '1 uur'}</button>
+            <button class="mini" class:on={f.mode === 'aan'} class:warn={f.mode === 'aan'} disabled={out.outside && f.mode !== 'aan'}
+                    onclick={() => setMode(f, 'aan')} title={out.outside ? 'Kan alleen thuis' : ''}>altijd</button>
+          </div>
+        </div>
+      {/each}
+      <form onsubmit={saveHome} class="home">
+        <b>wat telt als thuis</b>
+        <p class="hint">Je LAN, VPN en Tailscale tellen al als thuis. Surf je thuis via Cloudflare (bv. met Private DNS op je
+          gsm), dan komt dat binnen met je eigen publieke IP.</p>
+        <label class="chk"><input type="checkbox" bind:checked={out.home_ip} disabled={out.outside} /> mijn eigen publieke IP telt als thuis</label>
+        <label class="lbl" for="out-nets">Extra thuisnetwerken (één per regel, bv. het IPv6-voorvoegsel van je internet)</label>
+        <textarea id="out-nets" bind:value={nets} rows="3" disabled={out.outside} placeholder="2a02:1810:abcd::/48"></textarea>
+        {#if outMsg}<p class="ok">{outMsg}</p>{/if}
+        <div class="row foot">
+          <button class="btn" disabled={out.outside}>Opslaan</button>
+          {#if out.outside}<span class="hint">Wijzigen kan alleen thuis.</span>{/if}
+        </div>
+      </form>
+    {/if}
   {:else}
     <form onsubmit={changePw}>
       <label class="lbl" for="pw-cur">Huidig wachtwoord</label>
@@ -248,5 +322,15 @@
   .chk { display: flex; gap: 8px; align-items: center; font-size: 12.5px; color: var(--text); margin: 10px 0 }
   .chk input { width: auto }
   .uri { color: var(--ok); word-break: break-all }
-  @media (max-width: 560px) { .two { grid-template-columns: 1fr } }
+  .where { font-size: 13px; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(143, 214, 164, .35); background: var(--fill) }
+  .where.away { border-color: rgba(230, 181, 107, .5) }
+  .feat { display: flex; gap: 12px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line) }
+  .fw { flex: 1; min-width: 0 }
+  .fw b { display: block; color: var(--text-h); font-weight: 500; font-size: 13px }
+  .fw small { color: var(--muted); font-size: 11.5px }
+  .seg { display: flex; gap: 4px; flex-shrink: 0 }
+  .seg .warn.on { color: var(--mid); border-color: rgba(230, 181, 107, .6) }
+  .home { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px }
+  .home b { color: var(--text-h); font-weight: 500 }
+  @media (max-width: 560px) { .two { grid-template-columns: 1fr } .feat { flex-direction: column; align-items: flex-start } }
 </style>

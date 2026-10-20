@@ -3,6 +3,23 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 25,
+    datum: '2026-10-05',
+    titel: 'Veiliger van buitenaf',
+    items: [
+      'Van buitenaf (via Cloudflare of een publiek IP) staan de terminal, updates installeren, acties (VM\'s aan/uit, Wake-on-LAN, zelfherstel, snapshots, hersteltest) en configuraties downloaden standaard uit. Kijken kan altijd. Bovenaan staat dan "buiten".',
+      'Heb je onderweg iets nodig: zet het voor één uur aan met je 2FA-code (je krijgt een melding). Altijd aanzetten kan alleen thuis: ⚿ → van buitenaf.',
+      'Proxmox kan nu met twee tokens: een alleen-lezen token voor monitoring en een apart actietoken voor acties, snapshots, updates en de hersteltest.',
+      'Terminal → sleutels → vastzetten: de SSH-sleutel van het dashboard werkt daarna alleen nog vanaf het dashboard (from= in authorized_keys). Het dashboard kijkt na of het er nog in kan en zet het anders terug.',
+      'net → firewall: welke IP\'s en poorten het dashboard echt gebruikt, met een voorstel voor aliassen en regels in OPNsense, en of er Cloudflare Access of Authentik voor het dashboard staat.',
+      'hw → beveiliging: een veiligheidscheck van 2FA, secret.key, de kopie buiten de container, sessies van buitenaf, de tokens, de SSH-sleutel en wat er van buitenaf mag.',
+    ],
+    instellen: [
+      'Proxmox: maak een tweede token voor acties (README, "Twee tokens") en zet het bij je Proxmox-API als action_username en action_password. Maak daarna het eerste token alleen-lezen.',
+      'Kijk hw → beveiliging na en volg wat oranje staat.',
+    ],
+  },
+  {
     nr: 24,
     datum: '2026-10-05',
     titel: 'Vaste versies en een update terugdraaien',
