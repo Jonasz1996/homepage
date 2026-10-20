@@ -1,11 +1,13 @@
-"""Cloudflare Tunnel: status van je tunnels (cloudflared) via de Cloudflare-API.
+"""Cloudflare Tunnel: status van je tunnels (cloudflared) via de Cloudflare-API. Met een apart token (workers_token)
+ook de Worker van de check van buitenaf zetten (monitoring/buitencheck.py).
 
-Voor Netwerk › publiek (monitoring/exposure.py) leest hetzelfde token ook je zones, DNS-records, alle tunnels met hun
-instellingen, de apps van Cloudflare Access en "Always Use HTTPS". Alleen lezen (GET): het dashboard verandert niets
-in Cloudflare.
+Voor Netwerk › publiek (monitoring/exposure.py) leest het gewone token ook je zones, DNS-records, alle tunnels met hun
+instellingen, de apps van Cloudflare Access en "Always Use HTTPS". Alleen lezen (GET): daarvoor verandert het dashboard
+niets in Cloudflare.
 """
 
 import asyncio
+import json
 import re
 
 import httpx
@@ -98,8 +100,12 @@ class CloudflareTunnel(Integration):
         "tunnel": "optioneel: naam van één tunnel, anders alle",
         "zones": "optioneel: alleen deze zones voor Netwerk › publiek (bv. jbogaert.be), anders alle",
     }
-    secret_help = {"token": "API-token met Account → Cloudflare Tunnel → Read; voor Netwerk › publiek ook Zone → Zone → "
-                            "Read, Zone → DNS → Read en Account → Access: Apps and Policies → Read"}
+    secret_help = {
+        "token": "API-token met Account → Cloudflare Tunnel → Read; voor Netwerk › publiek ook Zone → Zone → Read, Zone → "
+                 "DNS → Read en Account → Access: Apps and Policies → Read",
+        "workers_token": "optioneel: API-token met Account → Workers Scripts → Edit, voor de check van buitenaf (Netwerk → "
+                         "check van buitenaf). Apart van het token hierboven; alleen nodig om de Worker te zetten.",
+    }
 
     async def call_auth(self) -> dict:
         return {"headers": self._bearer()}
@@ -260,3 +266,79 @@ class CloudflareTunnel(Integration):
                               "columns": ["tunnel", "status", "verbindingen", "datacenters", "versie"],
                               "rows": [[cell(t["name"]), cell(t["status"], t["level"]), cell(t["connections"]),
                                         cell(", ".join(t["colos"]) or "—"), cell(t["version"] or "—")] for t in ts]}]}
+
+    # --- Workers (check van buitenaf) ----------------------------------------------------------------------------
+    # Alleen met workers_token, nooit met het token voor de tunnels, en alleen naar api.cloudflare.com met een
+    # gecontroleerd certificaat: een token dat alle Workers van het account mag aanpassen, gaat zo nooit naar een ander
+    # adres.
+
+    def _workers(self) -> tuple[str, dict]:
+        if self.base != API:
+            raise IntegrationError(f"Zet het adres van deze API op {API}")
+        if self.config.get("insecure"):
+            raise IntegrationError("Zet 'zelfondertekend certificaat toestaan' uit bij deze API: het workers_token gaat "
+                                   "alleen over een gecontroleerde verbinding")
+        account = str(self.config.get("account") or "").strip().lower()
+        if not ACCOUNT_RE.match(account):
+            raise IntegrationError("Account-id ontbreekt of klopt niet (32 tekens)")
+        return account, {"Authorization": f"Bearer {self.need('workers_token')[0]}"}
+
+    async def _result(self, method: str, path: str, **kw):
+        data = await self.request(method, path, **kw) or {}
+        if not data.get("success", True):
+            raise IntegrationError("Cloudflare weigerde het verzoek")
+        return data.get("result")
+
+    async def token_id(self) -> str | None:
+        """Het ID van het workers_token (geen geheim), voor de proef en de auditlog. Een token van het account zelf
+        (in plaats van een gebruiker) kent Cloudflare alleen onder het account."""
+        account, auth = self._workers()
+        try:
+            res = await self._result("GET", "/user/tokens/verify", headers=auth)
+        except IntegrationError as e:
+            if not str(e).startswith("Geweigerd"):
+                raise
+            res = await self._result("GET", f"/accounts/{account}/tokens/verify", headers=auth)
+        return (res or {}).get("id")
+
+    async def worker_scripts(self) -> list[dict]:
+        account, auth = self._workers()
+        res = await self._result("GET", f"/accounts/{account}/workers/scripts", headers=auth)
+        return [{"id": w.get("id"), "etag": w.get("etag"), "modified_on": w.get("modified_on")}
+                for w in res or [] if isinstance(w, dict)]
+
+    async def workers_subdomain(self) -> str | None:
+        """De naam onder workers.dev (bv. jonas), of None als het account er nog geen koos."""
+        account, auth = self._workers()
+        try:
+            res = await self._result("GET", f"/accounts/{account}/workers/subdomain", headers=auth)
+        except IntegrationError as e:
+            if str(e).startswith("HTTP 404"):
+                return None
+            raise
+        return (res or {}).get("subdomain") or None
+
+    async def run_worker_calls(self, calls: list[dict], secret: str, script: str
+                               ) -> tuple[dict, IntegrationError | None]:
+        """De calls van buitencheck.worker_calls na elkaar, precies zoals de proef ze toont, tot de eerste fout. upload:
+        het script met zijn instellingen (multipart), met het echte geheim alleen in de verzonden metadata, in de plaats
+        van de plaatshouder. Geeft ({soort: resultaat} van wat lukte (bij upload de etag), de eerste fout)."""
+        _, auth = self._workers()
+        done: dict = {}
+        for c in calls:
+            try:
+                if c["kind"] == "upload":
+                    meta = json.loads(json.dumps(c["data"]))
+                    for b in meta.get("bindings") or []:
+                        if b.get("name") == "HOMEPAGE_TOKEN":
+                            b["text"] = secret
+                    res = await self._result(c["method"], c["path"], headers=auth, files={
+                        "metadata": (None, json.dumps(meta), "application/json"),
+                        "worker.js": ("worker.js", script.encode(), "application/javascript+module")})
+                    done["upload"] = (res or {}).get("etag")
+                else:
+                    await self._result(c["method"], c["path"], headers=auth, json=c["data"])
+                    done[c["kind"]] = True
+            except IntegrationError as e:
+                return done, e
+        return done, None

@@ -3,6 +3,18 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 37,
+    datum: '2026-10-11',
+    titel: 'Check van buitenaf',
+    items: [
+      'Netwerk → check van buitenaf: een gratis Cloudflare Worker bekijkt je publieke tegels om de 5 minuten van buitenaf, zoals een bezoeker. Werkt iets thuis wel en van buitenaf niet (tunnel, NPM, DNS, certificaat), dan staat op de tegel "thuis ok · buiten down" en krijg je een melding; vallen er meer tegels om dezelfde reden uit, dan één melding voor allemaal.',
+      'Een klein bolletje op een tegel zegt dat ze ook van buitenaf gecheckt wordt.',
+    ],
+    instellen: [
+      'In Cloudflare een API-token met Account → Workers Scripts → Edit. Zet het in API-beheer bij je Cloudflare-API als geheim workers_token. Dan in Netwerk → check van buitenaf: proef en In Cloudflare zetten, en daarna het token weghalen. Liever zelf plakken kan ook.',
+    ],
+  },
+  {
     nr: 36,
     datum: '2026-10-11',
     titel: 'Wat is publiek',

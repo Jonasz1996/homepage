@@ -249,8 +249,10 @@ Later, deel 2 (internet, Wake-on-LAN en stroom):
 - **OPNsense** (type `opnsense`, geheimen `key` en `secret` van een API-key): WAN-status, latency en verlies op de
   tegel, alle gateways en de firmwarestatus in het mini dashboard. Firmware-updates tellen mee in `apt`
 - **Cloudflare Tunnel** (type `cloudflared`, instelling `account` = account-id, geheim `token` = API-token met
-  *Account → Cloudflare Tunnel → Read*): status, verbindingen en datacenters per tunnel. Voor **wat is publiek**
-  (hieronder) krijgt hetzelfde token meer leesrechten
+  *Account → Cloudflare Tunnel → Read*): status, verbindingen en datacenters per tunnel. Optioneel een tweede geheim
+  `workers_token` (een apart API-token met *Account → Workers Scripts → Edit*): daarmee zet het dashboard de Worker
+  van de check van buitenaf (zie *Uptime Kuma vervangen*). Voor **wat is publiek**
+  (hieronder) krijgt het gewone token meer leesrechten
 - **wat is publiek** (Infrastructuur → Netwerk → tabblad *publiek*, of `Ctrl+K` → "publiek"): per naam
   `<x>.jbogaert.be` of iemand op internet erbij kan, en of er een login voor staat: Cloudflare Access, Authentik (of
   een andere forward-auth) in NPM, of een access list van NPM. Rood = van buitenaf bereikbaar zonder login ervoor. Het
@@ -603,8 +605,9 @@ Monitoring**:
 - **melden**: hier en op je gsm, alleen hier (🔔), of niet (alleen de tijdlijn). Zolang hij down is: nooit, elk uur,
   elke 4 uur of elke dag een herinnering. De melding over het certificaat kan per tegel uit
 - **pauzeren** (in het mini dashboard, of in bewerken): de check loopt niet en meldt niets. Pauzeren, de meldingen
-  uitzetten, de check weghalen of een tegel (groep, pagina) met een lopende check verwijderen vraagt je 2FA en geeft
-  een melding, zodat wie je sessie steelt niet stilletjes de bewaking uitzet. Hetzelfde geldt voor onderhoud
+  uitzetten, de check weghalen of een tegel (groep, pagina) met een lopende check verwijderen (ook als alleen de
+  check van buitenaf loopt) vraagt je 2FA en geeft een melding, zodat wie je sessie steelt niet stilletjes de
+  bewaking uitzet. Hetzelfde geldt voor onderhoud
   beginnen of verlengen, gepland onderhoud aanzetten of verschuiven, een cronjob dempen, een webhook uitzetten,
   vernieuwen of weghalen, een logregel uitzetten, lager zetten of weghalen, een beveiligingspunt in **!** negeren,
   de meldingen over een certificaat uitzetten, een check onder een ouder hangen die down of in onderhoud is, of een
@@ -702,6 +705,51 @@ het niet merkt. Klik je op een tegel, dan opent nog altijd de naam.
 - **uitzetten**: per tegel onder **✎ bewerken → Monitoring** (*zonder DNS*), of voor
   alles samen op de NPM-tegel. Uit = via de naam, met DNS, zoals vroeger. API-koppelingen (Zabbix, Portainer, ...)
   gebruiken altijd het adres dat je zelf invulde: zet daar een IP als je DNS wil sparen
+
+**Check van buitenaf (Cloudflare Worker).** De checks hierboven lopen van binnenuit, rechtstreeks naar de server:
+ze zien niet of een tegel ook van buitenaf werkt. Een tunnel die niet verbonden is, een fout in NPM of DNS, een
+WAF-regel die alles tegenhoudt: thuis werkt dan nog alles. Een gratis Cloudflare Worker bekijkt de tegels die je
+kiest daarom ook vanuit het netwerk van Cloudflare, zoals een bezoeker op het internet. Het dashboard roept de Worker
+elke minuut aan (uitgaand 443 vanuit de container naar Cloudflare) met de tegels die het langst niet bekeken zijn; de
+Worker haalt elk adres op en geeft de statuscode terug. De Worker belt nooit zelf naar het dashboard: er komt niets
+binnen, en in NPM, Cloudflare Access of Authentik verandert niets. Hij haalt alleen https-adressen onder je eigen
+domeinen op (`ALLOWED_SUFFIXES`) en geeft zonder het gedeelde geheim (`HOMEPAGE_TOKEN`) een kale 404.
+
+Instellen in **Infrastructuur → Netwerk → check van buitenaf**, op een van twee manieren:
+
+- **via Cloudflare zetten** (aanbevolen): maak in Cloudflare (My Profile → API Tokens → Create Token → Custom token)
+  een apart API-token met alleen *Account → Workers Scripts → Edit*, voor je account. Zet het in API-beheer bij je
+  Cloudflare-API (soort *Cloudflare Tunnel*, adres `https://api.cloudflare.com/client/v4`, zonder *zelfondertekend
+  certificaat toestaan*, instelling `account` = account-id) als geheim `workers_token`, naast het leestoken voor de
+  tunnels. Gebruikte je nog nooit Workers, open
+  dan in Cloudflare één keer *Workers & Pages* en kies een naam onder workers.dev (bv. `jonas`). Vul in het venster
+  de domeinen in (`jbogaert.be`), kies onder *voorstel* de tegels (aangevinkt zijn de namen die NPM kent zonder
+  toegangslijst), bekijk de **proef** (welke calls, met welk token, het volledige script) en klik **In Cloudflare
+  zetten** (2FA). Daarna kan het token weg (*token weghalen*): het is alleen nodig om de Worker opnieuw te zetten.
+  Zolang het er staat, staat de rij *Check van buitenaf* in de instellingen-checklist op half
+- **zelf plakken**, zonder token: vijf stappen in het venster (geheim maken, een Worker maken in Cloudflare, het
+  script plakken, `HOMEPAGE_TOKEN` en `ALLOWED_SUFFIXES` invullen, het workers.dev-adres plakken en *testen en
+  aanzetten*). Het geheim maakt je browser en je ziet het één keer. Een nieuw geheim wacht tot de Worker het kent:
+  tot dan blijft het vorige gelden
+
+Het gratis plan van Cloudflare volstaat: één verzoek per minuut (1.440 van de 100.000 per dag) met hoogstens 45
+adressen, dus elke tegel om de 5 minuten, tot 225 tegels. Elke tegel in de lijst krijgt een klein bolletje (groen,
+rood, of grijs als hij wacht op een check). Werkt een tegel thuis wel en van buitenaf niet, dan staat er
+*thuis ok · buiten down*, met de reden (bv. *de Cloudflare Tunnel is niet verbonden (1033)*), en telt hij mee bij
+*alleen problemen*.
+
+Meldingen: een tegel gaat van buitenaf down na 2 mislukte checks na elkaar; dan één melding (volgens *Melden* van de
+tegel) en één als hij terug is. Vallen er 3 of meer tegels om dezelfde reden uit, dan één melding voor allemaal;
+faalt bijna alles van buitenaf, dan één melding over die massastoring. Niets als de check van binnenuit het al
+meldde, als de tegel in onderhoud of gepauzeerd is, of als NPM of de tunnel al als down gemeld waren; is die reden
+voorbij, dan begint de tegel opnieuw zonder melding. Werkt de Worker zelf niet (geheim fout, dagelijkse limiet op),
+dan één waarschuwing. Wat stuk is, staat ook in **!**.
+
+Staat er *Cloudflare houdt de check tegen met een uitdaging*: Bot Fight Mode, Under Attack of een WAF-regel daagt de
+Worker uit. Maak bij een WAF-regel een *Skip*-regel voor deze verzoeken (veld `cf.worker.upstream_zone`, met de
+waarde die Security → Events toont bij een tegengehouden check). Bot Fight Mode kan je op het gratis plan niet
+overslaan: zet die uit als ze de checks tegenhoudt. De firewall moet de container uitgaand 443 laten doen naar
+`api.cloudflare.com` en `*.workers.dev` (meestal al open: het publieke IP en de tunnels gaan ook via Cloudflare).
 
 **Voor je Uptime Kuma uitzet**:
 

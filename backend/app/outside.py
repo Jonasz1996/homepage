@@ -44,7 +44,7 @@ FEATURES = {
     "updates": ("updates installeren", "updates installeren en terugdraaien, nachtelijke updates instellen"),
     "acties": ("acties", "VM's en containers aan of uit, Wake-on-LAN, zelfherstel, snapshots verwijderen, hersteltest, "
                          "API-calls die iets veranderen, API's instellen of calls uitproberen, een tegel met "
-                         "integratie een ander adres geven, poortscan"),
+                         "integratie een ander adres geven, poortscan, de check van buitenaf in Cloudflare zetten"),
     "downloads": ("configuraties en de diagnose downloaden",
                   "oude configuraties en de diagnose downloaden en eigen bestanden ongemaskeerd bekijken"),
 }

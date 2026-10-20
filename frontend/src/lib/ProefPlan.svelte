@@ -4,7 +4,7 @@
   let { plan, onclose = null } = $props()
 
   const VIA = { ssh: 'SSH', 'proxmox-api': 'Proxmox-API', 'portainer-api': 'Portainer-API', 'adguard-api': 'AdGuard-API',
-                'pbs-api': 'PBS-API', api: 'API', dashboard: 'dashboard' }
+                'pbs-api': 'PBS-API', 'cloudflare-api': 'Cloudflare-API', api: 'API', dashboard: 'dashboard' }
   const mark = (ok) => (ok === true ? '✓' : ok === false ? '✕' : '?')
   const when = (ts) => {
     const d = new Date(ts)

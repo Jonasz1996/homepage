@@ -59,10 +59,12 @@ PACKAGES = ("fastapi", "starlette", "uvicorn", "pydantic", "sqlalchemy", "alembi
 # megabytes aan hosts of pakketten.
 BACKGROUND = ("containerlogs", "zabbix", "npm_routes", "cluster", "coverage", "config_last", "devices", "health",
               "snapshots", "domains", "selfcheck", "diskguard", "updates", "cron", "restoretest", "massastoring",
-              "update_auto_last", "check_hourly", "exposure_summary")
+              "update_auto_last", "check_hourly", "buitencheck_state", "exposure_summary")
 BACKGROUND_PREFIX = ("net_gw:", "net_tunnel:", "pbs_problems:")
 # Nooit mee, ook niet verkort: daar staan geheimen in (of wie wanneer van waar keek).
-DENY = ("offsite_key", "webpush", "oidc", "ssh_defaults", "ssh_snippets", "ssh_pin", "attention_ack", "outside_seen")
+DENY = ("offsite_key", "webpush", "oidc", "ssh_defaults", "ssh_snippets", "ssh_pin", "attention_ack", "outside_seen",
+        # Het geheim van de Worker, en zijn adres: wie dat kent, kan de dagelijkse limiet opgebruiken.
+        "buitencheck")
 
 # Wat van een AppState-waarde overblijft.
 SCALARS = {"at", "checked_at", "scanned_at", "last_at", "since", "date", "started", "count", "items", "lines", "seen",
@@ -183,6 +185,11 @@ async def known_secrets(db: AsyncSession, counts: Counter | None = None) -> list
     pair(ssh.get("username") or "root", dec(ssh.get("password")))
     out.append(dec((await _value(db, "oidc")).get("client_secret")) or "")
     out.append(dec((await _value(db, "webpush")).get("private")) or "")
+    bc = await _value(db, "buitencheck")
+    out.append(dec(bc.get("token")) or "")
+    out.append(dec(bc.get("token_next")) or "")
+    # De naam van de Worker (en dus zijn workers.dev-adres): wie die kent, kan de dagelijkse limiet opgebruiken.
+    out.append(str(bc.get("name") or ""))
     s = get_settings()
     for f in (s.secret_key_file, s.setup_token_file):
         try:
@@ -338,6 +345,18 @@ def _restoretest(v: dict) -> dict:
     return out
 
 
+def _buitencheck(v: dict) -> dict:
+    """De check van buitenaf: tijden, fouten en aantallen, zonder namen of adressen."""
+    tiles = [e for e in (v.get("tiles") or {}).values() if isinstance(e, dict)]
+    w, mass = v.get("worker") or {}, v.get("mass") or {}
+    return {"round_at": v.get("round_at"),
+            "worker": {k: w.get(k) for k in ("ok_at", "colo", "script", "fail", "error_at")}
+            | ({"error": _errors(w["error"])} if w.get("error") else {}),
+            "tegels": len(tiles), "down": sum(e.get("status") == "down" for e in tiles),
+            "stil": sum(bool(e.get("quiet")) for e in tiles),
+            "massa": {k: mass.get(k) for k in ("since", "failing", "total")} if mass else None,
+            "groepen": [{"cause": str(c)[:40], "since": g.get("since"), "count": len(g.get("tiles") or [])}
+                        for c, g in (v.get("groups") or {}).items() if isinstance(g, dict)]}
 def _exposure(v: dict) -> dict:
     """Netwerk › publiek: tijdstippen, aantallen, ontbrekende rechten en fouten, zonder namen."""
     counts = v.get("counts") if isinstance(v.get("counts"), dict) else {}
@@ -366,6 +385,8 @@ async def _achtergrond(db: AsyncSession) -> dict:
             out[st.key] = _restoretest(v)
         elif st.key.startswith("pbs_problems:"):
             out[st.key] = _pbs(v)
+        elif st.key == "buitencheck_state":
+            out[st.key] = _buitencheck(v)
         elif st.key == "exposure_summary":
             out[st.key] = _exposure(v)
         else:
