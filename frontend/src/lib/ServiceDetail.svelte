@@ -13,6 +13,10 @@
   let sshHosts = $state([])
   api('/ssh/hosts').then((hs) => (sshHosts = hs.filter((h) => h.service_id === service.id))).catch(() => {})
 
+  // Laatste gebeurtenissen van deze service op de tijdlijn (storingen, herstarts, updates, acties).
+  let events = $state([])
+  api(`/timeline?service_id=${untrack(() => service.id)}&limit=8`).then((r) => (events = r.items)).catch(() => {})
+
   const RANGES = ['1h', '24h', '7d', '30d', '1y']
   let range = $state('24h')
   let data = $state(null)
@@ -148,6 +152,17 @@
         </table>
       {/if}
 
+      {#if events.length}
+        <span class="lbl">Gebeurtenissen</span>
+        <table class="tbl ev">
+          <tbody>
+            {#each events as ev (ev.id)}
+              <tr><td>{when(ev.ts)}</td><td class={ev.level === 'err' ? 'e' : ev.level === 'ok' ? 'o' : ''}>{ev.title}</td></tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+
       <span class="lbl">Laatste checks</span>
       <table class="tbl">
         <thead><tr><th>tijd</th><th>resultaat</th><th>latency</th><th>details</th></tr></thead>
@@ -170,6 +185,7 @@
 
 <style>
   .maint { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 0 0 12px }
+  .ev td:first-child { width: 150px; white-space: nowrap }
   .maint .lbl { margin: 0 4px 0 0 }
   .maint .on { color: var(--mid); font-size: 12.5px }
   .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 10px }

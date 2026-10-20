@@ -14,13 +14,14 @@
   let password = $state('')
   let clearPassword = $state(false)
   let service_id = $state(h.service_id ?? null)
+  let updates = $state(h.updates || '')
   let error = $state('')
 
   async function save(e) {
     e.preventDefault()
     error = ''
     const body = {
-      name, host: addr, port: Number(port) || 22, username, key_id: key_id || null, service_id: service_id || null,
+      name, host: addr, port: Number(port) || 22, username, key_id: key_id || null, service_id: service_id || null, updates,
       password: clearPassword ? '' : password || (host ? null : undefined),
     }
     try {
@@ -94,6 +95,14 @@
         <select id="hf-svc" bind:value={service_id}>
           <option value={null}>geen</option>
           {#each services as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
+        </select>
+      </div>
+      <div class="full">
+        <label class="lbl" for="hf-upd">Updates opvolgen (apt of apk, elke 6 uur)</label>
+        <select id="hf-upd" bind:value={updates}>
+          <option value="">nee</option>
+          <option value="host">deze machine</option>
+          <option value="cts">deze machine en al zijn containers (Proxmox-node, via pct exec)</option>
         </select>
       </div>
     </div>

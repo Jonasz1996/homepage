@@ -93,6 +93,8 @@ class HostIn(BaseModel):
     # None = ongewijzigd, "" = wissen.
     password: str | None = Field(default=None, max_length=256)
     service_id: int | None = None
+    # Updates opvolgen: "" = niet, "host" = deze machine, "cts" = ook alle containers (Proxmox-node).
+    updates: str = Field(default="", pattern="^(|host|cts)$")
 
     @field_validator("host")
     @classmethod
@@ -110,7 +112,7 @@ def _host_out(h: SshHost) -> dict:
             fp = asyncssh.import_public_key(h.host_key).get_fingerprint("sha256")
     return {"id": h.id, "name": h.name, "host": h.host, "port": h.port, "username": h.username,
             "key_id": h.key_id, "has_password": bool(h.password), "host_key_fingerprint": fp,
-            "service_id": h.service_id, "last_used_at": h.last_used_at}
+            "service_id": h.service_id, "last_used_at": h.last_used_at, "updates": h.updates or ""}
 
 
 async def _get_host(db: AsyncSession, host_id: int) -> SshHost:

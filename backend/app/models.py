@@ -210,6 +210,8 @@ class SshHost(Base):
     position: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     last_used_at: Mapped[datetime | None]
+    # Updates opvolgen: "" = niet, "host" = deze machine, "cts" = deze machine en (Proxmox-node) al zijn containers.
+    updates: Mapped[str] = mapped_column(String(8), default="", server_default="")
 
 
 class LogEntry(Base):
@@ -273,3 +275,21 @@ class Metric(Base):
     mem_total: Mapped[int | None] = mapped_column(BigInteger)
     disk: Mapped[int | None] = mapped_column(BigInteger)
     disk_total: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class Event(Base):
+    """Eén gebeurtenis voor de tijdlijn: storing, herstart, back-up, updates, ... Blijft een jaar bewaard,
+    ook als de melding zelf al gewist is."""
+
+    __tablename__ = "events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ts: Mapped[datetime] = mapped_column(default=utcnow, index=True)
+    # storing | herstart | backup | updates | capaciteit | log | netwerk | melding
+    kind: Mapped[str] = mapped_column(String(16), index=True)
+    level: Mapped[str] = mapped_column(String(8), default="info")
+    title: Mapped[str] = mapped_column(String(200))
+    body: Mapped[str | None] = mapped_column(Text)
+    service_id: Mapped[int | None] = mapped_column(ForeignKey("services.id", ondelete="SET NULL"), index=True)
+    # Extra gegevens, bv. {"down_s": 340} bij een herstelde storing.
+    data: Mapped[dict] = mapped_column(Json, default=dict)

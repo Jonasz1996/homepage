@@ -109,6 +109,27 @@ Extra's, deel 3 (back-ups en capaciteit):
   7 dagen en "vol over x dagen"; melding als iets binnen 14 dagen en nog eens binnen 3 dagen vol loopt. Na een grote
   opkuis telt alleen de trend van daarna
 
+Later, deel 1 (tijdlijn, weekrapport en updates):
+
+- **tijdlijn** (knop `history` in de titelbalk): storingen met hun duur, herstarts van nodes en het starten of stoppen
+  van VM's/CT's (uit de uptime in Proxmox), gemaakte back-ups, geïnstalleerde updates, acties en wijzigingen aan het
+  dashboard, per dag en met filter. Blijft een jaar staan, ook als je de meldingen wist. Het mini dashboard van een
+  service toont zijn eigen laatste gebeurtenissen. Een herstarte node geeft één melding, met wat er daarna opkwam en
+  wat niet
+- **weekrapport** (`history` → weekrapport): uptime per service zonder onderhoud, traagste services, aantal en langste
+  storing, gemaakte en gemiste back-ups, herstarts, updates en opslag die vol loopt. Elke maandag vanaf 8 uur komt de
+  samenvatting van de vorige week in het meldingencentrum; klik erop voor het volledige rapport
+- **updates** (knop `apt` in de titelbalk, met teller; `↑n` op de tegel): elke 6 uur of met "nu controleren".
+  Proxmox-nodes en PBS via hun eigen API, andere machines via SSH (bij de host in de terminal: *updates opvolgen*,
+  apt of apk). Op een Proxmox-node kan dat meteen voor alle draaiende containers (via `pct exec`). Portainer meldt
+  welke containers een nieuwer image hebben (Portainer 2.20 of nieuwer). Beveiligingsupdates in het oranje.
+  Containers krijgen hun teller op de tegel met dezelfde naam
+
+  Rechten: het Proxmox-token heeft voor de lijst met updates `Sys.Modify` op `/nodes` nodig
+  (`pveum role add HomepageApt -privs Sys.Modify && pveum aclmod /nodes -user homepage@pve -role HomepageApt`); het
+  PBS-token van hierboven mag het al. Zonder die rechten staat er een duidelijke melding bij die machine en werkt de
+  rest gewoon
+
 Optimalisaties:
 
 - je blijft ingelogd zolang je het dashboard gebruikt (sessie verlengt zich, na 14 dagen niets doen moet je opnieuw inloggen)

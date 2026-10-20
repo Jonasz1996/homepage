@@ -2,7 +2,7 @@
   import { value } from './format.js'
   import { iconIsMono, iconUrl } from './icons.js'
 
-  let { service, status = null, widget = null, editing = false, onedit, ondetail, dragging = false, dropBefore = false, ...events } = $props()
+  let { service, status = null, widget = null, updates = null, editing = false, onedit, ondetail, dragging = false, dropBefore = false, ...events } = $props()
 
   let src = $derived(iconUrl(service.icon))
   // Pas tonen als het icoon echt geladen is; anders de eerste letter.
@@ -84,6 +84,7 @@
       {#if maint}<span class="mt">onderhoud tot {until(status.maintenance_until)}</span>
       {:else if health === 'down'}<span class="downtxt">down</span>{#if status?.cause}<span class="cause">via {status.cause}</span>{/if}
       {:else if ms !== ''}<span class="ms">{ms} ms</span>{/if}
+      {#if updates?.count}<span class="upd" class:sec={updates.security} title="{updates.count} updates open{updates.security ? `, ${updates.security} beveiliging` : ''}">↑{updates.count}</span>{/if}
       {#if certDays !== null && certDays <= 21}<span class="cert" class:bad={certDays <= 3}>cert {certDays} d</span>{/if}
       {service.description || host}
     </span>
@@ -141,6 +142,8 @@
   .cause { color: var(--muted); margin-right: 4px }
   .cert { color: var(--mid); margin-right: 4px }
   .cert.bad { color: var(--err) }
+  .upd { color: var(--muted); margin-right: 4px }
+  .upd.sec { color: var(--mid) }
   .downtxt { color: var(--err); margin-right: 4px; text-transform: uppercase; font-size: 10.5px; letter-spacing: .06em }
   .spark { position: absolute; left: 56px; right: 12px; bottom: 3px; width: calc(100% - 68px); height: 12px; pointer-events: none }
   .spark path { fill: none; stroke: rgba(255, 255, 255, .22); stroke-width: 1.2; vector-effect: non-scaling-stroke }

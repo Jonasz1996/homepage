@@ -6,7 +6,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..deps import notify
-from ..models import AuditLog, CheckResult, Metric, Notification, Service, ServiceState, Session
+from ..models import AuditLog, CheckResult, Event, Metric, Notification, Service, ServiceState, Session
 from .checks import Outcome
 
 # Pas na zoveel mislukte checks op rij is een service "down" (vermijdt valse meldingen).
@@ -114,7 +114,8 @@ async def record(db: AsyncSession, service: Service, outcome: Outcome, now: date
         if state.status != "up":
             if state.status == "down" and not state.quiet:
                 notify(db, f"{service.name} is weer bereikbaar", f"Was {_fmt_duration(now - since)} down.",
-                       level="ok", source="monitor", service_id=service.id)
+                       level="ok", source="monitor", service_id=service.id,
+                       data={"down_s": int((now - since).total_seconds()), "down_at": since.isoformat()})
             state.status, state.since, state.quiet = "up", now, False
     else:
         state.fail_count += 1
@@ -128,7 +129,7 @@ async def record(db: AsyncSession, service: Service, outcome: Outcome, now: date
                 if affected:
                     body = f"{body}\n{affected} services hangen hiervan af.".strip()
                 notify(db, f"{service.name} is down" + (f" ({affected} services getroffen)" if affected else ""),
-                       body, level="err", source="monitor", service_id=service.id)
+                       body, level="err", source="monitor", service_id=service.id, data={"down": True})
             state.status, state.since = "down", now
     return state
 
@@ -140,9 +141,10 @@ async def cleanup(db: AsyncSession) -> None:
 
 
 async def housekeeping(db: AsyncSession) -> None:
-    """Verlopen sessies, oude auditlog en oude gelezen meldingen opruimen."""
+    """Verlopen sessies, oude auditlog, oude tijdlijn en oude gelezen meldingen opruimen."""
     now = datetime.now(timezone.utc)
     await db.execute(delete(Session).where(Session.expires_at < now))
     await db.execute(delete(AuditLog).where(AuditLog.ts < now - timedelta(days=365)))
+    await db.execute(delete(Event).where(Event.ts < now - timedelta(days=365)))
     await db.execute(delete(Notification).where(Notification.read_at.is_not(None),
                                                 Notification.ts < now - timedelta(days=30)))

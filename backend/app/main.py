@@ -2,7 +2,7 @@ from fastapi import Depends, FastAPI, Request
 
 from .config import get_settings
 from .deps import COOKIE, csrf_guard, secure_cookie
-from .routers import auth, capacity, importexport, integrations, layout, logs, monitoring, notifications, ssh
+from .routers import auth, capacity, importexport, integrations, layout, logs, monitoring, notifications, ssh, timeline
 
 app = FastAPI(
     title="homepage",
@@ -21,6 +21,7 @@ app.include_router(integrations.router)
 app.include_router(ssh.router)
 app.include_router(logs.router)
 app.include_router(capacity.router)
+app.include_router(timeline.router)
 
 
 @app.middleware("http")

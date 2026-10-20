@@ -13,6 +13,8 @@ from ..models import Service
 from .checks import HttpClients, run_check
 from .engine import cleanup, housekeeping, record
 from .capacity import SAMPLE_EVERY, check_forecasts, sample
+from .report import weekly_notification
+from .updates import UPDATES_EVERY, run_updates
 from .watchers import watch_npm, watch_pbs
 
 log = logging.getLogger("homepage.worker")
@@ -91,6 +93,15 @@ class Worker:
         async with self.maker() as db:
             await watch_pbs(db, self.http)
             await db.commit()
+        async with self.maker() as db:
+            await weekly_notification(db)
+            await db.commit()
+
+    async def updates(self) -> None:
+        """Elke 6 uur: openstaande updates op nodes, containers en Docker-images."""
+        async with self.maker() as db:
+            await run_updates(db, self.http)
+            await db.commit()
 
     async def capacity(self) -> None:
         """Elke 10 minuten: gebruik uit Proxmox bewaren en kijken of er opslag vol dreigt te lopen."""
@@ -113,6 +124,7 @@ class Worker:
         # Eerste ronde na een minuut, daarna elk half uur.
         last_periodic = time.monotonic() - PERIODIC + 60
         last_capacity = time.monotonic() - SAMPLE_EVERY + 30
+        last_updates = time.monotonic() - UPDATES_EVERY + 300
         while True:
             try:
                 for sid, check, url in await self.due_services():
@@ -123,6 +135,9 @@ class Worker:
                 if time.monotonic() - last_capacity > SAMPLE_EVERY:
                     last_capacity = time.monotonic()
                     self.spawn(self.capacity())
+                if time.monotonic() - last_updates > UPDATES_EVERY:
+                    last_updates = time.monotonic()
+                    self.spawn(self.updates())
                 if time.monotonic() - last_cleanup > 3600:
                     async with self.maker() as db:
                         if self.self_cleanup:
