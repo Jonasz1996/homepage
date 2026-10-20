@@ -21,14 +21,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..config import get_settings
 from ..db import get_db
 from ..deps import COOKIE, audit, current_user, recent_auth
-from ..models import AuditLog, Service, Session, SshHost, SshKey, User
-from ..security import decrypt, encrypt, token_id
+from ..models import AppState, AuditLog, Service, Session, SshHost, SshKey, User
+from ..monitoring.checks import HttpClients
+from ..ssh_discovery import apply, discover
+from ..ssh_login import DEFAULTS_KEY, login_for
+from ..security import encrypt, token_id
 
 router = APIRouter(prefix="/api/ssh", tags=["ssh"])
 log = logging.getLogger("homepage.ssh")
 
 IDLE_SECONDS = 30 * 60
 CONNECT_TIMEOUT = 10
+KEEPALIVE = 30
+SNIPPETS_KEY = "ssh_snippets"
+clients = HttpClients()
 
 
 # --- Sleutels ---------------------------------------------------------------
@@ -84,25 +90,31 @@ async def delete_key(key_id: int, request: Request, user: User = Depends(recent_
 
 # --- Hosts ------------------------------------------------------------------
 
+def _clean_host(v: str) -> str:
+    v = v.strip()
+    if v.startswith("-") or any(c.isspace() for c in v):
+        raise ValueError("Ongeldige host")
+    return v
+
+
 class HostIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     host: str = Field(min_length=1, max_length=255)
     port: int = Field(default=22, ge=1, le=65535)
-    username: str = Field(default="root", min_length=1, max_length=64)
+    # Leeg = de standaard gebruiker (zie /api/ssh/defaults).
+    username: str = Field(default="", max_length=64, pattern=r"^[A-Za-z0-9._@-]*$")
     key_id: int | None = None
     # None = ongewijzigd, "" = wissen.
     password: str | None = Field(default=None, max_length=256)
     service_id: int | None = None
     # Updates opvolgen: "" = niet, "host" = deze machine, "cts" = ook alle containers (Proxmox-node).
     updates: str = Field(default="", pattern="^(|host|cts)$")
+    folder: str = Field(default="", max_length=80)
 
     @field_validator("host")
     @classmethod
     def _host(cls, v: str) -> str:
-        v = v.strip()
-        if v.startswith("-") or any(c.isspace() for c in v):
-            raise ValueError("Ongeldige host")
-        return v
+        return _clean_host(v)
 
 
 def _host_out(h: SshHost) -> dict:
@@ -112,7 +124,10 @@ def _host_out(h: SshHost) -> dict:
             fp = asyncssh.import_public_key(h.host_key).get_fingerprint("sha256")
     return {"id": h.id, "name": h.name, "host": h.host, "port": h.port, "username": h.username,
             "key_id": h.key_id, "has_password": bool(h.password), "host_key_fingerprint": fp,
-            "service_id": h.service_id, "last_used_at": h.last_used_at, "updates": h.updates or ""}
+            "service_id": h.service_id, "last_used_at": h.last_used_at, "updates": h.updates or "",
+            "folder": h.folder or "", "source": h.source,
+            # Geen eigen sleutel of wachtwoord: de standaard login wordt gebruikt.
+            "uses_defaults": not (h.key_id or h.password)}
 
 
 async def _get_host(db: AsyncSession, host_id: int) -> SshHost:
@@ -190,6 +205,110 @@ async def ready(user: User = Depends(recent_auth)):
     return {"ok": True}
 
 
+# --- Standaard login, snippets en hosts uit Proxmox ------------------------------
+
+async def _defaults(db: AsyncSession) -> dict:
+    st = await db.get(AppState, DEFAULTS_KEY)
+    return dict(st.value) if st else {}
+
+
+async def _save_state(db: AsyncSession, key: str, value) -> None:
+    st = await db.get(AppState, key)
+    if st:
+        st.value = value
+    else:
+        db.add(AppState(key=key, value=value))
+
+
+def _defaults_out(d: dict) -> dict:
+    return {"username": d.get("username") or "root", "has_password": bool(d.get("password")),
+            "key_id": d.get("key_id"), "auto_sync": bool(d.get("auto_sync"))}
+
+
+class DefaultsIn(BaseModel):
+    username: str = Field(default="root", min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._@-]+$")
+    # None = ongewijzigd, "" = wissen.
+    password: str | None = Field(default=None, max_length=256)
+    key_id: int | None = None
+    auto_sync: bool = False
+
+
+@router.get("/defaults")
+async def get_defaults(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    return _defaults_out(await _defaults(db))
+
+
+@router.put("/defaults")
+async def put_defaults(data: DefaultsIn, request: Request, user: User = Depends(recent_auth),
+                       db: AsyncSession = Depends(get_db)):
+    if data.key_id is not None and await db.get(SshKey, data.key_id) is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Sleutel bestaat niet")
+    d = await _defaults(db)
+    d.update(username=data.username, key_id=data.key_id, auto_sync=data.auto_sync)
+    if data.password is not None:
+        d["password"] = encrypt(data.password) if data.password else None
+    await _save_state(db, DEFAULTS_KEY, d)
+    await audit(db, request, user, "ssh_defaults_changed", username=data.username,
+                password_changed=data.password is not None, auto_sync=data.auto_sync)
+    await db.commit()
+    return _defaults_out(d)
+
+
+class Snippet(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    command: str = Field(min_length=1, max_length=4000)
+    # Enter erachter sturen (meteen uitvoeren) of alleen typen.
+    run: bool = True
+
+
+@router.get("/snippets")
+async def get_snippets(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    st = await db.get(AppState, SNIPPETS_KEY)
+    return st.value if st else []
+
+
+@router.put("/snippets")
+async def put_snippets(data: list[Snippet], request: Request, user: User = Depends(current_user),
+                       db: AsyncSession = Depends(get_db)):
+    if len(data) > 100:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Maximaal 100 snippets")
+    value = [x.model_dump() for x in data]
+    await _save_state(db, SNIPPETS_KEY, value)
+    await audit(db, request, user, "ssh_snippets_changed", count=len(value))
+    await db.commit()
+    return value
+
+
+@router.post("/discover")
+async def discover_hosts(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Alle nodes, containers en VM's uit de Proxmox-tegels, met hun IP en of ze al in de lijst staan."""
+    return await discover(db, clients)
+
+
+class ImportItem(BaseModel):
+    source: str = Field(pattern=r"^pve:\d+:(node|lxc|qemu)/[A-Za-z0-9.-]{1,63}$")
+    name: str = Field(min_length=1, max_length=80)
+    host: str = Field(min_length=1, max_length=255)
+    folder: str = Field(default="", max_length=80)
+    kind: str = Field(pattern="^(node|lxc|qemu)$")
+
+    @field_validator("host")
+    @classmethod
+    def _host(cls, v: str) -> str:
+        return _clean_host(v)
+
+
+@router.post("/import")
+async def import_hosts(items: list[ImportItem], request: Request, user: User = Depends(current_user),
+                       db: AsyncSession = Depends(get_db)):
+    if len(items) > 1000:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Te veel hosts in één keer")
+    result = await apply(db, [i.model_dump() for i in items])
+    await audit(db, request, user, "ssh_hosts_imported", **result)
+    await db.commit()
+    return result
+
+
 # --- WebSocket ----------------------------------------------------------------
 
 async def _ws_user(ws: WebSocket, db: AsyncSession) -> tuple[User | None, str]:
@@ -243,16 +362,13 @@ async def terminal(ws: WebSocket, host_id: int, cols: int = 100, rows: int = 30,
                             detail={"name": h.name, "fp": server_key.get_fingerprint("sha256")}))
             await db.commit()
 
-        key = None
-        if h.key_id:
-            k = await db.get(SshKey, h.key_id)
-            key = asyncssh.import_private_key(decrypt(k.private_key)) if k else None
-        password = decrypt(h.password) if h.password else None
-        await _send(ws, t="status", m=f"Verbinden met {h.username}@{h.host}…")
+        # Eigen sleutel of wachtwoord van de host; anders de standaard login. Gebruiker leeg = standaard.
+        login = await login_for(db, h)
+        await _send(ws, t="status", m=f"Verbinden met {login.username}@{h.host}…")
         conn = await asyncio.wait_for(asyncssh.connect(
-            h.host, port=h.port, username=h.username,
+            h.host, port=h.port, username=login.username, keepalive_interval=KEEPALIVE,
             known_hosts=([asyncssh.import_public_key(h.host_key)], [], []),
-            client_keys=[key] if key else None, password=password,
+            client_keys=[login.key] if login.key else None, password=login.password,
             agent_path=None, config=None, preferred_auth="publickey,password,keyboard-interactive",
         ), CONNECT_TIMEOUT)
     except asyncssh.HostKeyNotVerifiable:

@@ -161,6 +161,17 @@ Later, deel 3 (Authentik en gsm):
   gebruikersnaam bij Authentik moet dezelfde zijn. Standaard moet Authentik in het ID-token melden dat er een tweede
   factor gebruikt is (`amr`, zit erin als je flow een authenticator-validatie-stap heeft); dat kan je uitzetten als
   je dat bewust bij Authentik regelt. Inloggen met wachtwoord en 2FA blijft altijd werken
+- **SSH-terminal** (knop `>_`), het beste van PuTTY en RDM in de browser:
+  - **⟳ pve** haalt alle nodes, containers en VM's met hun IP uit je Proxmox-tegels (VM's via de QEMU guest agent),
+    in mappen per node. Onder ⚙ standaard kan dat elk half uur automatisch: nieuwe machines erbij, IP's bijgewerkt
+  - **⚙ standaard**: één gebruiker, wachtwoord en/of sleutel voor elke host zonder eigen login; per host te
+    overschrijven onder ✎
+  - selecteren = kopiëren, rechtsklik = plakken, middenklik = laatste selectie plakken, Ctrl+Shift+C/V. Over gewoon
+    http mag de browser het klembord niet lezen: dan plakt rechtsklik je laatste selectie en Ctrl+V het klembord
+  - snel verbinden (`root@192.168.0.50:22`), zoeken in de hosts, snippets (opgeslagen commando's), typen in alle tabs
+    tegelijk, zoeken in de uitvoer (Ctrl+Shift+F), lettergrootte (Ctrl+scroll), tab dupliceren (Ctrl+Shift+D), van tab
+    wisselen (Ctrl+Shift+←/→), klikbare links, de uitvoer opslaan als .log, bevestiging bij het plakken van meerdere
+    regels, keepalive zodat een stille sessie niet wegvalt
 - **effecten** zoals in aiverslag: een achtergrond van punten en 0/1 die voor de muis wijken, een ripple op elke knop,
   bliksem en vonken bij een geslaagde actie (herstarten, wekken), een vuurbal met flits en schudden bij verwijderen
   en uitloggen, en een bliksem op het belletje als er een nieuwe storing binnenkomt. Uit te zetten met `Ctrl+K` →

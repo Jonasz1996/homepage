@@ -212,6 +212,10 @@ class SshHost(Base):
     last_used_at: Mapped[datetime | None]
     # Updates opvolgen: "" = niet, "host" = deze machine, "cts" = deze machine en (Proxmox-node) al zijn containers.
     updates: Mapped[str] = mapped_column(String(8), default="", server_default="")
+    # Map in de lijst (bv. de Proxmox-node), leeg = bovenaan.
+    folder: Mapped[str] = mapped_column(String(80), default="", server_default="")
+    # Herkomst bij automatisch ophalen uit Proxmox, bv. "pve:3:lxc/105"; None = zelf toegevoegd.
+    source: Mapped[str | None] = mapped_column(String(80), unique=True, index=True)
 
 
 class LogEntry(Base):

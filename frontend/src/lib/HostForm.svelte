@@ -3,25 +3,26 @@
   import { api, withReauth } from './api.js'
   import Modal from './Modal.svelte'
 
-  let { host = null, keys = [], services = [], onclose, onsaved, onkeys } = $props()
+  let { host = null, keys = [], services = [], folders = [], defaults = null, onclose, onsaved, onkeys } = $props()
 
   const h = untrack(() => host) || {}
   let name = $state(h.name || '')
   let addr = $state(h.host || '')
   let port = $state(h.port || 22)
-  let username = $state(h.username || 'root')
-  let key_id = $state(h.key_id ?? untrack(() => keys[0]?.id) ?? null)
+  let username = $state(h.username ?? '')
+  let key_id = $state(h.key_id ?? null)
   let password = $state('')
   let clearPassword = $state(false)
   let service_id = $state(h.service_id ?? null)
   let updates = $state(h.updates || '')
+  let folder = $state(h.folder || '')
   let error = $state('')
 
   async function save(e) {
     e.preventDefault()
     error = ''
     const body = {
-      name, host: addr, port: Number(port) || 22, username, key_id: key_id || null, service_id: service_id || null, updates,
+      name, host: addr, port: Number(port) || 22, username, key_id: key_id || null, service_id: service_id || null, updates, folder,
       password: clearPassword ? '' : password || (host ? null : undefined),
     }
     try {
@@ -63,7 +64,7 @@
       </div>
       <div>
         <label class="lbl" for="hf-user">Gebruiker</label>
-        <input id="hf-user" bind:value={username} maxlength="64" required />
+        <input id="hf-user" bind:value={username} maxlength="64" placeholder="standaard ({defaults?.username || 'root'})" />
       </div>
       <div>
         <label class="lbl" for="hf-host">Host of IP</label>
@@ -77,7 +78,7 @@
         <label class="lbl" for="hf-key">Sleutel</label>
         <div class="row nowrap">
           <select id="hf-key" bind:value={key_id}>
-            <option value={null}>geen (wachtwoord)</option>
+            <option value={null}>{password || host?.has_password ? 'geen (wachtwoord)' : 'geen: standaard login'}</option>
             {#each keys as k (k.id)}<option value={k.id}>{k.name}</option>{/each}
           </select>
           <button type="button" class="mini" onclick={onkeys}>sleutels…</button>
@@ -89,6 +90,11 @@
         {#if host?.has_password}
           <label class="chk"><input type="checkbox" bind:checked={clearPassword} /> wachtwoord wissen</label>
         {/if}
+      </div>
+      <div class="full">
+        <label class="lbl" for="hf-folder">Map</label>
+        <input id="hf-folder" bind:value={folder} maxlength="80" list="hf-folders" placeholder="bv. pve50 (leeg = bovenaan)" />
+        <datalist id="hf-folders">{#each folders as f}<option value={f}></option>{/each}</datalist>
       </div>
       <div class="full">
         <label class="lbl" for="hf-svc">Koppelen aan service (terminal-knop in het mini dashboard)</label>
@@ -106,6 +112,9 @@
         </select>
       </div>
     </div>
+    {#if !key_id && !password && !host?.has_password}
+      <p class="help">Geen eigen sleutel of wachtwoord: deze host gebruikt de standaard login uit ⚙.</p>
+    {/if}
     {#if host?.host_key_fingerprint}
       <p class="help">Hostsleutel: <code>{host.host_key_fingerprint}</code> <button type="button" class="mini x" onclick={forget}>vergeten</button></p>
     {/if}

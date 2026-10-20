@@ -256,3 +256,32 @@ async def test_pbs(authed, fake):
     assert [r[4]["v"] for r in backups] == ["—", "mislukt", "ok"]
     assert w["verify"]["value"] == "1 fout"
     assert d["sections"][0]["items"][0]["note"] == {"full_at": 1900000000}
+
+
+async def test_errors_say_what_is_wrong():
+    from app.integrations.base import Integration, IntegrationError
+
+    def handler(req):
+        p = req.url.path
+        if p == "/redirect":
+            return httpx.Response(301, headers={"location": "https://pve.jbogaert.be/redirect"})
+        if p == "/html":
+            return httpx.Response(200, text="<html><title>Welcome to Nginx Proxy Manager</title></html>")
+        if p == "/no":
+            return httpx.Response(401, json={"data": None})
+        if p == "/ssl":
+            raise httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+        return httpx.Response(200, json={"path": p})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+        # Url gekopieerd uit de adresbalk: het deel na # mag het API-pad niet opslokken.
+        i = Integration("https://pve.jbogaert.be:8006/#v1:0:=node%2Fpve50", {}, {}, c)
+        assert i.base == "https://pve.jbogaert.be:8006"
+        assert (await i.request("GET", "/api2/json/version"))["path"] == "/api2/json/version"
+        for path, text in (("/redirect", "Doorgestuurd (HTTP 301) naar https://pve.jbogaert.be/redirect"),
+                           ("/html", 'webpagina ("Welcome to Nginx Proxy Manager")'),
+                           ("/no", "API-token ontbreekt of is fout"),
+                           ("/ssl", "certificaat niet vertrouwd")):
+            with pytest.raises(IntegrationError) as e:
+                await i.request("GET", path)
+            assert text in str(e.value)

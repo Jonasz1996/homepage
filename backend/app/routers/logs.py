@@ -13,8 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..config import get_settings
 from ..db import get_db
 from ..deps import audit, current_user, recent_auth
-from ..models import LogEntry, LogRule, SshHost, SshKey, User
-from ..security import decrypt
+from ..models import LogEntry, LogRule, SshHost, User
+from ..ssh_login import login_for
 from ..syslog import rollout
 from .monitoring import _aware
 
@@ -202,18 +202,15 @@ async def run_rollout(data: RolloutIn, request: Request, user: User = Depends(re
     if not h.host_key:
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             "Open eerst één keer een terminal naar deze host om de hostsleutel te bevestigen")
-    key = None
-    if h.key_id:
-        k = await db.get(SshKey, h.key_id)
-        key = asyncssh.import_private_key(decrypt(k.private_key)) if k else None
+    login = await login_for(db, h)
     script = rollout.build(s.syslog_target, s.syslog_port, data.containers)
-    command = "sh -s" if h.username == "root" else "sudo -n sh -s"
+    command = "sh -s" if login.username == "root" else "sudo -n sh -s"
     try:
         async with asyncio.timeout(600):
             async with asyncssh.connect(
-                h.host, port=h.port, username=h.username,
+                h.host, port=h.port, username=login.username,
                 known_hosts=([asyncssh.import_public_key(h.host_key)], [], []),
-                client_keys=[key] if key else None, password=decrypt(h.password) if h.password else None,
+                client_keys=[login.key] if login.key else None, password=login.password,
                 agent_path=None, config=None, connect_timeout=10,
             ) as conn:
                 result = await conn.run(command, input=script, check=False)
