@@ -64,6 +64,8 @@ homepage-JJJJ-MM-DD.dump  pg_dump -Fc van de database (dagelijks, {keep} dagen b
                           de tabel log_entries is na het terugzetten leeg
 secret.key.enc            de sleutel waarmee wachtwoorden en API-sleutels in de database versleuteld zijn,
                           zelf versleuteld met jouw wachtzin
+noodplan.html             het noodplan (wat draait waar, back-ups, terugzetten), elke maandag bijgewerkt: open het
+noodplan.md               in een browser en druk het af; noodplan.md is hetzelfde als platte tekst
 
 Bij de laatste kopie: {versions}.
 
