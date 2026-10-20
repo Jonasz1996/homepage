@@ -317,3 +317,113 @@ test('gsm: knoppen achter het menu', async () => {
   await expect(page.getByRole('menu')).toHaveCount(0)
   await page.setViewportSize({ width: 1400, height: 900 })
 })
+
+// Netwerk › publiek: een rij en een antwoord zoals GET /api/exposure ze geeft (voor page.route).
+function pubRow(name, state, level, base = state) {
+  const slot = state === 'slot'
+  return {
+    name, state, level, base, why_key: state, path: 'tunnel',
+    why: state === 'bewust' ? 'Bewust zo: publieke mediaserver met eigen login'
+      : slot ? 'Login ervoor: Authentik.' : 'Van buitenaf bereikbaar zonder login ervoor.',
+    paths: [{ path: 'tunnel', state: base, login: slot ? ['Authentik'] : [] }],
+    dns: [{ type: 'CNAME', to: 'tunnel thuis', proxied: true, wildcard: null, zone: 'jbogaert.be' }],
+    tunnel: { name: 'thuis', service: 'https://192.168.0.245:443', target: 'npm', managed: 'cloudflare' },
+    npm: { source: 'NPM', kind: 'proxy', enabled: true, target: 'http://192.168.0.20:8096', cert: true, forced: true,
+           hsts: false, access_list: null, config_login: slot ? 'Authentik' : null },
+    login: slot ? ['Authentik'] : [], https_forced: true, notes: [], undecided: false, sig: 'abc123def456',
+    intended: state === 'bewust' ? { reason: 'publieke mediaserver met eigen login', by: USER, at: new Date().toISOString() } : null,
+  }
+}
+function pubBody(rows) {
+  const counts = { err: 0, warn: 0, ok: 0, bewust: 0, rest: 0 }
+  for (const r of rows) counts[r.state === 'bewust' ? 'bewust' : r.level in counts ? r.level : 'rest']++
+  const now = new Date().toISOString()
+  return {
+    at: now, checked_at: now, stale: false, every: 3600, configured: { cloudflare: true, npm: true }, errors: [],
+    sources: { cloudflare: [], npm: [] },
+    rights: { zone_read: true, dns_read: true, tunnel_read: true, tunnel_config: true, access_read: true,
+              access_zone: true, zone_settings: true, npm_access_lists: true, npm_redirects: true },
+    inbound: { public_ip: '81.82.83.84', ip_known: true, ip_why: null, recent: [],
+               origin: { open: false, basis: 'cloudflare', text: 'OPNsense laat alleen Cloudflare door naar NPM.' },
+               forwards: null, tunnels: [{ name: 'thuis', status: 'healthy', managed: 'cloudflare', names: rows.length, deleted: false }],
+               paths: { tunnel: rows.length, proxied: 0, 'dns-only': 0 } },
+    counts, rows,
+  }
+}
+
+test('netwerk: tab publiek zonder Cloudflare', async () => {
+  await menu('Infrastructuur', 'Netwerk')
+  const win = page.getByRole('dialog')
+  await win.getByRole('tab', { name: /^publiek/ }).click()
+  await expect(win.getByText('Nog geen Cloudflare-API')).toBeVisible()
+  await expect(win.getByRole('button', { name: 'API-beheer openen' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(win).toHaveCount(0)
+})
+
+test('netwerk: publiek met 120 namen, bewust open, gsm', async () => {
+  const rows = Array.from({ length: 120 }, (_, i) => pubRow(`app${i}.jbogaert.be`, 'slot', 'ok'))
+  rows[0] = pubRow('jellyfin.jbogaert.be', 'open', 'err')
+  let base = pubBody(rows), puts = 0
+  await page.route('**/api/exposure', (r) => r.fulfill({ json: base }))
+  await page.route('**/api/exposure/intended', async (r) => {
+    // De eerste keer vraagt de server een verse 2FA-code (zoals na 15 minuten), daarna lukt het.
+    if (++puts === 1) return r.fulfill({ status: 403, json: { detail: 'reauth_required' } })
+    expect(r.request().postDataJSON()).toEqual({ name: 'jellyfin.jbogaert.be', reason: 'publieke mediaserver met eigen login' })
+    base = pubBody([pubRow('jellyfin.jbogaert.be', 'bewust', 'info', 'open'), ...rows.slice(1)])
+    return r.fulfill({ json: base })
+  })
+  await menu('Infrastructuur', 'Netwerk')
+  const win = page.getByRole('dialog')
+  await win.getByRole('tab', { name: /^publiek/ }).click()
+  await expect(win.getByRole('tab', { name: /^publiek/ })).toContainText('1')
+  await win.getByRole('button', { name: /^rood/ }).click()
+  await expect(win.locator('.row')).toHaveCount(1)
+  await win.getByRole('button', { name: /jellyfin/ }).click()
+  await win.getByRole('button', { name: 'bewust open…' }).click()
+  await page.getByRole('textbox').last().fill('publieke mediaserver met eigen login')
+  await page.getByRole('button', { name: 'Bewaren' }).click()
+  const { code, at } = await freshCode(secret, usedStep)
+  usedStep = at
+  await page.fill('#ra-code', code)
+  await page.getByRole('button', { name: 'Bevestigen' }).click()
+  await expect(win.getByText('Niets in deze lijst.')).toBeVisible()
+  await win.getByRole('button', { name: /^bewust/ }).click()
+  await expect(win.getByText('jellyfin.jbogaert.be')).toBeVisible()
+  await expect(win.locator('.row')).toHaveCount(1)
+  expect(puts).toBe(2)
+  await win.getByRole('button', { name: /^alles/ }).click()
+  await expect(win.locator('.row')).toHaveCount(120)
+  await page.setViewportSize({ width: 393, height: 852 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.setViewportSize({ width: 1400, height: 900 })
+  await page.unroute('**/api/exposure')
+  await page.unroute('**/api/exposure/intended')
+  await page.keyboard.press('Escape')
+  await expect(win).toHaveCount(0)
+})
+
+test('netwerk: publiek, eerste ronde mislukt', async () => {
+  await page.route('**/api/exposure', (r) => r.fulfill({ json: { ...pubBody([]), at: null,
+    errors: ['Het Cloudflare-token ziet geen zone jbogaert.be: geef Zone → Zone → Read en Zone → DNS → Read, met Zone Resources → jbogaert.be.'] } }))
+  await menu('Infrastructuur', 'Netwerk')
+  const win = page.getByRole('dialog')
+  await win.getByRole('tab', { name: /^publiek/ }).click()
+  await expect(win.getByText(/ziet geen zone jbogaert.be/)).toBeVisible()
+  await expect(win.getByText(/Nog niet gelukt/)).toBeVisible()
+  await expect(win.getByRole('button', { name: 'nu nagaan' })).toBeVisible()
+  await page.unroute('**/api/exposure')
+  await page.keyboard.press('Escape')
+  await expect(win).toHaveCount(0)
+})
+
+test('aandacht: de checklist vraagt wat publiek is', async () => {
+  await page.locator('button.mini[title^="Aandacht"]').click()
+  const win = page.getByRole('dialog')
+  await win.getByRole('tab', { name: /^instellingen/ }).click()
+  const row = win.locator('.row', { hasText: 'Wat is publiek (Cloudflare en NPM)' })
+  await expect(row).toBeVisible({ timeout: 20000 })
+  await expect(row).toContainText('optioneel')
+  await win.getByRole('button', { name: 'Sluiten' }).click()
+  await expect(win).toHaveCount(0)
+})

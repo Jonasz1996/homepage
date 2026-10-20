@@ -37,8 +37,11 @@ def host_url(h: dict) -> str | None:
 class NginxProxyManager(Integration):
     name = "npm"
     label = "Nginx Proxy Manager"
-    config_help = {"url": "http://192.168.0.245:81 (de beheerpoort van NPM)"}
-    secret_help = {"username": "e-mailadres van de NPM-gebruiker", "password": "wachtwoord"}
+    config_help = {"url": "http://192.168.0.245:81 (de beheerpoort van NPM)",
+                   "npm_names": "optioneel: andere namen van NPM zoals cloudflared ze gebruikt (bv. npm, nginx-proxy-manager)",
+                   "npm_ipv6": "optioneel: publieke IPv6-adressen van NPM (voor AAAA-records)"}
+    secret_help = {"username": "e-mailadres van de NPM-gebruiker (alle items zichtbaar; View op proxy, redirection en 404 "
+                               "hosts, access lists en certificaten)", "password": "wachtwoord"}
     call_prefix = "/api"
 
     async def call_auth(self) -> dict:
@@ -64,6 +67,19 @@ class NginxProxyManager(Integration):
 
     async def certificates(self) -> list[dict]:
         return await self.get("/nginx/certificates")
+
+    async def access_lists(self) -> list[dict]:
+        """De access lists: per lijst satisfy any, het aantal gebruikers en de allow/deny-regels. Gebruikersnamen en
+        wachtwoorden (of hun hint) blijven hier achter."""
+        out = []
+        for al in await self.get("/nginx/access-lists?expand=items,clients") or []:
+            if not isinstance(al, dict) or al.get("id") is None:
+                continue
+            clients = [{"directive": str(c.get("directive") or "").lower(), "address": str(c.get("address") or "").strip()}
+                       for c in al.get("clients") or [] if isinstance(c, dict)]
+            out.append({"id": al["id"], "name": str(al.get("name") or "")[:100], "satisfy_any": bool(al.get("satisfy_any")),
+                        "users": len([i for i in al.get("items") or [] if isinstance(i, dict)]), "clients": clients})
+        return out
 
     async def summary(self) -> list[dict]:
         hosts = await self.proxy_hosts()

@@ -39,12 +39,16 @@ class IgnoreIn(BaseModel):
 @router.put("/ignore")
 async def ignore(body: IgnoreIn, request: Request, sess: Session = Depends(current_session),
                  user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    if body.sig and body.key.startswith("sec:"):
-        # Een beveiligingspunt (bv. een sessie van buitenaf) verbergen is wat wie je sessie steelt als eerste zou
-        # doen: dat vraagt een recente 2FA en geeft een melding, zoals een check pauzeren.
+    if body.sig and body.key.startswith(("sec:", "pub:")):
+        # Een beveiligingspunt (bv. een sessie van buitenaf) of een naam die open staat van buitenaf verbergen is wat
+        # wie je sessie steelt als eerste zou doen: dat vraagt een recente 2FA en geeft een melding, zoals een check
+        # pauzeren.
         now = datetime.now(timezone.utc)
-        title = next((i["title"] for i in await attention.safety(db, now, {}) if i["key"] == body.key), body.key)
-        await confirm_silence(db, request, sess, user, f"Beveiligingswaarschuwing genegeerd: {title}",
+        sec = body.key.startswith("sec:")
+        found = await (attention.safety if sec else attention.public_names)(db, now, {})
+        title = next((i["title"] for i in found if i["key"] == body.key), body.key)
+        await confirm_silence(db, request, sess, user,
+                              f"{'Beveiligingswaarschuwing' if sec else 'Waarschuwing over publiek'} genegeerd: {title}",
                               "attention_ignored", key=body.key, item=title)
     st = await ensure_state(db, attention.ACK_KEY, {})
     items = dict(st.value.get("items") or {})
