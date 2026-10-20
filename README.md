@@ -264,6 +264,18 @@ Later, deel 3 (Authentik en gsm):
   ongeveer 60 gebruikelijke poorten (ssh, http, smb, rdp, docker, databanken, ...) en komt er een melding als er een
   nieuwe poort openstaat. Rechten voor de API-key: *Diagnostics: ARP Table* en *Services: DHCP: Leases* (of
   *Services: Kea DHCP*)
+- **net → kaart**: een netwerkkaart van internet → OPNsense → NPM en de Proxmox-nodes met hun CT's en VM's, met de
+  services erop, in live kleuren. Klik op een node, CT/VM, OPNsense of NPM en je ziet meteen wat er mee uitvalt (ook
+  wat erop "draait"). Een service komt bij een CT/VM via "draait op", het IP in de url of het checkdoel (IP's uit
+  ⟳ pve in de terminal), de NPM-host van zijn domein (uit de nachtelijke kopie van NPM) of een CT/VM met dezelfde naam
+- **hersteltest** (mini dashboard van een PBS-tegel, of `Ctrl+K` → "hersteltest"): één keer per maand zet de homepage
+  een CT uit PBS terug op een vrij ID (vanaf 9900), haalt de netwerkkaarten eraf, start hem, kijkt of hij na 30 s nog
+  draait en verwijdert hem weer. Elke keer een andere CT, de langst niet geteste eerst. Het resultaat komt op de
+  tijdlijn en in je meldingen. Staat standaard uit. Het gaat via de Proxmox-API, dus de PBS-datastore moet in Proxmox
+  gekoppeld zijn (Datacenter → Storage → Add → Proxmox Backup Server). Het token heeft er meer voor nodig dan
+  PVEAuditor: VM.Allocate, VM.Config.Disk, VM.Config.Network, VM.Config.Options, VM.PowerMgmt en
+  Datastore.AllocateSpace op de doelopslag, Datastore.Audit op de PBS-opslag. Bevoorrechte (privileged) CT's en
+  CT's met bind mounts kan alleen root@pam terugzetten: kies dan onder "instellingen" alleen de gewone CT's
 - **effecten** zoals in aiverslag: een achtergrond van punten en 0/1 die voor de muis wijken, een ripple op elke knop,
   bliksem en vonken bij een geslaagde actie (herstarten, wekken), een vuurbal met flits en schudden bij verwijderen
   en uitloggen, en een bliksem op het belletje als er een nieuwe storing binnenkomt. Uit te zetten met `Ctrl+K` →

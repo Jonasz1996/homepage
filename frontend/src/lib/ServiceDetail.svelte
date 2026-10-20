@@ -6,6 +6,7 @@
   import LatencyChart from './LatencyChart.svelte'
   import Modal from './Modal.svelte'
   import Notes from './Notes.svelte'
+  import RestoreTest from './RestoreTest.svelte'
   import HealRules from './HealRules.svelte'
   import Incidents from './Incidents.svelte'
   import Maintenance from './Maintenance.svelte'
@@ -112,6 +113,7 @@
   <Maintenance {service} />
   {#if service.check?.type}<Incidents {service} down={data?.state?.status === 'down'} />{/if}
 
+  {#if service.type === 'pbs'}<RestoreTest />{/if}
   <Notes {service} {onchanged} />
 
   {#if service.type && service.type !== 'link'}
