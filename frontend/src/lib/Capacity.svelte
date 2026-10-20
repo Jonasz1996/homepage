@@ -12,10 +12,20 @@
   let filter = $state('')
   let sort = $state('mem')
 
+  // Stroom uit Home Assistant (alleen als er een homeassistant-tegel is).
+  let power = $state([])
   async function load() {
     try { data = await api('/capacity'); error = '' } catch (e) { error = e.message }
+    try { power = await api('/power') } catch { power = [] }
   }
   onMount(() => { load(); return poll(load, 60000) })
+  const eur = (v) => (v == null ? '—' : `€ ${v.toFixed(2)}`)
+  const kwh = (v) => (v == null ? '—' : `${v.toFixed(v < 10 ? 2 : 1)} kWh`)
+  function bars(days) {
+    const vals = Object.values(days || {})
+    const max = Math.max(0.001, ...vals)
+    return vals.map((v, i) => ({ x: i * 4, h: Math.max(v > 0 ? 1 : 0, (v / max) * 20) }))
+  }
 
   const pct = (a, b) => (a != null && b ? (a / b) * 100 : null)
   const lvl = (p) => (p == null ? '' : p >= 92 ? 'e' : p >= 80 ? 'w' : '')
@@ -49,9 +59,10 @@
 
 <Modal title="df -h && top" {onclose} wide>
   {#if error}<p class="err">{error}</p>{/if}
-  {#if data && !data.storage.length && !data.nodes.length}
+  {#if data && !data.storage.length && !data.nodes.length && !power.length}
     <p class="hint">Nog geen metingen. Voeg een service van type <b>proxmox</b> toe; de worker meet elke 10 minuten.</p>
   {:else if data}
+    {#if data.storage.length}
     <span class="lbl">Opslag</span>
     {#each data.storage as s (s.service_id + s.name)}
       {@const p = pct(s.used, s.total)}
@@ -66,7 +77,37 @@
       </div>
     {/each}
     <p class="hint small">Voorspelling op basis van de laatste 7 dagen. Melding als iets binnen 14 en binnen 3 dagen vol loopt.</p>
+    {/if}
 
+    {#each power as pw (pw.service_id)}
+      <span class="lbl">Stroom · {pw.service}</span>
+      {#if pw.error}<p class="err">{pw.error}</p>{/if}
+      <table class="tbl">
+        <thead><tr><th>node</th><th>nu</th><th>gem. 24u</th><th>deze maand</th><th>kost</th><th>prognose maand</th><th>30 dagen</th></tr></thead>
+        <tbody>
+          {#each pw.nodes as n (n.name)}
+            <tr>
+              <td>{n.name}</td>
+              <td>{n.watts != null ? `${Math.round(n.watts)} W` : '—'}</td>
+              <td class="m">{n.avg_24h != null ? `${Math.round(n.avg_24h)} W` : '—'}</td>
+              <td>{kwh(n.month_kwh)}{#if n.measured}<small title="Uit de eigen metingen om de 10 minuten (geen energy-sensor)"> ≈</small>{/if}</td>
+              <td>{eur(n.month_cost)}</td>
+              <td class="m">{kwh(n.forecast_kwh)} <small>{eur(n.forecast_cost)}</small></td>
+              <td><svg viewBox="0 0 124 22" class="pb" aria-hidden="true">{#each bars(n.days) as b}<rect x={b.x} y={22 - b.h} width="3" height={b.h} />{/each}</svg></td>
+            </tr>
+          {/each}
+          {#if pw.nodes.length > 1}
+            {@const t = (k) => pw.nodes.reduce((a, n) => (n[k] == null ? a : (a ?? 0) + n[k]), null)}
+            <tr class="sum">
+              <td>totaal</td><td>{t('watts') != null ? `${Math.round(t('watts'))} W` : '—'}</td><td></td>
+              <td>{kwh(t('month_kwh'))}</td><td>{eur(t('month_cost'))}</td><td class="m">{kwh(t('forecast_kwh'))} <small>{eur(t('forecast_cost'))}</small></td><td></td>
+            </tr>
+          {/if}
+        </tbody>
+      </table>
+    {/each}
+
+    {#if data.nodes.length || data.guests.length}
     <span class="lbl">Nodes</span>
     <table class="tbl">
       <thead><tr><th>node</th><th>cpu</th><th>cpu piek 24u</th><th>ram</th><th>ram piek 24u</th><th>rootfs</th></tr></thead>
@@ -115,6 +156,7 @@
     </table>
     <p class="hint small">Bij VM's meldt Proxmox geen schijfgebruik, alleen bij containers.
       {#if data.sampled_at}Laatste meting {new Date(data.sampled_at).toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' })}.{/if}</p>
+    {/if}
   {:else}
     <p class="hint">laden…</p>
   {/if}
@@ -141,6 +183,9 @@
   .tbl td small { color: var(--dim); font-size: 11px }
   .tbl tr.off td { color: var(--dim) }
   .m { color: var(--muted) }
+  .pb { width: 124px; height: 22px; display: block }
+  .pb rect { fill: rgba(255, 255, 255, .45) }
+  tr.sum td { color: var(--text-h); border-top: 1px solid rgba(255, 255, 255, .15) }
   td.w { color: var(--mid) }
   td.e { color: var(--err) }
   .gh { display: flex; gap: 8px; align-items: flex-end; margin-top: 14px }

@@ -5,6 +5,7 @@ Bronnen:
 - SSH-hosts met "updates opvolgen": apt of apk via SSH; op een Proxmox-node desgewenst ook in elke
   draaiende container via `pct exec`.
 - Portainer: per container of er een nieuwer image is.
+- OPNsense: de firmwarestatus die OPNsense zelf laatst controleerde.
 
 Het resultaat staat in AppState "updates"; zakt het aantal, dan komt er een regel op de tijdlijn.
 """
@@ -176,6 +177,19 @@ async def from_portainer(svc: Service, clients: HttpClients) -> list[dict]:
     return out
 
 
+async def from_opnsense(svc: Service, clients: HttpClients) -> list[dict]:
+    try:
+        fw = await build(svc, clients).firmware()
+    except IntegrationError as e:
+        return [target(f"opnsense:{svc.id}", svc.name, "opnsense", svc.id, error=str(e))]
+    pk = fw["packages"]
+    if not pk and fw["count"]:
+        pk = [{"n": "opnsense", "from": fw.get("version"), "to": fw.get("latest"), "sec": False}]
+    t = target(f"opnsense:{svc.id}", svc.name, "opnsense", svc.id, pk)
+    t["count"] = max(t["count"], fw["count"])
+    return [t]
+
+
 async def from_ssh(h: SshHost, private_key: str | None) -> list[dict]:
     key = f"ssh:{h.id}"
     if not h.host_key:
@@ -213,10 +227,11 @@ async def from_ssh(h: SshHost, private_key: str | None) -> list[dict]:
 
 async def collect(db: AsyncSession, clients: HttpClients) -> list[dict]:
     services = (await db.execute(select(Service).where(
-        Service.type.in_(("proxmox", "proxmoxbackupserver", "portainer"))))).scalars().all()
+        Service.type.in_(("proxmox", "proxmoxbackupserver", "portainer", "opnsense"))))).scalars().all()
     hosts = (await db.execute(select(SshHost).where(SshHost.updates.in_(("host", "cts"))))).scalars().all()
     keys = {k.id: k.private_key for k in (await db.execute(select(SshKey))).scalars()}
-    fetch = {"proxmox": from_proxmox, "proxmoxbackupserver": from_pbs, "portainer": from_portainer}
+    fetch = {"proxmox": from_proxmox, "proxmoxbackupserver": from_pbs, "portainer": from_portainer,
+             "opnsense": from_opnsense}
     jobs = [fetch[s.type](s, clients) for s in services] + [from_ssh(h, keys.get(h.key_id)) for h in hosts]
     names = [s.name for s in services] + [h.name for h in hosts]
     out: list[dict] = []

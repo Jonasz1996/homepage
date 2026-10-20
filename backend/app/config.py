@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     syslog_keep_days: int = 30
     # IP van deze container zoals de andere machines het zien; install.sh vult dit in.
     syslog_target: str = ""
+    # Elke 5 minuten het publieke IP opvragen bij Cloudflare (1.1.1.1), melding als het verandert.
+    public_ip_check: bool = True
 
 
 @lru_cache

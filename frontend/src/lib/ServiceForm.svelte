@@ -28,7 +28,10 @@
   let parentId = $state(s.parent_id ?? null)
   // Kandidaten voor "hangt af van": alles behalve zichzelf.
   let parents = $derived(services.filter((x) => x.id !== s.id).sort((a, b) => a.name.localeCompare(b.name)))
-  let configText = $state(s.config && Object.keys(s.config).length ? JSON.stringify(s.config, null, 2) : '')
+  // MAC-adres (Wake-on-LAN) heeft een eigen veld; de rest van config staat als JSON.
+  const { mac: initialMac, ...restConfig } = s.config || {}
+  let mac = $state(initialMac || '')
+  let configText = $state(Object.keys(restConfig).length ? JSON.stringify(restConfig, null, 2) : '')
   let secretKeys = $state([...(s.secret_keys || [])])
   let removed = $state([])
   let newSecrets = $state([])
@@ -47,6 +50,11 @@
     let config = {}
     if (configText.trim()) {
       try { config = JSON.parse(configText) } catch { throw new Error('Instellingen zijn geen geldige JSON') }
+    }
+    delete config.mac
+    if (mac.trim()) {
+      if (!/^([0-9a-f]{2}[:-]?){5}[0-9a-f]{2}$/i.test(mac.trim())) throw new Error('MAC-adres klopt niet (bv. aa:bb:cc:dd:ee:ff)')
+      config.mac = mac.trim()
     }
     const check = checkType
       ? {
@@ -192,6 +200,11 @@
           {#each parents as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
         </select>
         <p class="help">Valt dit uit, dan krijg je één melding voor alles wat ervan afhangt, en onderhoud geldt voor allemaal.</p>
+      </div>
+      <div class="dep">
+        <label class="lbl" for="sf-mac">MAC-adres voor Wake-on-LAN (optioneel)</label>
+        <input id="sf-mac" bind:value={mac} placeholder="aa:bb:cc:dd:ee:ff" autocomplete="off" />
+        <p class="help">Dan kan je de machine wekken vanuit het mini dashboard, het netwerkoverzicht (<code>net</code>) of met <code>Ctrl+K</code> → "wekken".</p>
       </div>
       <p class="help">Een service is pas down na 3 mislukte checks op rij. Bij HTTPS wordt ook het certificaat gevolgd (melding 14 en 3 dagen vooraf).</p>
     </details>

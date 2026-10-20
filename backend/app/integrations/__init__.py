@@ -1,16 +1,19 @@
 """Register van alle integraties. Het type van een service kiest de integratie."""
 
 from .adguard import AdGuard
+from .cloudflare import CloudflareTunnel
+from .homeassistant import HomeAssistant
 from .base import Integration, IntegrationError
 from .jsonapi import CustomApi, JsonApi
 from .npm import NginxProxyManager
+from .opnsense import OPNsense
 from .pbs import ProxmoxBackupServer
 from .portainer import Portainer
 from .proxmox import Proxmox
 
 REGISTRY: dict[str, type[Integration]] = {
-    cls.name: cls for cls in (Proxmox, ProxmoxBackupServer, AdGuard, NginxProxyManager, Portainer, JsonApi,
-                                CustomApi)
+    cls.name: cls for cls in (Proxmox, ProxmoxBackupServer, AdGuard, NginxProxyManager, Portainer, OPNsense,
+                                CloudflareTunnel, HomeAssistant, JsonApi, CustomApi)
 }
 
 

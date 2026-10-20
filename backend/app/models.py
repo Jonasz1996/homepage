@@ -264,7 +264,7 @@ class Metric(Base):
     __tablename__ = "metrics"
 
     service_id: Mapped[int] = mapped_column(ForeignKey("services.id", ondelete="CASCADE"), primary_key=True)
-    # node | guest | storage
+    # node | guest | storage | power
     kind: Mapped[str] = mapped_column(String(8), primary_key=True)
     # node: "pve50" · guest: "pve50/101" · storage: "pve50/local-lvm" of gedeeld "ceph"
     name: Mapped[str] = mapped_column(String(120), primary_key=True)
@@ -275,6 +275,8 @@ class Metric(Base):
     mem_total: Mapped[int | None] = mapped_column(BigInteger)
     disk: Mapped[int | None] = mapped_column(BigInteger)
     disk_total: Mapped[int | None] = mapped_column(BigInteger)
+    # Stroomverbruik in watt (kind "power", uit Home Assistant).
+    watts: Mapped[float | None] = mapped_column(Float)
 
 
 class Event(Base):
