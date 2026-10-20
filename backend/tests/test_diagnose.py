@@ -200,8 +200,11 @@ async def test_achtergrond_alleen_tijdstippen_fouten_en_aantallen(authed):
             {"at": now, "ok": False, "step": "opstarten", "error": "CT draait niet", "volid": "pbs:backup/ct/105"}]}),
         AppState(key="selfcheck", value={"checked_at": now, "stale": False,
                                          "backups": [{"name": f"d{i}"} for i in range(9)],
+                                         "restore": {"status": "fout", "at": now, "why": "pg_restore: kapot",
+                                                     "tables": {"users": 1, "services": 3}},
                                          "offsite": {"enabled": True, "dir": "/mnt/homepage-backup", "error": "vol",
                                                      "files": ["x"]}}),
+        AppState(key="check_hourly", value={"until": now, "extra": {"x": "UURTOTALEN-MARKER"}}),
         AppState(key="zomaar_iets", value={"error": "hoort er niet bij"}),
         AppState(key="offsite_key", value={"blob": "OFFSITE-BLOB-MARKER"}),
         AppState(key="ssh_snippets", value={"items": [{"cmd": "echo SNIPPET-MARKER"}]}),
@@ -213,7 +216,8 @@ async def test_achtergrond_alleen_tijdstippen_fouten_en_aantallen(authed):
 
     d = await _diagnose(authed)
     a = d["achtergrond"]
-    assert set(a) == {"updates", "pbs_problems:3", "net_gw:4", "restoretest", "selfcheck"}
+    assert set(a) == {"updates", "pbs_problems:3", "net_gw:4", "restoretest", "selfcheck", "check_hourly"}
+    assert a["check_hourly"] == {"until": now}  # tot waar de worker de checks per uur optelde
     assert a["updates"] == {"checked_at": now, "targets": {
         "aantal": 2, "fouten": [{"key": "ssh:2", "name": "nas", "error": "SSH: verbinding geweigerd"}]}}
     assert a["pbs_problems:3"] == {"aantal": 1, "problemen": ["ds:ct/105: mislukt"]}
@@ -221,9 +225,11 @@ async def test_achtergrond_alleen_tijdstippen_fouten_en_aantallen(authed):
                              "items": {"aantal": 1}}
     assert a["restoretest"]["laatste"]["error"] == "CT draait niet" and a["restoretest"]["tests"] == 1
     assert len(a["selfcheck"]["backups"]) == 3 and a["selfcheck"]["offsite"]["error"] == "vol"
+    r = a["selfcheck"]["restore"]
+    assert r["status"] == "fout" and r["why"] == "pg_restore: kapot" and r["tabellen"] == 2
     raw = json.dumps(d)
     for marker in ("openssl-pakket", "OFFSITE-BLOB-MARKER", "SNIPPET-MARKER", "OUTSIDE-SEEN-MARKER", "SSH-PIN-MARKER",
-                   "hoort er niet bij", "pbs:backup/ct/105"):
+                   "hoort er niet bij", "pbs:backup/ct/105", "UURTOTALEN-MARKER"):
         assert marker not in raw, marker
     assert not set(diagnose.BACKGROUND) & set(diagnose.DENY)
 

@@ -2,13 +2,14 @@
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import delete_before, ensure_state
 from ..deps import event, notify
-from ..models import (AppState, AuditLog, CheckResult, Event, Group, MaintenanceWindow, Metric, Notification, Service,
-                      ServiceState, Session, UpdateRun)
+from ..models import (AppState, AuditLog, CheckHourly, CheckResult, Event, Group, MaintenanceWindow, Metric,
+                      Notification, Service, ServiceState, Session, UpdateRun)
+from . import rollup
 from .checks import Outcome, target_for
 from .upgrade import DONE
 
@@ -22,8 +23,11 @@ MASS_MIN = 5
 MASS_KEY = "massastoring"
 # Wat zo kort voor de massastoring apart als down gemeld werd, hoort bij dezelfde golf.
 MASS_WAVE = timedelta(minutes=15)
-# Zonder TimescaleDB ruimt de worker zelf op: checks een jaar (de 1j-grafiek), metingen een half jaar.
-KEEP_CHECKS_DAYS = 365
+# Hoelang wat bewaard blijft. Met TimescaleDB doet het bewaarbeleid van de hypertables dat (migraties 0025 en 0007,
+# tests/test_timescale.py kijkt of het dezelfde getallen zijn); zonder ruimt de worker zelf op (cleanup).
+# Losse checks 90 dagen; per uur opgeteld (rollup.py) 400 dagen: genoeg voor de 1j-grafiek en de uptime over een jaar.
+KEEP_CHECKS_DAYS = 90
+KEEP_HOURLY_DAYS = 400
 KEEP_METRICS_DAYS = 180
 # Ongelezen meldingen die na een half jaar nog openstaan, leest niemand meer.
 KEEP_UNREAD_DAYS = 180
@@ -183,11 +187,16 @@ async def reset_state(db: AsyncSession, service_id: int) -> None:
     await db.execute(delete(ServiceState).where(ServiceState.service_id == service_id))
 
 
+def notify_mode(service: Service) -> str:
+    """Melden, zoals ingesteld op de check: push (hier en op de gsm), centrum (alleen hier) of uit (alleen tijdlijn)."""
+    return (service.check or {}).get("notify") or "push"
+
+
 def alert(db: AsyncSession, service: Service, title: str, body: str | None, level: str,
           data: dict | None = None, key: str | None = None) -> None:
     """Melding voor een service, zoals ingesteld op de check: hier en op de gsm, alleen hier, of alleen tijdlijn.
     Down, nog down en weer bereikbaar gaan over dezelfde storing: op de gsm vervangt de nieuwste de vorige."""
-    mode = (service.check or {}).get("notify") or "push"
+    mode = notify_mode(service)
     if mode == "uit":
         event(db, "storing", title, body, level, service.id, data)
         return
@@ -417,9 +426,16 @@ async def record(db: AsyncSession, service: Service, outcome: Outcome, now: date
 
 
 async def cleanup(db: AsyncSession) -> None:
+    """Zonder TimescaleDB: oude checks, uurtotalen en metingen opruimen."""
     now = datetime.now(timezone.utc)
     # In stukjes met een commit ertussen: na een lange stilstand blijft elke DELETE onder de statement_timeout.
-    await delete_before(db, CheckResult.ts, now - timedelta(days=KEEP_CHECKS_DAYS), timedelta(hours=6))
+    # Een losse check pas weg als zijn uur in de uurtotalen zit en niet meer opnieuw opgeteld wordt: anders krijgt
+    # de jaargrafiek een gat (de worker stond lang stil, of de uurtotalen lukken niet). Nog nooit opgeteld: niets weg.
+    until = await rollup.watermark(db)
+    if until is not None:
+        cutoff = min(now - timedelta(days=KEEP_CHECKS_DAYS), until - rollup.REDO)
+        await delete_before(db, CheckResult.ts, cutoff, timedelta(hours=6))
+    await delete_before(db, CheckHourly.hour, now - timedelta(days=KEEP_HOURLY_DAYS), timedelta(days=30))
     await delete_before(db, Metric.ts, now - timedelta(days=KEEP_METRICS_DAYS), timedelta(days=1))
 
 

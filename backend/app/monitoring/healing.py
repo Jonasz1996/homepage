@@ -9,6 +9,13 @@ Proefmodus: plan_rule() toont wat een regel zou doen (welke machine, welke call 
 voorwaarden nu wel of niet voldaan zijn. De stappen komen uit dezelfde prepare() die de actie echt uitvoert, de
 voorwaarden uit dezelfde gates() die check() gebruikt. Een regel op "alleen proef" gaat automatisch af zoals altijd
 (zelfde wachttijd en limiet), maar zet alleen op de tijdlijn wat hij zou doen: geen actie, geen melding.
+
+Meldingen volgen "Melden" van de tegel, zoals de storing zelf (engine.alert): hier en op de gsm, alleen hier, of alleen
+de tijdlijn. Elke poging staat op de tijdlijn (en in 🔔, tenzij Melden op niet staat), maar naar de gsm gaat per regel
+en per storing alleen de eerste poging, nog één keer als het erger wordt (de herstart lukte eerst, nu mislukt ze: zo
+krijgt ook een gsm die alleen storingen krijgt het te zien), en de eerste keer dat de limiet de regel pauzeert. Een
+lange storing met een herstart om de 10 min gaf anders de hele nacht door pushberichten. Wat er al naar de gsm ging,
+staat in AppState (zie _to_phone), niet in de meldingen: die kan je in 🔔 wissen.
 """
 
 import logging
@@ -28,15 +35,18 @@ from ..integrations import Integration, IntegrationError, build
 from ..integrations.adguard import AdGuard
 from ..integrations.portainer import Portainer
 from ..integrations.proxmox import Proxmox
-from ..models import HealRule, Service, ServiceState, SshHost
+from ..models import AppState, CheckResult, HealRule, Service, ServiceState, SshHost
 from ..ssh_exec import SshFail, command, connect, run
 from ..ssh_login import Login, defaults, login_for
 from .checks import HttpClients
-from .engine import in_maintenance
+from .engine import in_maintenance, notify_mode
 
 log = logging.getLogger("homepage.heal")
 
 COOLDOWN = timedelta(minutes=10)
+# Met minstens COOLDOWN ertussen gaat een regel hoogstens 6× in een (glijdend) uur af: bij een limiet van 6 valt de
+# eerste poging net uit het uur als de zevende mag, en pauzeert de regel nooit. 5 is het hoogste dat nog iets doet.
+MAX_PER_HOUR = int(timedelta(hours=1) / COOLDOWN) - 1
 NAME_RE = re.compile(r"^[A-Za-z0-9@._:\-]{1,120}$")
 SSH_OPS = {"systemctl": "systemctl restart {}", "docker": "docker restart {}"}
 # Voor de proef: alleen kijken hoe de dienst of container er nu bij staat.
@@ -47,6 +57,8 @@ PROBE_TIMEOUT = 30
 LIMIT = "limiet"
 # Fouten bij het voorbereiden of uitvoeren die we als "mislukt" tonen.
 ERRORS = (IntegrationError, SshFail, OSError, ValueError)
+# Hoe erg een melding is: wat erger is dan wat al naar de gsm ging, gaat er nog eens heen (zie _to_phone).
+RANK = {"info": 0, "warn": 1, "err": 2}
 
 
 def describe(action: dict) -> str:
@@ -100,9 +112,15 @@ def _minutes(d: timedelta) -> int:
     return max(1, math.ceil(d.total_seconds() / 60))
 
 
+def per_hour(rule: HealRule) -> int:
+    """De limiet per uur die echt geldt: een oudere regel kan nog op 6 staan (zie MAX_PER_HOUR)."""
+    return min(rule.max_per_hour, MAX_PER_HOUR)
+
+
 def gates(rule: HealRule, fail_count: int, quiet: bool, maintenance: bool, now: datetime) -> Gates:
     """Gaat de regel nu af? Zonder database en zonder netwerk: check() beslist hiermee, en de proef toont hetzelfde."""
     fired = [t for t in (rule.fired or []) if now - datetime.fromisoformat(t) < timedelta(hours=1)]
+    limit = per_hour(rule)
     last = rule.last_at.replace(tzinfo=rule.last_at.tzinfo or timezone.utc) if rule.last_at else None
     left = COOLDOWN - (now - last) if last else timedelta(0)
     items = [
@@ -119,7 +137,7 @@ def gates(rule: HealRule, fail_count: int, quiet: bool, maintenance: bool, now: 
         ("wachttijd", left <= timedelta(0), f"minstens {int(COOLDOWN.total_seconds() // 60)} min ertussen",
          f"nog {_minutes(left)} min" if left > timedelta(0)
          else f"vorige keer {int((now - last).total_seconds() // 60)} min geleden" if last else "nog niet afgegaan"),
-        (LIMIT, len(fired) < rule.max_per_hour, f"hoogstens {rule.max_per_hour}× per uur",
+        (LIMIT, len(fired) < limit, f"hoogstens {limit}× per uur",
          f"{len(fired)}× het afgelopen uur"),
     ]
     blocked = next((key for key, ok, *_ in items if not ok), None)
@@ -296,10 +314,20 @@ async def prepare(db: AsyncSession, action: dict, http: HttpClients) -> Prepared
     return Prepared([step], checks, go_ssh, probe)
 
 
+def _lands(mode: str, what: str, first: str) -> str:
+    """Waar een melding van zelfherstel terechtkomt, voor de proef (zoals _say() het doet). first: wat ervan naar de
+    gsm gaat."""
+    if mode == "uit":
+        return f"{what} alleen op de tijdlijn (Melden staat op niet)"
+    if mode == "centrum":
+        return f"{what} in 🔔, niet op je gsm (Melden staat op alleen hier)"
+    return f"{what} in 🔔; op je gsm alleen {first} van deze storing"
+
+
 def rule_plan(rule: HealRule, name: str, g: Gates, prep: Prepared | Exception, now: datetime,
-              probed: list[dict] | None = None, steps: list[dict] | None = None) -> dict:
+              probed: list[dict] | None = None, steps: list[dict] | None = None, mode: str = "push") -> dict:
     """Het plan van een regel: de voorwaarden, de stappen uit prepare() (dezelfde waarden als de echte uitvoering)
-    en wat erna volgt. probed/steps: wat de probe las, en de stappen zoals ze daarna zijn."""
+    en wat erna volgt. probed/steps: wat de probe las, en de stappen zoals ze daarna zijn. mode: Melden van de tegel."""
     checks = list(g.checks)
     if isinstance(prep, Exception):
         checks.append(proef.check("actie voorbereiden", False, str(prep)))
@@ -315,17 +343,19 @@ def rule_plan(rule: HealRule, name: str, g: Gates, prep: Prepared | Exception, n
     if rule.dry_run:
         warnings.append("Alleen proef: ook automatisch voert deze regel niets uit, ze zet alleen op de tijdlijn wat ze "
                         "zou doen.")
-    after = [f"melding \"Zelfherstel: {name} was …× down\" of \"Zelfherstel voor {name} mislukt\"",
-             f"telt mee voor hoogstens {rule.max_per_hour}× per uur, met minstens "
+    after = [_lands(mode, f"melding \"Zelfherstel: {name} was …× down\" of \"Zelfherstel voor {name} mislukt\"",
+                    "de eerste poging (en de eerste die mislukt, als een herstart eerst lukte)"),
+             f"telt mee voor hoogstens {per_hour(rule)}× per uur, met minstens "
              f"{int(COOLDOWN.total_seconds() // 60)} min ertussen"]
     return proef.plan(f"Zelfherstel voor {name}: {describe(rule.action)}", steps, checks=checks, after=after,
                       warnings=warnings, now=now, rule=rule.id, would_fire=g.blocked is None)
 
 
-def _limit_plan(rule: HealRule, name: str, g: Gates, now: datetime) -> dict:
+def _limit_plan(rule: HealRule, name: str, g: Gates, now: datetime, mode: str = "push") -> dict:
     return proef.plan(f"Zelfherstel voor {name} gepauzeerd", [], checks=g.checks, now=now, rule=rule.id,
                       skipped=[proef.skip(describe(rule.action), f"al {len(g.fired)}× geprobeerd het afgelopen uur")],
-                      after=[f"een echte regel stuurt nu één foutmelding \"Zelfherstel voor {name} gepauzeerd\""])
+                      after=[_lands(mode, f"een echte regel zet nu één foutmelding \"Zelfherstel voor {name} "
+                                          "gepauzeerd\"", "de eerste pauze")])
 
 
 async def plan_rule(db: AsyncSession, rule: HealRule, http: HttpClients, probe: bool = True,
@@ -347,7 +377,69 @@ async def plan_rule(db: AsyncSession, rule: HealRule, http: HttpClients, probe: 
     probed, steps = [], None
     if probe and isinstance(prep, Prepared):
         probed, steps = await prep.probe()
-    return rule_plan(rule, svc.name if svc else "?", g, prep, now, probed, steps)
+    return rule_plan(rule, svc.name if svc else "?", g, prep, now, probed, steps,
+                     notify_mode(svc) if svc else "push")
+
+
+def push_key(rule_id: int, what: str = "poging") -> str:
+    """Sleutel van wat over deze regel naar de gsm ging: de pogingen, en apart de pauze (de limiet)."""
+    return f"heal{rule_id}" if what == "poging" else f"heal{rule_id}:{what}"
+
+
+def sent_key(key: str) -> str:
+    """De AppState met wat er met deze push_key naar de gsm ging (wanneer en hoe erg)."""
+    return f"heal_push:{key}"
+
+
+def sent_keys(rule_id: int) -> list[str]:
+    """Alle AppState van een regel (voor als je ze verwijdert)."""
+    return [sent_key(push_key(rule_id)), sent_key(push_key(rule_id, "pauze"))]
+
+
+async def _to_phone(db: AsyncSession, key: str, service_id: int, level: str) -> bool:
+    """Naar de gsm? Ja als er in deze storing nog niets met deze sleutel heen ging, of als dit erger is dan wat er
+    heen ging: eerst "herstart gelukt" (warn), nu "mislukt" (err). Een gsm die alleen storingen krijgt, kreeg het
+    eerste niet en ziet zo toch dat zelfherstel niet meer lukt.
+    Een nieuwe storing: de service had sinds de vorige push een geslaagde check (buiten onderhoud). Binnen een
+    storing gaat er alleen iets ergers naar de gsm, dus de laatste push met deze sleutel is ook de ergste.
+    Wat er heen ging, staat in AppState (sent_key) en niet in de melding zelf: wis je die in 🔔 (of ruimt de worker
+    hem na 30 dagen op), dan blijft het toch één push per storing.
+    Twee kleine opzoekingen: AppState op zijn sleutel, en check_results begint met (service_id, ts)."""
+    st = await db.get(AppState, sent_key(key))
+    last = st.value if st else None
+    if not last or RANK.get(level, 0) > RANK.get(last["level"], 0):
+        return True
+    up = (await db.execute(select(CheckResult.ts).where(
+        CheckResult.service_id == service_id, CheckResult.ok.is_(True), CheckResult.maintenance.isnot(True),
+        CheckResult.ts > datetime.fromisoformat(last["at"])).limit(1))).first()
+    return up is not None
+
+
+async def _sent(db: AsyncSession, key: str, level: str) -> None:
+    """Onthoudt dat er nu iets met deze sleutel naar de gsm gaat. Op de klok van de checks (zoals CheckResult.ts),
+    niet de now van check(): daar vergelijkt _to_phone mee."""
+    value = {"at": datetime.now(timezone.utc).isoformat(), "level": level}
+    st = await db.get(AppState, sent_key(key))
+    if st:
+        st.value = value
+    else:
+        db.add(AppState(key=sent_key(key), value=value))
+
+
+async def _say(db: AsyncSession, mode: str, key: str, title: str, body: str, level: str, service_id: int,
+               data: dict | None = None) -> None:
+    """Een melding over zelfherstel, zoals "Melden" van de tegel het wil (zie engine.alert). Naar de gsm alleen de
+    eerste met deze sleutel in deze storing, of iets ergers (_to_phone); de rest staat alleen in 🔔 en op de
+    tijdlijn. Alleen wat naar de gsm gaat, krijgt de sleutel: pushberichten met dezelfde sleutel vervangen elkaar op
+    de gsm."""
+    if mode == "uit":
+        event(db, "actie", title, body, level, service_id, data)
+        return
+    push = mode != "centrum" and await _to_phone(db, key, service_id, level)
+    if push:
+        await _sent(db, key, level)
+    notify(db, title, body, level=level, source="herstel", service_id=service_id, data=data, push=push,
+           key=key if push else None)
 
 
 async def check(maker: async_sessionmaker, service_id: int, http: HttpClients,
@@ -370,7 +462,7 @@ async def check(maker: async_sessionmaker, service_id: int, http: HttpClients,
         if not rules:
             return None
         svc = await db.get(Service, service_id)
-        name, fails = svc.name, state.fail_count
+        name, fails, mode = svc.name, state.fail_count, notify_mode(svc)
         maint = await in_maintenance(db, svc, now)
         result = None
         for rule in rules:
@@ -381,11 +473,11 @@ async def check(maker: async_sessionmaker, service_id: int, http: HttpClients,
                                         f"al {len(g.fired)}× het afgelopen uur")
                     if rule.dry_run:
                         proef.record(db, "actie", f"Zelfherstel voor {name} gepauzeerd",
-                                     _limit_plan(rule, name, g, now), service_id)
+                                     _limit_plan(rule, name, g, now, mode), service_id)
                     else:
-                        notify(db, f"Zelfherstel voor {name} gepauzeerd",
-                               f"Al {len(g.fired)}× geprobeerd het afgelopen uur ({describe(rule.action)}); "
-                               "kijk het zelf na.", level="err", source="herstel", service_id=service_id)
+                        await _say(db, mode, push_key(rule.id, "pauze"), f"Zelfherstel voor {name} gepauzeerd",
+                                   f"Al {len(g.fired)}× geprobeerd het afgelopen uur ({describe(rule.action)}); "
+                                   "kijk het zelf na.", "err", service_id)
                 continue
             if g.blocked:
                 continue
@@ -402,7 +494,7 @@ async def check(maker: async_sessionmaker, service_id: int, http: HttpClients,
                 rule.last_result = (f"proef: {what} zou mislukken: {prep}" if isinstance(prep, Exception)
                                     else f"proef: {what}, niet uitgevoerd (zie de tijdlijn)")
                 proef.record(db, "actie", f"Zelfherstel: {name} was {fails}× down",
-                             rule_plan(rule, name, g, prep, now), service_id)
+                             rule_plan(rule, name, g, prep, now, mode=mode), service_id)
                 result = rule.last_result
                 continue
             todo.append((rule.id, dict(rule.action), prep if isinstance(prep, Exception) else prep.go))
@@ -424,13 +516,15 @@ async def check(maker: async_sessionmaker, service_id: int, http: HttpClients,
             rule = await db.get(HealRule, rule_id)
             if rule is not None:
                 rule.last_result = res
+            # Elke poging in 🔔 (of alleen op de tijdlijn), naar de gsm alleen de eerste van deze storing (en de
+            # eerste die mislukt na een die lukte).
             if err is None:
-                notify(db, f"Zelfherstel: {name} was {fails}× down", f"{describe(action)} — {res[4:]}",
-                       level="warn", source="herstel", service_id=service_id,
-                       data={"rule": rule_id, "action": describe(action)})
+                await _say(db, mode, push_key(rule_id), f"Zelfherstel: {name} was {fails}× down",
+                           f"{describe(action)} — {res[4:]}", "warn", service_id,
+                           data={"rule": rule_id, "action": describe(action)})
             else:
-                notify(db, f"Zelfherstel voor {name} mislukt", f"{describe(action)}: {err}", level="err",
-                       source="herstel", service_id=service_id)
+                await _say(db, mode, push_key(rule_id), f"Zelfherstel voor {name} mislukt",
+                           f"{describe(action)}: {err}", "err", service_id)
             result = res
         await db.commit()
     return result

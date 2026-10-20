@@ -2,14 +2,14 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import outside
 from ..db import get_db
 from ..deps import audit, current_user, recent_auth
 from ..integrations import IntegrationError
-from ..models import HealRule, Service, User
+from ..models import AppState, HealRule, Service, User
 from ..monitoring import healing
 from ..ssh_exec import SshFail
 from .integrations import clients
@@ -18,8 +18,10 @@ router = APIRouter(prefix="/api/heal", tags=["heal"])
 
 
 def rule_out(r: HealRule, names: dict[int, str]) -> dict:
+    # max_per_hour: de limiet die echt geldt. Een oudere regel op 6 komt zo als 5 terug, en aan/uit zetten (dat de
+    # regel terugstuurt) lukt dan nog.
     return {"id": r.id, "service_id": r.service_id, "service": names.get(r.service_id), "enabled": r.enabled,
-            "after": r.after, "max_per_hour": r.max_per_hour, "action": r.action,
+            "after": r.after, "max_per_hour": healing.per_hour(r), "action": r.action,
             "describe": healing.describe(r.action), "fired": r.fired or [], "last_at": r.last_at,
             "last_result": r.last_result, "dry_run": r.dry_run}
 
@@ -41,7 +43,7 @@ class RuleIn(BaseModel):
     service_id: int
     enabled: bool = True
     after: int = Field(default=3, ge=1, le=60)
-    max_per_hour: int = Field(default=2, ge=1, le=6)
+    max_per_hour: int = Field(default=2, ge=1, le=healing.MAX_PER_HOUR)
     action: dict
     # Alleen proef. None: bij een wijziging blijft het zoals het was (aan/uit zetten stuurt het niet altijd mee).
     dry_run: bool | None = None
@@ -107,6 +109,8 @@ async def update(rule_id: int, body: RuleIn, request: Request, user: User = Depe
 async def remove(rule_id: int, request: Request, user: User = Depends(recent_auth), db: AsyncSession = Depends(get_db)):
     r = await _rule(db, rule_id)
     await audit(db, request, user, "heal_rule_deleted", rule=r.id, what=healing.describe(r.action))
+    # Ook wat er van deze regel naar de gsm ging (zie healing._to_phone): dat ruimt anders niemand op.
+    await db.execute(delete(AppState).where(AppState.key.in_(healing.sent_keys(r.id))))
     await db.delete(r)
     await db.commit()
 

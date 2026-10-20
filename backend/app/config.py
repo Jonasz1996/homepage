@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     syslog_keep_days: int = 30
     # IP van deze container zoals de andere machines het zien; install.sh vult dit in.
     syslog_target: str = ""
+    # Verlies van de syslog-ontvanger dat bij het stoppen niet meer in de database raakte (database weg), tot de
+    # volgende start. De map maakt systemd aan (StateDirectory in homepage-syslog.service).
+    syslog_state_file: Path = Path("/var/lib/homepage-syslog/verlies.json")
     # IP van Nginx Proxy Manager (install.sh vraagt het); voor de firewall-lijst in net.
     npm_ip: str = ""
     # Wat nginx rechtstreeks toelaat (install.sh schrijft het): alleen NPM, of het hele LAN (HOMEPAGE_LAN_OPEN=1).

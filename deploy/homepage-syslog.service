@@ -19,6 +19,9 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadOnlyPaths=/opt/homepage /etc/homepage
+# /var/lib/homepage-syslog, van de gebruiker homepage en ook met ProtectSystem=strict schrijfbaar: verlies dat bij
+# het stoppen niet meer in de database raakte (database weg), tot de volgende start (HOMEPAGE_SYSLOG_STATE_FILE).
+StateDirectory=homepage-syslog
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

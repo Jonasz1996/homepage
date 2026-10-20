@@ -1,19 +1,34 @@
 import asyncio
+import json
+import os
+import signal
+import socket
+import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 import asyncssh
 import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy import delete, event, func, select, text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.attention import syslog_items
 from app.config import get_settings
 from app.db import get_db
+from app.health import selfcheck as sc
 from app.main import app
-from app.models import LogEntry, LogRule, Notification
+from app.models import AppState, Base, LogEntry, LogRule, Notification
+from app.syslog import rollout, server
 from app.syslog.parse import parse
 from app.syslog.server import Receiver, handle_tcp
 
+from .conftest import BACKEND, TEST_DB
+
 NOW = datetime(2026, 10, 3, 18, 0, tzinfo=timezone.utc)
+PG = TEST_DB.startswith("postgresql")
+# Een database die er niet is: verbinden mislukt meteen, zoals bij een PostgreSQL die herstart.
+DEAD = "postgresql+asyncpg://postgres@127.0.0.1:1/weg" if PG else "sqlite+aiosqlite:////niet-bestaande-map/weg.db"
+OOM = b"<14>Oct  3 20:00:01 pve50 kernel: Out of memory: Killed process 1234 (java)"
 
 
 def test_parse_rfc3164_with_tag_and_pid():
@@ -86,6 +101,488 @@ async def test_tcp_octet_counting_and_lines(receiver):
     srv.close()
 
 
+# --- database weg, wachtrij, stoppen en starten ---------------------------------------------------------------
+
+class Flaky:
+    """Een sessionmaker waarvan de eerste `fails` sessies geen database vinden, daarna wel."""
+
+    def __init__(self, real: async_sessionmaker, fails: int) -> None:
+        self.engine = create_async_engine(DEAD)
+        self.dead = async_sessionmaker(self.engine)
+        self.real, self.fails, self.calls = real, fails, 0
+
+    def __call__(self):
+        self.calls += 1
+        return self.dead() if self.calls <= self.fails else self.real()
+
+
+async def _count(maker, model=LogEntry) -> int:
+    async with maker() as s:
+        return (await s.execute(select(func.count()).select_from(model))).scalar()
+
+
+async def _titles(maker) -> list[str]:
+    async with maker() as s:
+        return list((await s.execute(select(Notification.title).where(Notification.source == "syslog"))).scalars())
+
+
+async def _until(cond, seconds: float = 10) -> None:
+    """Wachten op cond(). Op de tellers van de ontvanger, niet op de database: in de SQLite-tests delen alle sessies
+    één verbinding, en een sessie die tussendoor leest en sluit, rolt de transactie van de schrijver terug."""
+    end = time.monotonic() + seconds
+    while not cond():
+        assert time.monotonic() < end, "duurde te lang"
+        await asyncio.sleep(0.02)
+
+
+async def test_writer_keeps_every_line_while_the_database_is_away(receiver, monkeypatch):
+    rx, db = receiver
+    db.add(LogRule(name="OOM", pattern="out of memory", max_severity=7, level="err", cooldown_minutes=10))
+    await db.commit()
+    monkeypatch.setattr(server, "RETRY_FIRST", 0.01)
+    monkeypatch.setattr(server, "FLUSH_SECONDS", 0.05)
+    real = rx.maker
+    await rx.reload_rules()
+    rx.maker = flaky = Flaky(real, 4)
+    rx.accept(OOM, "192.168.0.50")
+    rx.accept(b"<14>Oct  3 20:00:02 pve50 cron[1]: twee", "192.168.0.50")
+    rx.accept(b"<14>Oct  3 20:00:03 pve51 cron[1]: drie", "192.168.0.51")
+    task = asyncio.create_task(rx.writer())
+    try:
+        await _until(lambda: rx.stored == 3)
+    finally:
+        task.cancel()
+        await flaky.engine.dispose()
+    # Elke regel precies één keer, de melding één keer, en de storing is voorbij.
+    assert flaky.calls > 4 and await _count(real) == 3 and rx.stored == 3 and rx.lost == 0
+    assert await _titles(real) == ["pve50: OOM"]
+    assert rx.down_since is None and rx.last_error["until"] and rx.last_error["error"]
+    # Nu pas telt de cooldown: een nieuwe OOM-regel geeft geen tweede melding.
+    assert (await rx.prepare([(OOM, "192.168.0.50", time.time(), False)])).notes == []
+
+
+async def test_cooldown_only_after_the_batch_is_stored(receiver):
+    rx, db = receiver
+    db.add(LogRule(name="OOM", pattern="out of memory", max_severity=7, level="err", cooldown_minutes=10))
+    await db.commit()
+    await rx.reload_rules()
+    real = rx.maker
+    line = (OOM, "192.168.0.50", time.time(), False)
+    first = await rx.prepare([line])
+    assert [n["title"] for n in first.notes] == ["pve50: OOM"]
+    rx.maker = flaky = Flaky(real, 1)
+    with pytest.raises(Exception):
+        await rx.store(first)
+    await flaky.engine.dispose()
+    # Mislukt: geen cooldown, de melding is niet verloren en wordt ook niet onderdrukt.
+    assert rx.rules.last_fire == {}
+    assert len((await rx.prepare([line])).notes) == 1
+    await rx.store(first)
+    assert rx.rules.last_fire and (await rx.prepare([line])).notes == []
+    assert await _titles(real) == ["pve50: OOM"]
+
+
+async def test_receive_time_is_kept_until_written(receiver):
+    rx, _ = receiver
+    before = time.time()
+    rx.accept(b"<14>Oct  3 20:00:01 pve50 cron[1]: zonder jaar of tijdzone", "192.168.0.50")
+    data, ip, at, held = rx.queue.get_nowait()
+    assert before <= at <= time.time()
+    # Pas tien minuten later weggeschreven (na een storing): de regel houdt zijn ontvangsttijd.
+    await rx.flush([(data, ip, at - 600, held)])
+    async with rx.maker() as s:
+        ts = (await s.execute(select(LogEntry.ts))).scalar()
+    assert abs(ts.replace(tzinfo=ts.tzinfo or timezone.utc).timestamp() - (at - 600)) < 1
+
+
+async def test_held_back_tcp_lines_keep_their_own_time(receiver):
+    """rsyslog houdt regels zelf vast zolang de ontvanger niet leest (wachtrij vol na een storing) en stuurt ze uren
+    later. Zoals het dashboard rsyslog uitrolt (RFC 5424, met tijdzone) houden ze hun eigen tijd; vroeger kregen ze
+    het moment waarop ze eindelijk gelezen werden."""
+    rx, _ = receiver
+    assert 'template="RSYSLOG_SyslogProtocol23Format"' in rollout.CLIENT
+    sent = datetime.now(timezone(timedelta(hours=2))) - timedelta(hours=3)
+    # Precies zoals rsyslog 8 het met die template over TCP stuurt (nagekeken met rsyslogd 8.2312).
+    line = f"<78>1 {sent.isoformat()} pve50 CRON 20082 - -  (root) CMD (run-parts /etc/cron.hourly)\n".encode()
+    srv = await asyncio.start_server(lambda r, w: handle_tcp(rx, r, w), "127.0.0.1", 0)
+    _, w = await asyncio.open_connection("127.0.0.1", srv.sockets[0].getsockname()[1])
+    w.write(line)
+    await w.drain()
+    await _until(lambda: rx.queue.qsize() == 1)
+    await rx.flush([rx.queue.get_nowait()])
+    w.close()
+    srv.close()
+    async with rx.maker() as s:
+        row = (await s.execute(select(LogEntry))).scalar_one()
+    assert (row.host, row.app, row.facility, row.severity) == ("pve50", "CRON", 9, 6)
+    assert row.msg == "(root) CMD (run-parts /etc/cron.hourly)"
+    ts = row.ts.replace(tzinfo=row.ts.tzinfo or timezone.utc)
+    assert abs(ts.timestamp() - sent.timestamp()) < 0.01
+
+
+async def test_clock_hours_behind_gets_the_receive_time(receiver, monkeypatch):
+    """Een machine waarvan de klok uren achterloopt: sinds regels tot een dag oud hun eigen tijd houden, stonden zijn
+    regels uren in het verleden (niet bij live meekijken, niet in het laatste uur). Uren oud kan alleen als rsyslog de
+    regel vasthield: kort na het (opnieuw) verbinden of kort nadat de wachtrij hier vol zat. Anders, en op UDP altijd,
+    de ontvangsttijd."""
+    monkeypatch.setattr(server, "QUEUE_MAX", 2)
+    monkeypatch.setattr(server, "HELD_AFTER_CONNECT", 0.5)
+    monkeypatch.setattr(server, "HELD_AFTER_FULL", 0.5)
+    rx = Receiver(receiver[0].maker)
+    sent = datetime.now(timezone.utc) - timedelta(hours=3)
+    srv = await asyncio.start_server(lambda r, w: handle_tcp(rx, r, w), "127.0.0.1", 0)
+    _, w = await asyncio.open_connection("127.0.0.1", srv.sockets[0].getsockname()[1])
+    got = []
+
+    def line(msg: str) -> bytes:
+        return f"<14>1 {sent.isoformat()} pve50 app - - - {msg}\n".encode()
+
+    async def tcp(msg: str) -> None:
+        w.write(line(msg))
+        await w.drain()
+
+    async def take(n: int = 1) -> None:
+        await _until(lambda: rx.queue.qsize() >= n)
+        got.extend(rx.queue.get_nowait() for _ in range(n))
+
+    await tcp("net verbonden")
+    await take()
+    rx.accept(line("udp"), "192.168.0.50")
+    await take()
+    await asyncio.sleep(0.6)
+    await tcp("al even verbonden")
+    await take()
+    # Wachtrij vol (de database is weg): de verbinding leest niet verder, rsyslog houdt de regels vast.
+    rx.accept(line("vol 1"), "192.168.0.50")
+    rx.accept(line("vol 2"), "192.168.0.50")
+    await tcp("wachtte op plaats")
+    await _until(lambda: rx.received == 6)
+    await take(2)
+    await take()  # nu pas komt "wachtte op plaats" erbij
+    await tcp("net na vol")
+    await take()
+    await asyncio.sleep(0.6)
+    await tcp("lang na vol")
+    await take()
+    w.close()
+    srv.close()
+    await rx.flush(got)
+    async with rx.maker() as s:
+        rows = (await s.execute(select(LogEntry.msg, LogEntry.ts).order_by(LogEntry.id))).all()
+    assert [msg for msg, _ in rows] == ["net verbonden", "udp", "al even verbonden", "vol 1", "vol 2",
+                                        "wachtte op plaats", "net na vol", "lang na vol"]
+    now = time.time()
+    for msg, ts in rows:
+        ts = ts.replace(tzinfo=ts.tzinfo or timezone.utc).timestamp()
+        if msg in ("net verbonden", "wachtte op plaats", "net na vol"):
+            assert abs(ts - sent.timestamp()) < 0.01, msg
+        else:
+            assert now - 10 < ts <= now, msg
+
+
+async def test_long_host_and_rule_name_cut_to_the_title_column(receiver):
+    """notifications.title is varchar(200): op PostgreSQL gaf een lange hostnaam een fout, en verloor de batch."""
+    rx, db = receiver
+    db.add(LogRule(name="r" * 80, max_severity=7, level="warn", cooldown_minutes=0))
+    await db.commit()
+    host = "h" * 255
+    await rx.flush([(f"<14>1 2026-10-03T18:00:00Z {host} app - - - hallo".encode(), "192.168.0.9", time.time(), False)])
+    [title] = await _titles(rx.maker)
+    assert len(title) == 200 and title.startswith(host[:100])
+    async with rx.maker() as s:
+        assert (await s.execute(select(LogEntry.host))).scalar() == host
+
+
+async def test_rejected_row_does_not_block_the_rest(receiver, monkeypatch):
+    rx, db = receiver
+    monkeypatch.setattr(server, "FLUSH_SECONDS", 0.05)
+    dbapi = db.bind.dialect.loaded_dbapi
+
+    def refuse(conn, cursor, statement, params, context, executemany):
+        # De database weigert één regel (SQLSTATE 22001, zoals een te lange waarde).
+        if statement.lstrip().startswith("INSERT INTO log_entries") and "gif" in repr(params):
+            e = (getattr(dbapi, "DataError", None) or dbapi.DatabaseError)("value too long for type varchar(255)")
+            e.sqlstate = "22001"
+            raise e
+    event.listen(db.bind.sync_engine, "before_cursor_execute", refuse)
+    try:
+        for word in ("een", "gif", "drie"):
+            rx.accept(f"<14>app: {word}".encode(), "192.168.0.9")
+        task = asyncio.create_task(rx.writer())
+        await _until(lambda: rx.stored == 2 and rx.lost == 1)
+        # Niet opnieuw geprobeerd: de schrijver neemt gewoon de volgende batch.
+        rx.accept(b"<14>app: vier", "192.168.0.9")
+        await _until(lambda: rx.stored == 3)
+        task.cancel()
+    finally:
+        event.remove(db.bind.sync_engine, "before_cursor_execute", refuse)
+    async with rx.maker() as s:
+        assert sorted((await s.execute(select(LogEntry.msg))).scalars()) == ["drie", "een", "vier"]
+    assert rx.lost == 1 and rx._loss["why"] == server.REJECTED and rx.down_since is None
+
+
+async def test_udp_drops_the_newest_and_tcp_waits(authed, monkeypatch):
+    monkeypatch.setattr(server, "QUEUE_MAX", 4)
+    rx = Receiver(None)
+    for i in range(6):
+        rx.accept(f"<14>udp {i}".encode(), "192.168.0.9")
+    assert (rx.received, rx.lost, rx.queue.qsize()) == (6, 2, 4)
+    assert [rx.queue.get_nowait()[0] for _ in range(4)] == [f"<14>udp {i}".encode() for i in range(4)]
+
+    # TCP: bij een volle wachtrij leest de verbinding niet verder, en er valt niets weg.
+    srv = await asyncio.start_server(lambda r, w: handle_tcp(rx, r, w), "127.0.0.1", 0)
+    _, w = await asyncio.open_connection("127.0.0.1", srv.sockets[0].getsockname()[1])
+    w.write(b"".join(f"<14>tcp {i}\n".encode() for i in range(6)))
+    await w.drain()
+
+    await _until(lambda: rx.queue.qsize() == 4)
+    await asyncio.sleep(0.2)
+    # De vijfde regel is gelezen en wacht op plaats; de zesde blijft ongelezen.
+    assert rx.queue.qsize() == 4 and len(rx.clients) == 1 and rx.received == 6 + 5
+    got = [rx.queue.get_nowait()[0] for _ in range(4)]
+    await _until(lambda: rx.queue.qsize() == 2)
+    got += [rx.queue.get_nowait()[0] for _ in range(2)]
+    assert got == [f"<14>tcp {i}\n".encode() for i in range(6)] and rx.lost == 2
+    # Hoe lang een regel ook is: in de wachtrij hoogstens MAX_RAW bytes.
+    rx.accept(b"<14>x " + b"a" * 100_000, "192.168.0.9")
+    assert len(rx.queue.get_nowait()[0]) == server.MAX_RAW
+    w.close()
+    srv.close()
+
+
+async def test_udp_never_pushes_out_tcp_lines(authed, monkeypatch):
+    """Een volle wachtrij met TCP-regels (rsyslog heeft ze als afgeleverd geschrapt) en de router blijft via UDP
+    sturen: vroeger duwde elke UDP-regel de oudste TCP-regel eruit, tot de wachtrij alleen nog UDP bevatte."""
+    monkeypatch.setattr(server, "QUEUE_MAX", 4)
+    rx = Receiver(None)
+    srv = await asyncio.start_server(lambda r, w: handle_tcp(rx, r, w), "127.0.0.1", 0)
+    _, w = await asyncio.open_connection("127.0.0.1", srv.sockets[0].getsockname()[1])
+    w.write(b"".join(f"<14>tcp {i}\n".encode() for i in range(6)))
+    await w.drain()
+    await _until(lambda: rx.queue.qsize() == 4 and rx.received == 5)
+    for i in range(3):
+        rx.accept(f"<14>udp {i}".encode(), "192.168.0.9")
+    assert (rx.lost, rx._loss["n"], rx._loss["why"]) == (3, 3, server.FULL)
+    got = [rx.queue.get_nowait()[0] for _ in range(4)]
+    await _until(lambda: rx.queue.qsize() == 2)
+    got += [rx.queue.get_nowait()[0] for _ in range(2)]
+    assert got == [f"<14>tcp {i}\n".encode() for i in range(6)] and rx.lost == 3
+    w.close()
+    srv.close()
+
+
+async def test_status_with_counters_and_loss(receiver, authed, monkeypatch):
+    rx, _ = receiver
+    monkeypatch.setattr(server, "QUEUE_MAX", 2)
+    first = Receiver(rx.maker)
+    for i in range(5):
+        first.accept(f"<14>udp {i}".encode(), "192.168.0.9")
+    assert await first.save_status()
+    async with rx.maker() as s:
+        v = (await s.get(AppState, server.STATE_KEY)).value
+    assert (v["received"], v["lost"], v["backlog"], v["stored"]) == (5, 3, 2, 0)
+    assert v["loss"]["n"] == 3 and v["loss"]["why"] == server.FULL and v["at"] and v["pid"] == os.getpid()
+    assert first._loss["n"] == 0  # bewaard
+
+    # Na een herstart: het verlies van daarnet blijft staan en telt op.
+    second = Receiver(rx.maker)
+    for i in range(3):
+        second.accept(f"<14>udp {i}".encode(), "192.168.0.9")
+    assert await second.save_status()
+    async with rx.maker() as s:
+        v2 = (await s.get(AppState, server.STATE_KEY)).value
+    assert v2["lost"] == 1 and v2["loss"]["n"] == 4 and v2["loss"]["since"] == v["loss"]["since"]
+    items = {i["key"]: i for i in (await authed.get("/api/attention")).json()["items"]}
+    assert items["syslog:verlies"]["title"] == "4 logregels niet bewaard"
+    assert items["syslog:verlies"]["level"] == "warn" and "syslog" not in items
+    # Geen push, alleen onder Aandacht en Gezondheid.
+    assert await _titles(rx.maker) == []
+    health = (await authed.get("/api/health")).json()["syslog"]
+    assert health["ok"] is True and health["loss"]["n"] == 4 and health["lost"] == 1
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+async def test_start_without_database(receiver, monkeypatch, tmp_path):
+    """De luisteraars gaan eerst open; zonder database stopt het proces niet, gokt het niet dat het geen TimescaleDB
+    is, en wacht wat binnenkomt tot de database er is."""
+    rx0, _ = receiver
+    real, own = rx0.maker, None
+    if not PG:
+        # Hier werken de schrijver, het opstarten en de toestand tegelijk: dat kan niet op één gedeelde verbinding
+        # (SQLite in het geheugen), wel op een bestand met een verbinding per sessie, zoals PostgreSQL.
+        own = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'syslog.db'}")
+        async with own.begin() as c:
+            await c.run_sync(Base.metadata.create_all)
+        real = async_sessionmaker(own, expire_on_commit=False)
+    for k, v in (("RETRY_FIRST", 0.01), ("RETRY_MAX", 0.05), ("FLUSH_SECONDS", 0.05)):
+        monkeypatch.setattr(server, k, v)
+    dead = create_async_engine(DEAD)
+    rx = Receiver(async_sessionmaker(dead))
+    stop = asyncio.Event()
+    port = _free_port()
+    task = asyncio.create_task(server.serve(rx, "127.0.0.1", port, stop))
+    try:
+        for _ in range(100):
+            try:
+                _, w = await asyncio.open_connection("127.0.0.1", port)
+                break
+            except OSError:
+                await asyncio.sleep(0.02)
+        w.write(b"<14>h1 app: via tcp\n")
+        await w.drain()
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as u:
+            u.sendto(b"<14>h2 app: via udp", ("127.0.0.1", port))
+        await _until(lambda: rx.received == 2)
+        await asyncio.sleep(0.2)
+        assert not task.done() and rx.down_since is not None and rx.backlog() == 2
+        # Niet gegokt (vroeger: True, en dan op TimescaleDB zelf opruimen). SQLite is nooit TimescaleDB: dat weet de
+        # ontvanger zonder verbinding.
+        assert rx.self_cleanup is (None if PG else True)
+
+        rx.maker = real  # de database is er weer
+        await _until(lambda: rx.stored == 2 and rx.self_cleanup is not None and rx.down_since is None)
+        w.close()
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 15)
+        await dead.dispose()
+    # Op TimescaleDB (de migraties-suite) ruimt het retentiebeleid op, anders de ontvanger zelf.
+    assert rx.self_cleanup is not await _hypertable(real)
+    assert await _count(real) == 2
+    async with real() as s:
+        v = (await s.get(AppState, server.STATE_KEY)).value
+    assert v["stored"] == 2 and v["lost"] == 0 and v["last_error"]["until"]
+    if own:
+        await own.dispose()
+
+
+async def test_loss_survives_a_stop_while_the_database_is_away(receiver, monkeypatch, tmp_path):
+    """Herstart (de container, om een volle schijf op te lossen) terwijl de database weg is: ook het laatste teken van
+    leven raakt dan niet in de database. Vroeger verdween het verlies met het proces en stond er niets onder !."""
+    rx0, _ = receiver
+    real, own = rx0.maker, None
+    if not PG:
+        # Zoals in test_start_without_database: een verbinding per sessie.
+        own = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'syslog.db'}")
+        async with own.begin() as c:
+            await c.run_sync(Base.metadata.create_all)
+        real = async_sessionmaker(own, expire_on_commit=False)
+    for k, v in (("RETRY_FIRST", 0.01), ("RETRY_MAX", 0.05), ("FLUSH_SECONDS", 0.05), ("DRAIN_SECONDS", 0.2),
+                 ("QUEUE_MAX", 3)):
+        monkeypatch.setattr(server, k, v)
+    kept = tmp_path / "verlies.json"
+    monkeypatch.setattr(get_settings(), "syslog_state_file", kept)
+    dead = create_async_engine(DEAD)
+    first, stop = Receiver(async_sessionmaker(dead)), asyncio.Event()
+    task = asyncio.create_task(server.serve(first, "127.0.0.1", _free_port(), stop))
+    try:
+        await asyncio.sleep(0.1)
+        for i in range(5):
+            first.accept(f"<14>udp {i}".encode(), "192.168.0.9")  # 3 in de wachtrij, 2 vallen weg
+        await _until(lambda: first.down_since is not None)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 15)
+        await dead.dispose()
+    # De 2 van de volle wachtrij en de 3 die bij het stoppen niet meer weggeschreven raakten.
+    assert first.lost == 5 and json.loads(kept.read_text())["loss"]["n"] == 5
+
+    second, stop = Receiver(real), asyncio.Event()
+    task = asyncio.create_task(server.serve(second, "127.0.0.1", _free_port(), stop))
+    try:
+        # Meteen bij het starten meegeteld en het bestand weg; na het eerste teken van leven staat het in de database.
+        await _until(lambda: not kept.exists() and second._loss["n"] == 0)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 15)
+    async with real() as s:
+        v = (await s.get(AppState, server.STATE_KEY)).value
+    assert v["lost"] == 0 and v["loss"]["n"] == 5 and v["loss"]["why"] == server.STOPPED
+    # De fout van toen, en dat schrijven nu weer lukt.
+    assert v["last_error"]["error"] and v["last_error"]["until"]
+    [item] = syslog_items(sc.syslog_status(v, datetime.now(timezone.utc)), {})
+    assert item["title"] == "5 logregels niet bewaard" and "Laatste fout van de database" in item["text"]
+    assert not kept.exists()
+    if own:
+        await own.dispose()
+
+
+async def test_kept_loss_counts_once(monkeypatch, tmp_path):
+    kept = tmp_path / "verlies.json"
+    monkeypatch.setattr(get_settings(), "syslog_state_file", kept)
+    rx = Receiver(None)
+    rx.lose(2, server.FULL)  # sinds deze start: nieuwer dan wat in het bestand staat
+    kept.write_text(json.dumps({"loss": {"n": 5, "since": 1000.0, "at": 2000.0, "why": server.STOPPED},
+                                "last_error": {"since": "2026-10-03T18:00:00+00:00", "until": None, "error": "weg"}}))
+    rx.restore_loss()
+    assert (rx._loss["n"], rx._loss["since"], rx._loss["why"], rx.lost) == (7, 1000.0, server.FULL, 2)
+    assert rx.last_error["error"] == "weg" and not kept.exists()
+    rx.restore_loss()
+    assert rx._loss["n"] == 7
+    # Onleesbaar: niet meegeteld, en weg (anders bij elke start dezelfde waarschuwing).
+    kept.write_text("{kapot")
+    rx.restore_loss()
+    assert rx._loss["n"] == 7 and not kept.exists()
+    # Niets verloren en geen fout: geen bestand.
+    Receiver(None).keep_loss()
+    assert not kept.exists()
+
+
+async def _hypertable(maker) -> bool:
+    if not PG:
+        return False
+    async with maker() as s:
+        if not (await s.execute(text("SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'"))).scalar():
+            return False
+        return bool((await s.execute(text(
+            "SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'log_entries'"))).scalar())
+
+
+async def test_sigterm_writes_the_queue_before_stopping(tmp_path):
+    """systemctl stop/restart (ook bij elke update) stuurt SIGTERM. Vroeger stierf het proces dan meteen, met wat nog
+    in de wachtrij of de batch zat."""
+    url = f"sqlite+aiosqlite:///{tmp_path / 'syslog.db'}"
+    engine = create_async_engine(url)
+    async with engine.begin() as c:
+        await c.run_sync(Base.metadata.create_all)
+    port = _free_port()
+    env = {**os.environ, "HOMEPAGE_DATABASE_URL": url, "HOMEPAGE_SYSLOG_BIND": "127.0.0.1",
+           "HOMEPAGE_SYSLOG_PORT": str(port)}
+    maker = async_sessionmaker(engine)
+    proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "app.syslog.server", cwd=BACKEND, env=env,
+                                                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+    try:
+        # Helemaal opgestart: luistert, en heeft zijn eerste teken van leven in de database gezet.
+        for _ in range(600):
+            async with maker() as s:
+                if await s.get(AppState, server.STATE_KEY):
+                    break
+            assert proc.returncode is None
+            await asyncio.sleep(0.05)
+        _, w = await asyncio.open_connection("127.0.0.1", port)
+        w.write(b"<14>h1 app: een\n<14>h1 app: twee\n<14>h1 app: drie\n")
+        await w.drain()
+        # Ontvangen, maar nog niet weggeschreven: de schrijver wacht tot FLUSH_SECONDS (1 s) op meer regels.
+        await asyncio.sleep(0.4)
+        proc.send_signal(signal.SIGTERM)
+        _, err = await asyncio.wait_for(proc.communicate(), 30)
+        w.close()
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+    assert proc.returncode == 0, err.decode()[-2000:]
+    assert await _count(maker) == 3
+    async with maker() as s:
+        assert (await s.get(AppState, server.STATE_KEY)).value["stored"] == 3
+    await engine.dispose()
+
+
 async def _seed(db):
     now = datetime.now(timezone.utc)
     rows = [LogEntry(ts=now - timedelta(minutes=i), host="pve50" if i % 2 else "ct101", app="sshd" if i % 3 else "cron",
@@ -120,6 +617,43 @@ async def test_search_pagination_hosts_histogram(receiver, authed):
     await db.commit()
     live = (await authed.get("/api/logs", params={"after_id": max(newest, 31)})).json()["items"]
     assert [i["msg"] for i in live] == ["live"]
+
+
+async def test_live_tail_continues_from_the_largest_id_at_search_time(receiver, authed):
+    """Een regel die rsyslog vasthield, komt later binnen met zijn eigen, oudere tijd: de id's volgen de tijd niet meer.
+    Live meekijken ging verder vanaf de grootste id van de bovenste 50 regels; een regel die verder in de lijst stond,
+    kwam dan nog eens, en de logviewer liep vast. Nu geeft het zoeken last_id mee: de grootste id van dat moment."""
+    _, db = receiver
+    now = datetime.now(timezone.utc)
+    db.add_all([LogEntry(ts=now - timedelta(minutes=i), host="pve50", severity=6, msg=f"bericht {i}")
+                for i in range(60)])
+    await db.commit()
+    held =LogEntry(ts=now - timedelta(minutes=50, seconds=30), host="pve50", severity=6, msg="vastgehouden")
+    db.add(held)
+    await db.commit()
+    # Nog ouder dan het uur dat live meekijken toont: telt niet mee voor last_id.
+    db.add(LogEntry(ts=now - timedelta(hours=3), host="pve50", severity=6, msg="drie uur vastgehouden"))
+    await db.commit()
+
+    r = (await authed.get("/api/logs", params={"limit": 300})).json()
+    ids = [i["id"] for i in r["items"]]
+    assert ids.index(held.id) == 51 and max(ids[:50]) < held.id
+    assert r["last_id"] == held.id
+    assert (await authed.get("/api/logs", params={"after_id": r["last_id"]})).json()["items"] == []
+    db.add(LogEntry(host="pve50", severity=6, msg="live"))
+    await db.commit()
+    live = (await authed.get("/api/logs", params={"after_id": r["last_id"]})).json()
+    assert [i["msg"] for i in live["items"]] == ["live"] and "last_id" not in live
+    # Meer laden heeft geen last_id nodig.
+    more = await authed.get("/api/logs", params={"limit": 10, "before_ts": r["items"][-1]["ts"],
+                                                 "before_id": r["items"][-1]["id"]})
+    assert more.json()["items"] == [] and "last_id" not in more.json()
+    # Los van de filter: wat die niet toont, toont live meekijken ook niet.
+    assert (await authed.get("/api/logs", params={"host": "ander"})).json()["last_id"] > held.id
+    # Niets in het laatste uur: 0, en live meekijken toont alles wat er daarna binnenkomt.
+    await db.execute(delete(LogEntry).where(LogEntry.ts > now - timedelta(hours=2)))
+    await db.commit()
+    assert (await authed.get("/api/logs")).json()["last_id"] == 0
 
 
 async def test_rules_crud(authed):

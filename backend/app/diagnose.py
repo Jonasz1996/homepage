@@ -38,6 +38,7 @@ from .models import (ApiConnection, AppState, AuditLog, CronJob, Event, HealRule
 from .monitoring import restoretest, upgrade, watchdog
 from .routers import attention as attention_router, integrations as integ, versie
 from .security import decrypt
+from .syslog import server as rxs
 
 log = logging.getLogger("homepage.api")
 
@@ -58,14 +59,14 @@ PACKAGES = ("fastapi", "starlette", "uvicorn", "pydantic", "sqlalchemy", "alembi
 # megabytes aan hosts of pakketten.
 BACKGROUND = ("containerlogs", "zabbix", "npm_routes", "cluster", "coverage", "config_last", "devices", "health",
               "snapshots", "domains", "selfcheck", "diskguard", "updates", "cron", "restoretest", "massastoring",
-              "update_auto_last")
+              "update_auto_last", "check_hourly")
 BACKGROUND_PREFIX = ("net_gw:", "net_tunnel:", "pbs_problems:")
 # Nooit mee, ook niet verkort: daar staan geheimen in (of wie wanneer van waar keek).
 DENY = ("offsite_key", "webpush", "oidc", "ssh_defaults", "ssh_snippets", "ssh_pin", "attention_ack", "outside_seen")
 
 # Wat van een AppState-waarde overblijft.
 SCALARS = {"at", "checked_at", "scanned_at", "last_at", "since", "date", "started", "count", "items", "lines", "seen",
-           "new", "changed", "failing", "total", "pct", "stale", "ok", "enabled", "down", "step"}
+           "new", "changed", "failing", "total", "pct", "stale", "ok", "enabled", "down", "step", "until"}
 ERRORS = {"error", "errors", "cleanup_error"}
 NAMES = ("key", "name", "service", "service_id", "vmid", "node")
 
@@ -239,8 +240,10 @@ async def _processen(db: AsyncSession, now: datetime) -> dict:
     syslog = await _value(db, logring.state_key("syslog"))
     return {"api": {"pid": os.getpid(), "started": logring.started()},
             "worker": {**sc.worker_status(hb, now), "pid": hb.get("pid")},
-            # De syslog-ontvanger meldt zich alleen via zijn logregels.
-            "syslog": {k: syslog.get(k) for k in ("at", "pid", "started")},
+            # De syslog-ontvanger: zijn teken van leven en tellers (ontvangen, bewaard, verloren, de laatste
+            # databasefout), en wanneer hij zijn logregels bewaarde.
+            "syslog": {**{k: syslog.get(k) for k in ("at", "pid", "started")},
+                       "ontvanger": await _value(db, rxs.STATE_KEY)},
             "worker_alert": await _value(db, "worker_alert"), "api_alert": await _value(db, watchdog.API_KEY),
             "healthz_seen": await _value(db, watchdog.SEEN_KEY)}
 
@@ -311,11 +314,18 @@ def brief(value: dict, depth: int = 0) -> dict:
 
 
 def _selfcheck(v: dict) -> dict:
-    off, size = v.get("offsite") or {}, v.get("db") or {}
+    off, size, r = v.get("offsite") or {}, v.get("db") or {}, v.get("restore") or {}
+    restore = {k: r.get(k) for k in ("status", "at", "dump", "seconds", "alembic", "timescaledb", "postgresql",
+                                     "last_ok", "missing_since")}
+    if isinstance(r.get("why"), str):
+        restore["why"] = logring.cut(r["why"], 200, _KNOWN.get())
+    restore["tabellen"] = len(r.get("tables") or {})
     return {"checked_at": v.get("checked_at"), "stale": v.get("stale"), "backup_dir": v.get("backup_dir"),
-            "backups": (v.get("backups") or [])[:3], "verified": v.get("verified"), "disks": v.get("disks"),
-            "db": {"total": size.get("total"), "tables": (size.get("tables") or [])[:5]},
-            "offsite": {k: off.get(k) for k in ("enabled", "dir", "at", "count", "error")}, "alerts": v.get("alerts")}
+            "backups": (v.get("backups") or [])[:3], "verified": v.get("verified"), "restore": restore,
+            "disks": v.get("disks"), "db": {"total": size.get("total"), "tables": (size.get("tables") or [])[:5]},
+            "offsite": {k: off.get(k) for k in ("enabled", "dir", "at", "count", "error", "key_stale")},
+            "rollup": v.get("rollup"),
+            "alerts": v.get("alerts")}
 
 
 def _restoretest(v: dict) -> dict:

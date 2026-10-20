@@ -131,10 +131,15 @@ async def delete_before(db: AsyncSession, column, cutoff: datetime, step: timede
     return n
 
 
+def sqlstate(e: BaseException) -> str | None:
+    """De SQLSTATE van een databasefout (van asyncpg, ook als SQLAlchemy ze inpakt), anders None."""
+    orig = getattr(e, "orig", None) if isinstance(e, DBAPIError) else None
+    return next((x.sqlstate for x in (orig, getattr(orig, "__cause__", None)) if getattr(x, "sqlstate", None)), None)
+
+
 def timed_out(e: BaseException) -> bool:
     """Brak PostgreSQL de query af (statement_timeout, SQLSTATE 57014)?"""
-    orig = getattr(e, "orig", None) if isinstance(e, DBAPIError) else None
-    return any(getattr(x, "sqlstate", None) == "57014" for x in (orig, getattr(orig, "__cause__", None)) if x)
+    return sqlstate(e) == "57014"
 
 
 async def ensure_state(db: AsyncSession, key: str, value: dict | None = None):

@@ -62,14 +62,19 @@ class OPNsense(Integration):
         return await self.text("GET", "/api/core/backup/download/this", auth=self.auth())
 
     async def neighbours(self) -> list[dict]:
-        """ARP-tabel plus DHCP-leases (ISC of Kea): mac, ip, fabrikant, hostnaam, interface."""
+        """ARP-tabel plus DHCP-leases (ISC of Kea): mac, ip, fabrikant, hostnaam, interface, en arp: staat het in de
+        ARP-tabel (dan was het net nog online; een lease alleen loopt nog een tijd na). Een verlopen ARP-rij
+        ("expired", nog niet opgeruimd) telt daar niet bij: van dat toestel kwam al een tijd (standaard 20 minuten)
+        geen antwoord meer. Voor IP-adres en hostnaam dient ze nog wel."""
         out: dict[str, dict] = {}
         arp = await self.get("/diagnostics/interface/getArp") or []
         for a in arp if isinstance(arp, list) else arp.get("rows", []):
             mac = str(a.get("mac") or "").lower()
             if mac and mac != "(incomplete)":
+                expired = a.get("expired")
                 out[mac] = {"mac": mac, "ip": a.get("ip"), "vendor": a.get("manufacturer") or None,
-                            "hostname": a.get("hostname") or None, "intf": a.get("intf_description") or a.get("intf")}
+                            "hostname": a.get("hostname") or None, "intf": a.get("intf_description") or a.get("intf"),
+                            "arp": not (expired is True or str(expired).lower() in ("1", "true", "yes"))}
         for path, mac_key in (("/dhcpv4/leases/searchLease", "mac"), ("/kea/leases4/search", "hwaddr")):
             try:
                 data = await self.get(path) or {}

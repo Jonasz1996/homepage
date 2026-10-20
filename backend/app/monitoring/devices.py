@@ -1,5 +1,18 @@
 """Apparaten op het netwerk: ARP- en DHCP-tabel van OPNsense, een melding bij een onbekend apparaat, en een optionele
 poortscan per apparaat die meldt wanneer er een nieuwe poort openstaat.
+
+Privé-adressen: een gsm of laptop gebruikt vaak een willekeurig MAC-adres (iOS "wisselend", Android, Windows) en neemt
+af en toe een nieuw. Duikt zo'n adres op met dezelfde hostnaam op dezelfde interface als een gekend toestel met een
+privé-adres en een naam, en staat dat oude adres niet meer in de ARP-tabel, dan is het dat toestel: het nieuwe adres
+krijgt stil zijn naam (een melding in 🔔, niet op de gsm). Staat het oude adres er nog, dan wacht het nieuwe een halfuur
+(al in de lijst, als onbekend, maar nog zonder melding): OPNsense (FreeBSD) houdt een adres tot 20 minuten na het
+laatste antwoord in de ARP-tabel, ook als de gsm al met een nieuw adres terug is (een rij die er als verlopen staat,
+telt niet). Verdwijnt het oude adres in die tijd, dan krijgt het nieuwe de naam alsnog. Staat het er na dat halfuur
+nog, dan zijn ze allebei online en is dit een ander toestel met dezelfde hostnaam (twee keer "iPhone"): een gewone
+melding, met de naam erbij als hint. Geef je het nieuwe adres intussen zelf een naam (of vergeet je het), dan blijft
+het daarbij.
+Opruimen: wat 30 dagen niet gezien is, verdwijnt als het onbekend is, of als het het oude adres is van zo'n toestel.
+Wat een naam, een notitie of "volgen" heeft, en elk ander gekend apparaat, blijft staan tot je het zelf vergeet.
 """
 
 import asyncio
@@ -35,54 +48,213 @@ PORTS = {
 }
 SCAN_TIMEOUT = 1.0
 SCAN_PARALLEL = 64
+# Zo lang niet gezien: onbekende apparaten en de oude adressen van een toestel met een privé-adres verdwijnen uit de
+# lijst (niet als ze een naam, een notitie of "volgen" hebben).
+PRUNE_AFTER = timedelta(days=30)
+# Zoveel nieuwe apparaten bij naam in één melding; de rest staat onder net → apparaten.
+LIST_MAX = 20
+# Zo lang wacht een nieuw privé-adres op het oude adres van het toestel waarvan het de naam zou krijgen: OPNsense
+# (FreeBSD) houdt een adres tot net.link.ether.inet.max_age (1200 s) na het laatste antwoord in de ARP-tabel, en een
+# ronde is er om de 5 minuten. Staat het oude adres er dan nog, dan zijn het twee toestellen.
+WAIT = timedelta(minutes=30)
 
 
 def _aware(dt: datetime | None) -> datetime | None:
     return dt.replace(tzinfo=dt.tzinfo or timezone.utc) if dt else None
 
 
+def private_mac(mac: str) -> bool:
+    """Een lokaal beheerd MAC-adres (bit 0x02 van de eerste byte): het privé- of willekeurige adres van een gsm of
+    laptop, of een VM/container. Er hoort geen fabrikant bij."""
+    try:
+        return bool(int(mac[:2], 16) & 0x02)
+    except ValueError:
+        return False
+
+
 def device_out(d: Device, now: datetime) -> dict:
     return {"mac": d.mac, "name": d.name, "vendor": d.vendor, "hostname": d.hostname, "ip": d.ip, "intf": d.intf,
             "note": d.note, "known": d.known, "scan": d.scan, "ports": d.ports, "ports_at": d.ports_at,
             "first_seen": d.first_seen, "last_seen": d.last_seen, "online": now - _aware(d.last_seen) < ONLINE,
-            "port_names": {str(p): PORTS.get(p, "") for p in (d.ports or [])}}
+            "port_names": {str(p): PORTS.get(p, "") for p in (d.ports or [])}, "private": private_mac(d.mac)}
+
+
+def _label(n: dict) -> str:
+    return n.get("hostname") or n.get("vendor") or (
+        "onbekend toestel met privé-adres" if private_mac(n["mac"]) else "onbekend apparaat")
+
+
+def _line(n: dict, label: str | None = None) -> str:
+    """IP, MAC, fabrikant en interface. label: staat er al voor (de fabrikant dan niet nog eens)."""
+    vendor = n.get("vendor") if n.get("vendor") != label else None
+    return f"{n.get('ip') or '?'} · {n['mac']}" + (f" · {vendor}" if vendor else "") + (
+        f" · {n['intf']}" if n.get("intf") else "")
+
+
+def _row(d: Device) -> dict:
+    """Een apparaat uit de lijst, in de vorm van neighbours()."""
+    return {"mac": d.mac, "ip": d.ip, "vendor": d.vendor, "hostname": d.hostname, "intf": d.intf}
+
+
+def _same_host(hostname: str | None, intf: str | None, n: dict) -> bool:
+    """Zelfde hostnaam (hoofdletters tellen niet) en, als beide er een hebben, dezelfde interface."""
+    return bool(hostname) and hostname.lower() == n["hostname"].lower() and not (
+        intf and n.get("intf") and intf != n["intf"])
+
+
+def _owner(rows: dict[str, Device], n: dict, fresh: list[dict], taken: set[str]) -> Device | None:
+    """Is dit nieuwe privé-adres misschien een gekend toestel dat een ander adres nam? Dan de rij met de naam van dat
+    toestel, anders None (en een gewone melding). Of het de naam echt overneemt, zegt _moved().
+
+    Alleen als alle rijen met dezelfde hostnaam op dezelfde interface gekende privé-adressen zijn, en er precies één
+    een naam heeft (die gaf jij): de andere zijn de oude adressen van hetzelfde toestel (hun naam verhuisde al eerder
+    mee). Een gekend toestel zonder naam (zoals alles uit de eerste ronde) staat niet in voor zijn hostnaam. Een
+    onbekende rij of een vast adres met die hostnaam, twee namen, of een ander nieuw adres met die hostnaam in deze
+    ronde: niet te zeggen welk toestel het is, dus melden. n zelf telt niet mee als het al in de lijst staat (een
+    nieuw adres dat nog wacht, zie WAIT)."""
+    if not n.get("hostname") or not private_mac(n["mac"]):
+        return None
+    if any(o is not n and o.get("hostname") and _same_host(o["hostname"], o.get("intf"), n) for o in fresh):
+        return None
+    match = [d for d in rows.values() if d.mac != n["mac"] and _same_host(d.hostname, d.intf, n)]
+    if not match or any(d.mac in taken or not d.known or not private_mac(d.mac) for d in match):
+        return None
+    named = [d for d in match if d.name]
+    return named[0] if len(named) == 1 else None
+
+
+def _moved(old: Device, n: dict, arp: set[str] | None) -> bool | None:
+    """Neemt n de naam van old over? Alleen op dezelfde interface: zonder interface aan een van beide kanten is dat niet
+    te zeggen (False). Ja als het oude adres niet in de ARP-tabel van deze ronde staat (een lease alleen zegt niets, die
+    loopt na een nieuw adres nog een tijd door). Staat het er wel in, of is de tabel deze ronde niet volledig (arp
+    None), dan nog niet te zeggen (None): dat toestel is online en n is een ander, of het nam net een nieuw adres en
+    het oude staat er nog tot 20 minuten in. Dan wacht n (zie WAIT)."""
+    if not (old.intf and old.intf == n.get("intf")):
+        return False
+    return None if arp is None or old.mac in arp else True
+
+
+def _adopt(db: AsyncSession, old: Device, d: Device, n: dict) -> None:
+    """Hetzelfde toestel met een nieuw adres: de naam, de notitie en de poortscan verhuizen mee (de eerste scan van het
+    nieuwe adres is weer een nulmeting). Het oude adres blijft gekend, zonder naam, en verdwijnt na 30 dagen niet
+    gezien."""
+    d.known = True
+    d.name, d.note, d.scan = old.name, old.note, old.scan
+    old.name, old.note, old.scan = None, None, False
+    notify(db, f"{d.name}: nieuw privé-adres",
+           f"{_line(n)} (was {old.mac})\nZelfde hostnaam op dezelfde interface, en het oude adres staat niet meer in "
+           "de ARP-tabel: het toestel houdt zijn naam. Was het een ander toestel? Geef het onder net → apparaten een "
+           "eigen naam.", level="info", source="apparaat", push=False)
 
 
 async def refresh(db: AsyncSession, http: HttpClients, now: datetime | None = None) -> dict:
     now = now or datetime.now(timezone.utc).replace(microsecond=0)
     seen: dict[str, dict] = {}
+    # Wat in de ARP-tabel staat (online), niet alleen in een lease.
+    arp: set[str] = set()
     errors = []
-    for svc in (await db.execute(select(Service).where(Service.type == "opnsense"))).scalars():
+    svcs = list((await db.execute(select(Service).where(Service.type == "opnsense"))).scalars())
+    # Geen transactie open tijdens de calls naar OPNsense: de verbinding gaat terug naar de pool, de tegels blijven
+    # bruikbaar (expire_on_commit=False; build() doet zelf geen query).
+    await db.commit()
+    for svc in svcs:
         try:
             for n in await build(svc, http).neighbours():
                 if MAC_RE.match(n["mac"]):
                     seen.setdefault(n["mac"], n)
+                    if n.get("arp"):
+                        arp.add(n["mac"])
         except IntegrationError as e:
             errors.append({"source": svc.name, "error": str(e)})
     # Alle bekende apparaten in één query, niet één per gezien MAC-adres.
-    known = {d.mac: d for d in (await db.execute(select(Device))).scalars()}
-    first_run = not known
-    new = []
-    for mac, n in seen.items():
-        d = known.get(mac)
-        if d is None:
-            d = Device(mac=mac, first_seen=now, last_seen=now, known=first_run, scan=False)
-            db.add(d)
-            if not first_run:
-                new.append(n)
-        d.last_seen = now
-        d.ip = n.get("ip") or d.ip
-        d.vendor = n.get("vendor") or d.vendor
-        d.hostname = n.get("hostname") or d.hostname
-        d.intf = n.get("intf") or d.intf
-    for n in new:
-        label = n.get("hostname") or n.get("vendor") or "onbekend apparaat"
-        notify(db, f"Nieuw apparaat op je netwerk: {label}",
-               f"{n.get('ip') or '?'} · {n['mac']}" + (f" · {n['vendor']}" if n.get("vendor") else "")
-               + (f" · {n['intf']}" if n.get("intf") else "") + "\nGeef het een naam onder net → apparaten.",
-               level="warn", source="apparaat")
-    value = {"at": now.isoformat(), "seen": len(seen), "new": len(new), "errors": errors}
+    rows = {d.mac: d for d in (await db.execute(select(Device))).scalars()}
     st = await db.get(AppState, STATE_KEY)
+    prev = dict(st.value or {}) if st else {}
+    # De eerste ronde: wat er al is, is gekend. Met een vlag, en niet "de tabel is leeg": wie de tabel leegmaakt,
+    # krijgt bij de volgende ronde een melding over alles, niet stilletjes alles (ook wat er niet hoort) als gekend.
+    first_run = not prev.get("baseline") and not rows
+    # Een volledige ronde: elke OPNsense-tegel gaf zijn ARP-tabel. Alleen dan zegt "staat niet in de ARP-tabel" iets,
+    # en "niet gezien" (opruimen).
+    complete = bool(seen) and not errors
+    # De oude adressen van toestellen die een nieuw privé-adres namen: van wat gekend is, mogen alleen die weg. Staat
+    # zo'n adres weer in de ARP-tabel, dan is het niet meer verlaten.
+    vacated = {m for m in prev.get("vacated") or [] if m in rows} - arp
+    for mac, n in seen.items():
+        if (d := rows.get(mac)) is not None:
+            d.last_seen = now
+            d.ip = n.get("ip") or d.ip
+            d.vendor = n.get("vendor") or d.vendor
+            d.hostname = n.get("hostname") or d.hostname
+            d.intf = n.get("intf") or d.intf
+    fresh = [n for mac, n in seen.items() if mac not in rows]
+    new, taken, like, pending = [], set(), {}, {}
+
+    def judge(n: dict, d: Device, since: datetime) -> None:
+        """Een nieuw adres zonder naam (d, nog onbekend): krijgt het de naam van een gekend toestel, wacht het nog tot
+        het oude adres van dat toestel uit de ARP-tabel is (sinds since, zie WAIT), of komt het in de melding van deze
+        ronde?"""
+        old = None if first_run else _owner(rows, n, fresh, taken)
+        moved = False if old is None else _moved(old, n, arp if complete else None)
+        if moved:
+            taken.add(old.mac)
+            vacated.add(old.mac)
+            _adopt(db, old, d, n)
+        elif moved is None and now - since < WAIT:
+            pending[d.mac] = {"old": old.mac, "since": since.isoformat()}
+        elif not first_run:
+            if old is not None:
+                # Toch een nieuw apparaat; de naam van het toestel met dezelfde hostnaam staat er als hint bij.
+                like[d.mac] = f" (zelfde hostnaam als {old.name}" + (
+                    ", maar dat toestel is nog online)" if old.mac in arp else ")")
+            new.append(n)
+
+    # Eerst de nieuwe adressen uit vorige rondes die nog wachten. Gaf je er intussen zelf een naam aan, markeerde je
+    # het als gekend of vergat je het, dan blijft het daarbij: geen naam van een ander, en geen melding meer.
+    for mac, p in (prev.get("pending") or {}).items():
+        d = rows.get(mac)
+        if d is not None and not (d.known or d.name or d.note or d.scan):
+            judge(_row(d), d, _aware(datetime.fromisoformat(p["since"])))
+    for n in fresh:
+        d = Device(mac=n["mac"], first_seen=now, last_seen=now, known=first_run, scan=False, ip=n.get("ip"),
+                   vendor=n.get("vendor"), hostname=n.get("hostname"), intf=n.get("intf"))
+        db.add(d)
+        judge(n, d, now)
+    # Een melding voor alle nieuwe samen: een gsm die een paar keer van adres wisselt, een hele reeks na een nieuwe
+    # OPNsense-tegel, of een adres dat lang genoeg wachtte, zijn zo één bericht. Zonder sleutel: een indringer vervangt
+    # de vorige melding niet.
+    if len(new) == 1:
+        notify(db, f"Nieuw apparaat op je netwerk: {_label(new[0])}",
+               _line(new[0]) + like.get(new[0]["mac"], "") + "\nGeef het een naam onder net → apparaten.",
+               level="warn", source="apparaat")
+    elif new:
+        lines = [f"{_label(n)}: {_line(n, _label(n))}{like.get(n['mac'], '')}" for n in new[:LIST_MAX]]
+        if len(new) > LIST_MAX:
+            lines.append(f"… en nog {len(new) - LIST_MAX}")
+        notify(db, f"{len(new)} nieuwe apparaten op je netwerk", "\n".join(lines)
+               + "\nGeef ze een naam onder net → apparaten.", level="warn", source="apparaat")
+    pruned = 0
+    # Opruimen alleen na een volledige ronde: ligt een OPNsense-tegel plat, dan is "niet gezien" niets waard. Wat een
+    # naam, een notitie of "volgen" heeft, blijft; van wat gekend is, gaat alleen een verlaten oud adres weg.
+    if complete:
+        for d in rows.values():
+            if (_aware(d.last_seen) < now - PRUNE_AFTER and not (d.name or d.note or d.scan)
+                    and (not d.known or d.mac in vacated)):
+                await db.delete(d)
+                vacated.discard(d.mac)
+                pending.pop(d.mac, None)
+                pruned += 1
+    value = {"at": now.isoformat(), "seen": len(seen), "new": len(new), "moved": len(taken), "pruned": pruned,
+             "errors": errors,
+             # Sinds wanneer de lijst bijgehouden wordt (zie first_run).
+             "baseline": prev.get("baseline") or (now.isoformat() if seen or rows else None),
+             # Wanneer er voor het laatst een echt nieuw, onbekend apparaat bijkwam: een genegeerd aandachtspunt
+             # komt alleen dan terug (niet als je er een als gekend markeert of er een opgeruimd wordt).
+             "last_new": now.isoformat() if new else prev.get("last_new"),
+             # Zie vacated hierboven.
+             "vacated": sorted(vacated),
+             # Nieuwe privé-adressen die nog wachten tot het oude adres van een toestel met een naam uit de ARP-tabel
+             # is: nieuw adres → {old: dat oude adres, since: sinds wanneer} (zie judge en WAIT).
+             "pending": pending}
     if st:
         st.value = value
     else:
@@ -112,9 +284,12 @@ async def scan_ports(ip: str, ports: list[int] | None = None) -> list[int]:
 
 
 async def scan_device(db: AsyncSession, d: Device, now: datetime | None = None, ports: list[int] | None = None) -> list[int]:
+    """Scant de poorten van één apparaat. Commit eerst wat er al was: geen transactie open tijdens de scan (tot een
+    paar seconden per apparaat). Het resultaat bewaart de oproeper."""
     now = now or datetime.now(timezone.utc).replace(microsecond=0)
     if not d.ip:
         return d.ports or []
+    await db.commit()
     found = await scan_ports(d.ip, ports)
     before = set(d.ports or [])
     added = [p for p in found if p not in before]

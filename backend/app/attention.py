@@ -10,12 +10,14 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .config import get_settings
 from .health import domains as dom, scan as hw, security, selfcheck as sc, snapshots as snap
 from .integrations import REGISTRY
 from .integrations.zabbix import RED_FROM
 from .models import AppState, CronJob, Device, MaintenanceWindow, Service, ServiceState, UpdateRun
-from .monitoring import cluster, coverage, planned, restoretest, updates as upd, zabbix as zbx
-from .monitoring.engine import MASS_KEY, active
+from .monitoring import cluster, coverage, devices, planned, restoretest, rollup, updates as upd, zabbix as zbx
+from .monitoring.engine import KEEP_CHECKS_DAYS, MASS_KEY, active
+from .syslog import server as rxs
 
 ACK_KEY = "attention_ack"
 RANK = {"err": 0, "warn": 1, "info": 2}
@@ -302,6 +304,44 @@ async def hardware(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
     return _cap(out, "hardware", "Nog {n} hardwarepunten", fix)
 
 
+def _n(n: int) -> str:
+    """1234 → 1.234"""
+    return f"{n:,}".replace(",", ".")
+
+
+LOSS_WHY = {
+    rxs.FULL: f"De database was onbereikbaar en de wachtrij van de syslog-ontvanger ({_n(rxs.QUEUE_MAX)} regels) zat "
+              "vol: nieuwe regels van apparaten die via UDP sturen (router, switch, NAS) vielen weg. Machines die via "
+              "TCP sturen (rsyslog uitgerold vanuit het dashboard) houden hun regels dan zelf vast.",
+    rxs.REJECTED: "De database weigerde ze (of ze waren onleesbaar); waarom staat in de logregels van de "
+                  "syslog-ontvanger (diagnose).",
+    rxs.STOPPED: "Bij het stoppen van de syslog-ontvanger (herstart of update) raakte de wachtrij niet op tijd leeg: "
+                 "de database was onbereikbaar of traag.",
+}
+
+
+def syslog_items(rx: dict | None, fix: dict) -> list[dict]:
+    """De syslog-ontvanger: draait hij, en raakten er logregels niet in de database? Oranje en zonder push: de
+    logregels zelf zijn geen storing, en een herstart van PostgreSQL 's nachts is geen reden om iemand te wekken."""
+    if rx is None:
+        return []
+    out = []
+    if not rx["ok"]:
+        out.append(item("syslog", "warn", "homepage", "De syslog-ontvanger draait niet",
+                        f"{rx['why'][:1].upper()}{rx['why'][1:]}. Zonder ontvanger komen er geen logregels binnen en "
+                        "werken de meldingsregels niet. Draait hij wel, dan kan hij misschien niet in de database "
+                        "schrijven (schijf vol?). In de container: systemctl status homepage-syslog.", fix))
+    loss = rx.get("loss")
+    if loss:
+        n = loss["n"]
+        # Bij een volle wachtrij of een te trage stop was de database de oorzaak.
+        err = (rx.get("last_error") or {}).get("error") if loss.get("why") in (rxs.FULL, rxs.STOPPED) else None
+        out.append(item("syslog:verlies", "warn", "homepage", f"{_n(n)} logregel{'s' if n != 1 else ''} niet bewaard",
+                        LOSS_WHY.get(loss.get("why"), "") + (f" Laatste fout van de database: {err}" if err else ""),
+                        fix, sig=loss["since"], since=loss["since"]))
+    return out
+
+
 async def homepage(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
     fix = {"window": "health", "tab": "homepage"}
     out = []
@@ -310,6 +350,24 @@ async def homepage(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
         out.append(item("worker", "err", "homepage", "De worker van het dashboard draait niet",
                         f"Zonder worker geen checks, meldingen of back-ups: {worker['why']}. "
                         "In de container: systemctl status homepage-worker.", fix))
+    hourly = await rollup.lag(db, now)
+    # Draait de worker niet, dan zegt het punt hierboven al genoeg.
+    if hourly["late"] and worker["ok"]:
+        behind = timedelta(hours=hourly["behind_h"])
+        left = KEEP_CHECKS_DAYS - behind.days
+        loss = (f"Blijft dit zo, dan verdwijnen over {_days(left)} de eerste checks voor goed en krijgt de "
+                "jaargrafiek een gat." if left > 0 else "Er verdwijnen nu al checks voor goed: de jaargrafiek krijgt "
+                "een gat.")
+        out.append(item("uurtotalen", "warn", "homepage",
+                        f"De worker telt de checks al {ago(behind)} niet meer per uur op" if hourly["until"]
+                        else "De worker telt de checks niet per uur op",
+                        "De grafiek en de uptime over 7 dagen tot een jaar en het weekrapport halen die uren nu uit "
+                        f"de losse checks. Met TimescaleDB worden losse checks na {KEEP_CHECKS_DAYS} dagen gewist, ook "
+                        f"als ze nog niet opgeteld zijn. {loss} Zonder TimescaleDB wacht het opruimen, maar groeit de "
+                        "database. In de container: journalctl -u homepage-worker | grep uurtotalen.", fix,
+                        # Negeren geldt een week; daarna (of als het weer even lukte) komt het terug.
+                        sig=f"{hourly['until']}|{behind.days // 7}"))
+    out.extend(syslog_items(sc.syslog_status(await _state(db, rxs.STATE_KEY), now), fix))
     mass = await _state(db, MASS_KEY)
     if mass.get("since"):
         since = _aware(datetime.fromisoformat(mass["since"]))
@@ -324,11 +382,27 @@ async def homepage(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
                         "De nachtelijke kopie van de database ontbreekt.", fix))
     if (s.get("verified") or {}).get("ok") is False:
         out.append(item("selfverify", "err", "homepage", "De laatste back-up van het dashboard is onleesbaar",
-                        str((s.get("verified") or {}).get("error") or ""), fix))
+                        str((s.get("verified") or {}).get("why") or ""), fix))
+    out += _restore(s.get("restore") or {}, now, fix)
     off = s.get("offsite") or {}
     if off.get("enabled") and off.get("error"):
         out.append(item("offsite", "err", "homepage", "Kopie buiten de container mislukt", str(off["error"]), fix,
                         sig=off["error"]))
+    if off.get("enabled") and off.get("key_stale"):
+        out.append(item("offsite-sleutel", "err", "homepage", "De sleutel in de kopie buiten de container is verouderd",
+                        sc.KEY_STALE, fix))
+    if not (await hw.settings(db)).get("offsite"):
+        # Geen kopie buiten de container: een voorstel. Oranje als er ook nergens een kopie van secret.key is (dan zijn
+        # de geheimen in elke back-up onleesbaar als de container wegvalt), anders ter info.
+        level = "info" if (await security.check_secret_key(db))["level"] == "ok" else "warn"
+        out.append(item("offsite-voorstel", level, "homepage", "Back-up van het dashboard staat alleen in de container",
+                        "Valt de container of zijn node weg, dan zijn de back-ups en secret.key mee weg"
+                        + (", en zonder secret.key zijn de opgeslagen wachtwoorden en API-sleutels onleesbaar"
+                           if level == "warn" else "")
+                        + f". Koppel een NAS-share, PBS-opslag of USB-schijf op {get_settings().offsite_dir} en zet "
+                        "de kopie buiten de container aan, met een wachtzin voor de sleutel. Zit deze CT al in een "
+                        "back-up van PBS, dan staan de dumps en secret.key daar ook in en mag je dit negeren.", fix,
+                        sig=level))
     disk = sc.disk_alert(s)
     if disk:
         pct = max((d.get("pct") or 0 for d in s.get("disks") or []), default=0)
@@ -337,6 +411,29 @@ async def homepage(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
                         f"Boven {sc.DISK_WARN}% ruimt het dashboard zelf de oudste logregels op (de laatste 3 dagen "
                         "blijven). Helpt dat niet, ruim dan op of maak de schijf van de CT groter.", fix, sig=disk))
     return out
+
+
+def _restore(r: dict, now: datetime, fix: dict) -> list[dict]:
+    """De maandelijkse test van de back-up (terugzetten in een testdatabase): mislukt, overgeslagen, of al te lang
+    niet gelukt (de timer loopt niet, of de test was er nog nooit)."""
+    if r.get("status") == "fout":
+        return [item("selfrestore", "err", "homepage", "De back-up van het dashboard lukt niet terug te zetten",
+                     f"{r.get('dump') or 'De nieuwste dump'}: {r.get('why') or 'onbekende fout'}. " +
+                     (f"Wat pg_restore schreef, staat in {sc.RESTORE_LOG} bij de back-ups. " if r.get("log") else "") +
+                     f"Opnieuw proberen: {sc.RESTORE_RUN}.", fix,
+                     sig=r.get("at"), since=r.get("at"))]
+    since = r.get("last_ok") or r.get("missing_since")
+    days = (now - _aware(datetime.fromisoformat(since))).days if since else 0
+    if days > sc.RESTORE_STALE.days:
+        skipped = f"De laatste keer overgeslagen: {r.get('why')}. " if r.get("status") == "overgeslagen" else ""
+        return [item("selfrestore", "warn", "homepage",
+                     f"De back-up van het dashboard is al {_days(days)} niet op een testdatabase teruggezet",
+                     f"{skipped}Dat gebeurt elke 1e van de maand om 04:15 (homepage-backuptest.timer). Op de "
+                     f"container: {sc.RESTORE_RUN}", fix, sig=since)]
+    if r.get("status") == "overgeslagen":
+        return [item("selfrestore", "warn", "homepage", "Test van de back-up van het dashboard overgeslagen",
+                     str(r.get("why") or ""), fix, sig=r.get("at"))]
+    return []
 
 
 async def clusters(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
@@ -387,10 +484,13 @@ async def network(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
     new = list((await db.execute(select(Device).where(Device.known.is_(False)).order_by(Device.first_seen))).scalars())
     if new:
         names = ", ".join(d.name or d.hostname or d.vendor or d.ip or d.mac for d in new[:5])
+        # Genegeerd komt het alleen terug als er een echt nieuw onbekend apparaat bijkomt, niet als je er een als
+        # gekend markeert of er een opgeruimd wordt (refresh houdt bij wanneer het laatste bijkwam).
+        last_new = (await _state(db, devices.STATE_KEY)).get("last_new")
         out.append(item("devices", "warn", "apparaten", f"{len(new)} nieuw{'e' if len(new) != 1 else ''} "
                         f"{'apparaten' if len(new) != 1 else 'apparaat'} op je netwerk", names + (" …" if len(new) > 5 else "")
                         + ". Ken je ze? Geef ze een naam of markeer ze als gekend.",
-                        {"window": "net", "tab": "apparaten"}, sig=",".join(sorted(d.mac for d in new))))
+                        {"window": "net", "tab": "apparaten"}, sig=f"nieuw sinds {last_new or '-'}"))
     return out
 
 
