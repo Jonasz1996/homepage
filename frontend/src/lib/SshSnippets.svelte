@@ -1,6 +1,6 @@
 <script>
   import { untrack } from 'svelte'
-  import { api } from './api.js'
+  import { api, withReauth } from './api.js'
   import Modal from './Modal.svelte'
 
   // Opgeslagen commando's (zoals macro's in RDM): één klik stuurt ze naar de terminal.
@@ -14,7 +14,7 @@
     error = ''
     try {
       const body = list.filter((s) => s.name.trim() && s.command.trim())
-      onsaved(await api('/ssh/snippets', { method: 'PUT', body }))
+      onsaved(await withReauth(() => api('/ssh/snippets', { method: 'PUT', body })))
       onclose()
     } catch (e) { error = e.message }
   }

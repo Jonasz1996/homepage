@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlsplit
 
 import asyncssh
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..deps import event, notify
@@ -111,7 +111,7 @@ async def plan_for(db: AsyncSession, key: str, name: str | None = None) -> Plan:
     elif m := re.fullmatch(r"pve:(\d+):(.+)", key):
         node = m[2]
         h = (await db.execute(select(SshHost).where(SshHost.source == f"pve:{m[1]}:node/{node}"))).scalars().first()
-        h = h or (await db.execute(select(SshHost).where(SshHost.name.ilike(node)))).scalars().first()
+        h = h or (await db.execute(select(SshHost).where(func.lower(SshHost.name) == node.lower()))).scalars().first()
         if h is None:
             p.why = f"Node {node} staat nog niet in de terminal: importeer hem met ⟳ pve en open hem één keer"
             return p
@@ -427,8 +427,11 @@ async def cleanup_snapshots(maker: async_sessionmaker, http: HttpClients) -> int
     async with maker() as db:
         keep = (await settings(db))["keep_days"]
         cutoff = datetime.now(timezone.utc) - timedelta(days=keep)
+        # Al opgeruimde snapshots meteen in SQL overslaan (JSON_EXTRACT op SQLite, ->> op PostgreSQL).
         runs = (await db.execute(select(UpdateRun).where(UpdateRun.status.in_(("ok", "teruggedraaid")),
-                                                          UpdateRun.finished_at < cutoff))).scalars().all()
+                                                          UpdateRun.finished_at < cutoff,
+                                                          UpdateRun.snapshot["removed_at"].as_string().is_(None))
+                                 )).scalars().all()
         todo = [(r.id, dict(r.snapshot)) for r in runs
                 if r.snapshot and r.snapshot.get("name", "").startswith(SNAP_PREFIX) and not r.snapshot.get("removed_at")]
     n = 0
@@ -458,6 +461,21 @@ async def cleanup_snapshots(maker: async_sessionmaker, http: HttpClients) -> int
             await db.commit()
         n += 1
     return n
+
+
+async def mark_interrupted(db: AsyncSession, triggers: tuple[str, ...]) -> int:
+    """Bij het opstarten: runs die nog liepen toen het proces stopte, kan niemand meer afmaken. Zonder dit blijft
+    zo'n doel voor altijd "bezig" (create_runs weigert dan). API en worker ruimen elk hun eigen runs op:
+    manuele runs lopen in de API, nachtelijke (auto) in de worker."""
+    now = datetime.now(timezone.utc)
+    runs = (await db.execute(select(UpdateRun).where(UpdateRun.status.not_in(DONE),
+                                                     UpdateRun.trigger.in_(triggers)))).scalars().all()
+    for r in runs:
+        # Halverwege terugdraaien: niet zeker dat de snapshot teruggezet is.
+        r.status = "terugdraaien_mislukt" if r.status == "terugdraaien" else "fout"
+        r.error = "onderbroken door herstart"
+        r.finished_at = now
+    return len(runs)
 
 
 async def create_runs(db: AsyncSession, keys: list[tuple[str, str | None]], security_only: bool, snapshot: bool,

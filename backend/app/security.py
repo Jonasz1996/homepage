@@ -3,7 +3,7 @@ import hmac
 import json
 import secrets
 import time
-from collections import defaultdict, deque
+from collections import deque
 from functools import lru_cache
 
 from argon2 import PasswordHasher
@@ -67,31 +67,41 @@ def check_setup_token(given: str) -> bool:
 
 
 class LoginLimiter:
-    """Telt mislukte logins per IP en per gebruikersnaam in een glijdend venster."""
+    """Telt mislukte pogingen per sleutel (IP, gebruikersnaam, ...) in een glijdend venster."""
 
     def __init__(self) -> None:
-        self._fails: dict[str, deque[float]] = defaultdict(deque)
+        self._fails: dict[str, deque[float]] = {}
 
-    def _prune(self, key: str, now: float) -> deque[float]:
+    def _prune(self, key: str, now: float) -> int:
+        q = self._fails.get(key)
+        if q is None:
+            return 0
         window = get_settings().login_window_minutes * 60
-        q = self._fails[key]
         while q and q[0] < now - window:
             q.popleft()
-        return q
+        if not q:
+            del self._fails[key]
+        return len(q)
 
-    def blocked(self, *keys: str) -> bool:
+    def blocked(self, *keys: str, limit: int | None = None) -> bool:
         now = time.monotonic()
-        limit = get_settings().login_max_failures
-        return any(len(self._prune(k, now)) >= limit for k in keys)
+        limit = limit or get_settings().login_max_failures
+        return any(self._prune(k, now) >= limit for k in keys)
 
     def fail(self, *keys: str) -> None:
         now = time.monotonic()
         for k in keys:
-            self._prune(k, now).append(now)
+            self._prune(k, now)
+            self._fails.setdefault(k, deque()).append(now)
 
     def reset(self, *keys: str) -> None:
         for k in keys:
             self._fails.pop(k, None)
+
+
+# Per gebruikersnaam veel ruimer dan per IP: anders kan iedereen de eigenaar buitensluiten
+# door gewoon foute wachtwoorden te sturen.
+USER_FAILURE_FACTOR = 6
 
 
 limiter = LoginLimiter()

@@ -9,6 +9,7 @@ Acties:
 import logging
 import re
 import shlex
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -64,36 +65,53 @@ async def validate(db: AsyncSession, action: dict) -> dict:
     raise ValueError("Onbekend soort actie")
 
 
-async def perform(db: AsyncSession, action: dict, http: HttpClients) -> str:
-    """Voert de actie uit en geeft een korte beschrijving terug. Gooit IntegrationError of SshFail."""
+async def prepare(db: AsyncSession, action: dict, http: HttpClients) -> Callable[[], Awaitable[str]]:
+    """Leest uit de database wat de actie nodig heeft en geeft een functie terug die ze uitvoert zonder de database,
+    zodat de sessie niet open blijft tijdens een trage herstart. Gooit IntegrationError of SshFail."""
     if action["kind"] == "integration":
         svc = await db.get(Service, action["service_id"])
         if svc is None:
             raise IntegrationError("De tegel van deze actie bestaat niet meer")
         integ = build(svc, http)
-        act, params = action["action"], dict(action.get("params") or {})
-        if svc.type == "proxmox" and act in ("reboot", "shutdown") and params.get("vmid"):
-            # Een herstart van iets dat uit staat lukt niet: dan starten we het.
-            for r in await integ.resources():
-                if r.get("vmid") == int(params["vmid"]) and r.get("status") != "running":
-                    act = "start"
-        return await integ.action(act, params)
+        stype = svc.type
+
+        async def go_integration() -> str:
+            act, params = action["action"], dict(action.get("params") or {})
+            if stype == "proxmox" and act in ("reboot", "shutdown") and params.get("vmid"):
+                # Een herstart van iets dat uit staat lukt niet: dan starten we het.
+                for r in await integ.resources():
+                    if r.get("vmid") == int(params["vmid"]) and r.get("status") != "running":
+                        act = "start"
+            return await integ.action(act, params)
+        return go_integration
     h = await db.get(SshHost, action["host_id"])
     if h is None:
         raise SshFail("De SSH-host van deze actie bestaat niet meer")
     login = await login_for(db, h, await defaults(db))
     cmd = SSH_OPS[action["op"]].format(shlex.quote(action["name"]))
-    async with connect(h, login) as conn:
-        rc, out, err = await run(conn, cmd, login, timeout=180)
-    if rc != 0:
-        raise SshFail((err or out).strip().splitlines()[-1][:200] if (err or out).strip() else f"exitcode {rc}")
-    return f"{cmd} op {h.name}"
+
+    async def go_ssh() -> str:
+        async with connect(h, login) as conn:
+            rc, out, err = await run(conn, cmd, login, timeout=180)
+        if rc != 0:
+            raise SshFail((err or out).strip().splitlines()[-1][:200] if (err or out).strip() else f"exitcode {rc}")
+        return f"{cmd} op {h.name}"
+    return go_ssh
+
+
+async def perform(db: AsyncSession, action: dict, http: HttpClients) -> str:
+    """Voert de actie uit en geeft een korte beschrijving terug. Gooit IntegrationError of SshFail."""
+    return await (await prepare(db, action, http))()
 
 
 async def check(maker: async_sessionmaker, service_id: int, http: HttpClients,
                 now: datetime | None = None) -> str | None:
-    """Na elke check van een service die faalt: moet er een regel afgaan? Geeft het resultaat terug."""
+    """Na elke check van een service die faalt: moet er een regel afgaan? Geeft het resultaat terug.
+
+    In drie stappen, zodat er geen databaseverbinding vastgehouden wordt tijdens de herstart zelf: beslissen en
+    voorbereiden, uitvoeren, resultaat wegschrijven."""
     now = now or datetime.now(timezone.utc)
+    todo: list[tuple[int, dict, Callable[[], Awaitable[str]] | Exception]] = []
     async with maker() as db:
         state = await db.get(ServiceState, service_id)
         if state is None or not state.fail_count or state.quiet:
@@ -102,6 +120,7 @@ async def check(maker: async_sessionmaker, service_id: int, http: HttpClients,
         rules = (await db.execute(select(HealRule).where(HealRule.service_id == service_id,
                                                          HealRule.enabled.is_(True)))).scalars().all()
         svc = await db.get(Service, service_id)
+        name, fails = svc.name, state.fail_count
         result = None
         for rule in rules:
             if state.fail_count < rule.after:
@@ -120,18 +139,38 @@ async def check(maker: async_sessionmaker, service_id: int, http: HttpClients,
             rule.fired = fired + [now.isoformat()]
             rule.last_at = now
             try:
-                msg = await perform(db, rule.action, http)
-                rule.last_result = f"ok: {msg}"
-                notify(db, f"Zelfherstel: {svc.name} was {state.fail_count}× down", f"{describe(rule.action)} — {msg}",
-                       level="warn", source="herstel", service_id=service_id,
-                       data={"rule": rule.id, "action": describe(rule.action)})
-            except (IntegrationError, SshFail, OSError) as e:
-                rule.last_result = f"mislukt: {e}"
-                notify(db, f"Zelfherstel voor {svc.name} mislukt", f"{describe(rule.action)}: {e}", level="err",
-                       source="herstel", service_id=service_id)
-            result = rule.last_result
+                go = await prepare(db, rule.action, http)
+            except (IntegrationError, SshFail, OSError, ValueError) as e:
+                go = e
+            todo.append((rule.id, dict(rule.action), go))
         await db.commit()
+    if not todo:
         return result
+
+    done = []
+    for rule_id, action, go in todo:
+        try:
+            if isinstance(go, Exception):
+                raise go
+            done.append((rule_id, action, f"ok: {await go()}", None))
+        except (IntegrationError, SshFail, OSError, ValueError) as e:
+            done.append((rule_id, action, f"mislukt: {e}", e))
+
+    async with maker() as db:
+        for rule_id, action, res, err in done:
+            rule = await db.get(HealRule, rule_id)
+            if rule is not None:
+                rule.last_result = res
+            if err is None:
+                notify(db, f"Zelfherstel: {name} was {fails}× down", f"{describe(action)} — {res[4:]}",
+                       level="warn", source="herstel", service_id=service_id,
+                       data={"rule": rule_id, "action": describe(action)})
+            else:
+                notify(db, f"Zelfherstel voor {name} mislukt", f"{describe(action)}: {err}", level="err",
+                       source="herstel", service_id=service_id)
+            result = res
+        await db.commit()
+    return result
 
 
 async def test_rule(db: AsyncSession, rule: HealRule, http: HttpClients) -> str:

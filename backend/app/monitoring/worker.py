@@ -23,7 +23,7 @@ from .capacity import SAMPLE_EVERY, check_forecasts, sample
 from .network import NETWORK_EVERY, PUBLIC_IP_EVERY, sample_power, watch_gateways, watch_public_ip, watch_tunnels
 from .report import weekly_notification
 from .updates import UPDATES_EVERY, run_updates
-from .upgrade import auto_updates, cleanup_snapshots
+from .upgrade import auto_updates, cleanup_snapshots, mark_interrupted
 from . import configs, devices, healing
 from .watchers import watch_npm, watch_pbs
 
@@ -45,8 +45,8 @@ class Worker:
         self.self_cleanup = True
         self.http = HttpClients()
         self.started = datetime.now(timezone.utc).replace(microsecond=0)
-        self.auto_task: asyncio.Task | None = None
-        self.config_busy = False
+        # Periodieke taken per naam: een trage ronde (SSH die hangt) mag niet stapelen met de volgende.
+        self.jobs: dict[str, asyncio.Task] = {}
 
     async def detect_timescale(self) -> None:
         async with self.maker() as db:
@@ -100,33 +100,35 @@ class Worker:
         finally:
             self.running.discard(sid)
 
+    async def step(self, name: str, fn) -> None:
+        """Eén deelstap in een eigen sessie: een fout rolt alleen deze stap terug, de volgende stappen lopen gewoon."""
+        try:
+            async with self.maker() as db:
+                await fn(db)
+                await db.commit()
+        except Exception:
+            log.exception("%s mislukt", name)
+
     async def periodic(self) -> None:
         """Trage taken (externe API's) los van de checks, elk half uur."""
-        async with self.maker() as db:
-            await watch_npm(db, self.http)
-            await db.commit()
-        async with self.maker() as db:
-            await watch_pbs(db, self.http)
-            await db.commit()
-        async with self.maker() as db:
-            await weekly_notification(db)
-            await db.commit()
+        await self.step("NPM bekijken", lambda db: watch_npm(db, self.http))
+        await self.step("PBS bekijken", lambda db: watch_pbs(db, self.http))
+        await self.step("weekoverzicht", weekly_notification)
 
     async def network(self, with_ip: bool) -> None:
         """Elke 2 minuten: WAN-gateways en tunnels; elke 5 minuten ook het publieke IP."""
-        async with self.maker() as db:
-            await watch_gateways(db, self.http)
-            await watch_tunnels(db, self.http)
-            if with_ip:
-                await watch_public_ip(db, self.http)
-            await db.commit()
+        await self.step("WAN-gateways", lambda db: watch_gateways(db, self.http))
+        await self.step("tunnels", lambda db: watch_tunnels(db, self.http))
+        if with_ip:
+            await self.step("publiek IP", lambda db: watch_public_ip(db, self.http))
 
     async def updates(self) -> None:
         """Elke 6 uur: openstaande updates op nodes, containers en Docker-images."""
-        async with self.maker() as db:
-            await run_updates(db, self.http)
-            await db.commit()
-        await cleanup_snapshots(self.maker, self.http)
+        await self.step("updates bekijken", lambda db: run_updates(db, self.http))
+        try:
+            await cleanup_snapshots(self.maker, self.http)
+        except Exception:
+            log.exception("snapshots van updates opruimen mislukt")
 
     async def auto_updates(self) -> None:
         """Elke minuut kijken of het tijd is voor de nachtelijke beveiligingsupdates."""
@@ -142,12 +144,9 @@ class Worker:
 
     async def capacity(self) -> None:
         """Elke 10 minuten: gebruik uit Proxmox bewaren en kijken of er opslag vol dreigt te lopen."""
-        async with self.maker() as db:
-            await sample(db, self.http)
-            await sample_power(db, self.http)
-            await db.commit()
-            await check_forecasts(db)
-            await db.commit()
+        await self.step("capaciteit meten", lambda db: sample(db, self.http))
+        await self.step("verbruik meten", lambda db: sample_power(db, self.http))
+        await self.step("prognoses", check_forecasts)
 
     async def ssh_sync(self) -> None:
         """Elk half uur, als het aan staat: nieuwe machines uit Proxmox in de terminal en IP's bijwerken."""
@@ -180,39 +179,59 @@ class Worker:
 
     async def lan(self) -> None:
         """Elke 5 minuten: apparaten uit OPNsense, en de poortscans die aan de beurt zijn."""
-        async with self.maker() as db:
-            await devices.refresh(db, self.http)
-            await db.commit()
-            await devices.scan_due(db)
-            await db.commit()
+        await self.step("apparaten ophalen", lambda db: devices.refresh(db, self.http))
+        await self.step("poortscans", devices.scan_due)
 
     async def config_copy(self) -> None:
         """Elke nacht op het ingestelde uur: kopie van de configuratie, met een melding als er iets veranderde."""
-        if self.config_busy:
-            return
-        self.config_busy = True
-        try:
-            async with self.maker() as db:
-                if await configs.due(db):
-                    await configs.run_configs(db, self.http)
-                    await db.commit()
-        finally:
-            self.config_busy = False
+        async with self.maker() as db:
+            if await configs.due(db):
+                await configs.run_configs(db, self.http)
+                await db.commit()
 
     async def beat(self) -> None:
         async with self.maker() as db:
             await heartbeat(db, self.started)
             await db.commit()
 
-    def spawn(self, coro) -> None:
+    async def tidy(self) -> None:
+        async with self.maker() as db:
+            if self.self_cleanup:
+                await cleanup(db)
+            await housekeeping(db)
+            await db.commit()
+
+    def spawn(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
         task.add_done_callback(lambda t: t.cancelled() or not t.exception() or
                                log.error("achtergrondtaak mislukt", exc_info=t.exception()))
+        return task
+
+    def job(self, name: str, make) -> bool:
+        """Start make() als taak `name`, tenzij de vorige ronde van die taak nog loopt. Geeft terug of hij startte."""
+        running = self.jobs.get(name)
+        if running and not running.done():
+            log.info("%s loopt nog van de vorige keer, deze ronde overgeslagen", name)
+            return False
+        self.jobs[name] = self.spawn(make())
+        return True
+
+    async def interrupted(self) -> None:
+        """Nachtelijke update-runs die liepen toen de worker stopte, als mislukt markeren."""
+        try:
+            async with self.maker() as db:
+                n = await mark_interrupted(db, ("auto",))
+                await db.commit()
+            if n:
+                log.warning("%s nachtelijke update-run(s) onderbroken door herstart", n)
+        except Exception:
+            log.exception("onderbroken update-runs opruimen mislukt")
 
     async def run(self) -> None:
         await self.detect_timescale()
+        await self.interrupted()
         last_cleanup = 0.0
         # Eerste ronde na een minuut, daarna elk half uur.
         last_periodic = time.monotonic() - PERIODIC + 60
@@ -236,47 +255,40 @@ class Worker:
                     self.spawn(self.run_one(sid, check, url))
                 if time.monotonic() - last_periodic > PERIODIC:
                     last_periodic = time.monotonic()
-                    self.spawn(self.periodic())
+                    self.job("periodic", self.periodic)
                 if time.monotonic() - last_capacity > SAMPLE_EVERY:
                     last_capacity = time.monotonic()
-                    self.spawn(self.capacity())
+                    self.job("capacity", self.capacity)
                 if time.monotonic() - last_network > NETWORK_EVERY:
                     last_network = time.monotonic()
                     with_ip = last_network - last_ip > PUBLIC_IP_EVERY
                     if with_ip:
                         last_ip = last_network
-                    self.spawn(self.network(with_ip))
+                    self.job("network", lambda: self.network(with_ip))
                 if time.monotonic() - last_updates > UPDATES_EVERY:
                     last_updates = time.monotonic()
-                    self.spawn(self.updates())
+                    self.job("updates", self.updates)
                 if time.monotonic() - last_ssh > SYNC_EVERY:
                     last_ssh = time.monotonic()
-                    self.spawn(self.ssh_sync())
+                    self.job("ssh_sync", self.ssh_sync)
                 if time.monotonic() - last_cron > CRON_EVERY:
                     last_cron = time.monotonic()
-                    self.spawn(self.cron())
+                    self.job("cron", self.cron)
                 for what, (every, last) in health.items():
                     if time.monotonic() - last > every:
                         health[what] = (every, time.monotonic())
-                        self.spawn(self.health(what))
+                        self.job(f"health:{what}", lambda what=what: self.health(what))
                 if time.monotonic() - last_lan > devices.DEVICES_EVERY:
                     last_lan = time.monotonic()
-                    self.spawn(self.lan())
+                    self.job("lan", self.lan)
                 if time.monotonic() - last_beat > HEARTBEAT_EVERY:
                     last_beat = time.monotonic()
-                    self.spawn(self.beat())
-                    self.spawn(self.config_copy())
-                    if not (self.auto_task and not self.auto_task.done()):
-                        self.auto_task = asyncio.create_task(self.auto_updates())
-                        self.tasks.add(self.auto_task)
-                        self.auto_task.add_done_callback(self.tasks.discard)
+                    self.job("beat", self.beat)
+                    self.job("config_copy", self.config_copy)
+                    self.job("auto_updates", self.auto_updates)
                 if time.monotonic() - last_cleanup > 3600:
-                    async with self.maker() as db:
-                        if self.self_cleanup:
-                            await cleanup(db)
-                        await housekeeping(db)
-                        await db.commit()
                     last_cleanup = time.monotonic()
+                    self.job("cleanup", self.tidy)
             except Exception:
                 log.exception("fout in de worker-lus")
             await asyncio.sleep(TICK)

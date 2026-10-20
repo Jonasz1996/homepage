@@ -11,8 +11,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..deps import audit, current_user, recent_auth
-from ..models import AppState, ConfigVersion, Device, SshHost, User
+from ..deps import audit, current_session, current_user, recent_auth
+from ..models import AppState, ConfigVersion, Device, Session, SshHost, User
 from ..monitoring import configs, devices
 from ..security import decrypt
 from .integrations import clients
@@ -50,10 +50,13 @@ async def _version(db: AsyncSession, vid: int) -> ConfigVersion:
 
 
 @router.get("/configs/versions/{vid}/diff")
-async def diff(vid: int, against: int | None = None, user: User = Depends(current_user),
-               db: AsyncSession = Depends(get_db)):
+async def diff(vid: int, against: int | None = None, sess: Session = Depends(current_session),
+               user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """Verschil met de vorige versie (of met `against`). Wachtwoorden en sleutels gemaskeerd."""
     v = await _version(db, vid)
+    if v.kind == "file":
+        # Eigen bestanden kunnen van alles bevatten dat het maskeren mist: vraagt een recente 2FA.
+        await recent_auth(sess, user)
     if against:
         old = await _version(db, against)
         if old.item != v.item:

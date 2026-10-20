@@ -34,8 +34,11 @@
   let error = $state('')
 
   async function load() {
+    const r = range
     try {
-      data = await api(`/services/${service.id}/history?range=${range}`)
+      const d = await api(`/services/${service.id}/history?range=${r}`)
+      if (r !== range) return // intussen een andere periode gekozen
+      data = d
       error = ''
     } catch (e) {
       error = e.message

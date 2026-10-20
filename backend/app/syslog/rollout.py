@@ -20,7 +20,8 @@ mkdir -p /etc/rsyslog.d
 cat > /etc/rsyslog.d/90-homepage.conf <<HPCONF
 # Beheerd door homepage: alle logs naar het dashboard, via TCP met een wachtrij als het dashboard even weg is.
 *.* action(type="omfwd" target="$T" port="$P" protocol="tcp" action.resumeRetryCount="-1"
-           queue.type="linkedList" queue.size="20000" queue.filename="homepage_fwd" queue.saveOnShutdown="on")
+           queue.type="linkedList" queue.size="20000" queue.filename="homepage_fwd" queue.saveOnShutdown="on"
+           queue.maxDiskSpace="200m" queue.discardMark="18000" queue.discardSeverity="5")
 HPCONF
 if [ -d /run/systemd/system ]; then
   mkdir -p /etc/systemd/journald.conf.d

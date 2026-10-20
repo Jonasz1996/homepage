@@ -5,6 +5,15 @@ import { startBackground } from './lib/background.js'
 import { startRipples, startTilt } from './lib/fx.js'
 
 startBackground(document.getElementById('bg'))
+
+// Na een update bestaan de oude stukjes code niet meer: dan de pagina één keer herladen in plaats van niets te doen.
+window.addEventListener('vite:preloadError', (e) => {
+  e.preventDefault()
+  if (sessionStorage.getItem('hp-reloaded')) return
+  try { sessionStorage.setItem('hp-reloaded', '1') } catch { /* privévenster */ }
+  location.reload()
+})
+setTimeout(() => { try { sessionStorage.removeItem('hp-reloaded') } catch { /* */ } }, 10000)
 startRipples()
 startTilt()
 

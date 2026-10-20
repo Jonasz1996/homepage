@@ -47,7 +47,7 @@ pveum user token add homepage@pve dashboard --privsep 0
 ```
 
 Snapshots verwijderen vanuit **hw → snapshots** vraagt daarnaast `VM.Snapshot`
-(`pveum role modify HomepagePower -privs VM.PowerMgmt,VM.Snapshot`; bestaat de rol al met meer rechten, voeg het er dan bij).
+(`pveum role modify HomepagePower -privs VM.PowerMgmt,VM.Snapshot,VM.Snapshot.Rollback`, Rollback is voor updates terugdraaien; bestaat de rol al met meer rechten, voeg het er dan bij).
 
 Gebruik `homepage@pve!dashboard` als `username` en het getoonde geheim als `password`.
 Voor PBS (alleen lezen):
@@ -55,6 +55,7 @@ Voor PBS (alleen lezen):
 ```bash
 proxmox-backup-manager user create homepage@pbs
 proxmox-backup-manager user generate-token homepage@pbs dashboard
+proxmox-backup-manager acl update / Audit --auth-id homepage@pbs
 proxmox-backup-manager acl update / Audit --auth-id 'homepage@pbs!dashboard'
 ```
 

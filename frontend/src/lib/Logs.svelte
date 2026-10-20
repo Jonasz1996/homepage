@@ -32,12 +32,16 @@
     return p
   }
 
+  // Elke nieuwe lading krijgt een nummer: antwoorden voor een oude filter worden genegeerd.
+  let gen = 0
   async function load() {
+    const my = ++gen
     busy = true
     try {
       const [r, h, hs] = await Promise.all([
         api('/logs?' + params({ limit: 300 })), api('/logs/histogram?' + params()), api('/logs/hosts'),
       ])
+      if (my !== gen) return
       items = r.items
       more = r.more
       hist = h
@@ -51,17 +55,22 @@
   }
 
   async function loadMore() {
+    const my = gen
     const last = items[items.length - 1]
-    const r = await api('/logs?' + params({ limit: 300, before_ts: last.ts, before_id: last.id }))
-    items = [...items, ...r.items]
-    more = r.more
+    try {
+      const r = await api('/logs?' + params({ limit: 300, before_ts: last.ts, before_id: last.id }))
+      if (my !== gen) return
+      items = [...items, ...r.items]
+      more = r.more
+    } catch (e) { error = e.message }
   }
 
   async function tail() {
     if (!open || !live || !items.length) return
+    const my = gen
     try {
       const r = await api('/logs?' + params({ after_id: Math.max(...items.slice(0, 50).map((i) => i.id)) }))
-      if (r.items.length) items = [...r.items, ...items].slice(0, 3000)
+      if (my === gen && r.items.length) items = [...r.items, ...items].slice(0, 3000)
     } catch { /* volgende poging */ }
   }
 

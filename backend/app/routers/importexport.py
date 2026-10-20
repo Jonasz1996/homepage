@@ -1,5 +1,7 @@
 """Import van homepage.dev services.yaml en import/export in ons eigen YAML-formaat."""
 
+import re
+
 import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse
@@ -19,6 +21,23 @@ router = APIRouter(prefix="/api", tags=["import"])
 SECRET_FIELDS = {"key", "password", "token", "apikey", "api_key", "secret", "tokensecret", "username"}
 
 
+_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+
+
+def _clean_url(v) -> str | None:
+    """Zoals ServiceIn: alleen http(s)-links, anders niets (geen javascript: en dergelijke)."""
+    v = str(v).strip()[:500] if v else ""
+    return v if v.lower().startswith(("http://", "https://")) else None
+
+
+def _clean_icon(v) -> str | None:
+    """Een icoonnaam (mdi-…, jellyfin.png), een pad of een http(s)-adres; geen ander schema."""
+    v = str(v).strip()[:500] if v else ""
+    if not v or (_SCHEME.match(v) and not v.lower().startswith(("http://", "https://"))):
+        return None
+    return v
+
+
 def _homepage_service(name: str, item: dict) -> dict:
     item = item or {}
     svc = {
@@ -31,8 +50,6 @@ def _homepage_service(name: str, item: dict) -> dict:
         "config": {},
         "secrets": {},
     }
-    if svc["url"] and not str(svc["url"]).lower().startswith(("http://", "https://")):
-        svc["url"] = None
     if item.get("siteMonitor"):
         svc["check"] = {"type": "http", "target": item["siteMonitor"], "interval": 60}
     elif item.get("ping"):
@@ -118,7 +135,7 @@ async def import_yaml(data: ImportIn, request: Request, user: User = Depends(cur
             for pos, s in enumerate(services):
                 db.add(Service(
                     group_id=group.id, position=pos, name=str(s["name"])[:80],
-                    description=s.get("description"), url=s.get("url"), icon=s.get("icon"),
+                    description=s.get("description"), url=_clean_url(s.get("url")), icon=_clean_icon(s.get("icon")),
                     type=s.get("type") or "link", check=s.get("check") or {}, config=s.get("config") or {},
                     notes=str(s["notes"])[:20000] if s.get("notes") else None,
                     secrets=encrypt_json(s.get("secrets") or {}),

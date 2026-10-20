@@ -1,18 +1,39 @@
+<script module>
+  // Alleen het bovenste venster reageert op Escape (bv. de 2FA-vraag boven een ander venster).
+  const stack = []
+</script>
+
 <script>
+  import { onMount, tick } from 'svelte'
   import Card from './Card.svelte'
 
   let { title, onclose, children, wide = false } = $props()
+  const me = {}
+  let box = $state()
+
+  onMount(() => {
+    stack.push(me)
+    const before = document.activeElement
+    tick().then(() => {
+      if (box && !box.contains(document.activeElement)) box.querySelector('input, select, textarea, button:not(.x)')?.focus({ preventScroll: true })
+    })
+    return () => {
+      stack.splice(stack.indexOf(me), 1)
+      if (before && document.contains(before)) before.focus?.({ preventScroll: true })
+    }
+  })
 
   function key(e) {
-    if (e.key === 'Escape') onclose()
+    if (e.key === 'Escape' && stack.at(-1) === me) onclose()
   }
 </script>
+
 
 <svelte:window onkeydown={key} />
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div class="ov" onclick={(e) => e.target === e.currentTarget && onclose()}>
-  <div class="box" class:wide role="dialog" aria-modal="true">
+  <div class="box" class:wide role="dialog" aria-modal="true" aria-label={title} bind:this={box}>
     <Card {title} glow>
       {#snippet right()}<button class="mini x" onclick={onclose} aria-label="Sluiten">✕</button>{/snippet}
       <div class="body">{@render children()}</div>

@@ -1,3 +1,5 @@
+import hmac
+import time
 from datetime import datetime, timedelta, timezone
 
 import pyotp
@@ -13,6 +15,7 @@ from ..deps import (COOKIE, audit, client_country, client_ip, current_session, c
                     recent_auth, secure_cookie)
 from ..models import AuditLog, Session, User
 from ..security import (
+    USER_FAILURE_FACTOR,
     check_setup_token,
     decrypt,
     encrypt,
@@ -54,10 +57,26 @@ class PasswordIn(BaseModel):
     new: str = Field(min_length=12, max_length=256)
 
 
+_clock = time.time
+
+
 def _totp_ok(user: User, code: str | None) -> bool:
+    """Code van de vorige, huidige of volgende stap van 30 s. Een gebruikte stap (of een oudere) wordt
+    daarna geweigerd, zodat een afgekeken code niet nog eens kan dienen. De aanroeper bewaart."""
     if not code or not user.totp_secret:
         return False
-    return pyotp.TOTP(decrypt(user.totp_secret)).verify(code.replace(" ", ""), valid_window=1)
+    totp = pyotp.TOTP(decrypt(user.totp_secret))
+    given = code.replace(" ", "").encode()
+    now = int(_clock()) // totp.interval
+    for step in (now - 1, now, now + 1):
+        if step > (user.totp_last_step or -1) and hmac.compare_digest(totp.generate_otp(step).encode(), given):
+            user.totp_last_step = step
+            return True
+    return False
+
+
+def _too_many() -> HTTPException:
+    return HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Te veel pogingen, probeer later opnieuw")
 
 
 async def _start_session(db: AsyncSession, request: Request, response: Response, user: User, mfa_ok: bool) -> None:
@@ -140,12 +159,16 @@ async def totp_enable(data: CodeIn, request: Request, sess: Session = Depends(cu
 @router.post("/login")
 async def login(data: LoginIn, request: Request, response: Response, db: AsyncSession = Depends(get_db)):
     ip = client_ip(request) or "?"
-    keys = (f"ip:{ip}", f"user:{data.username.lower()}")
-    if limiter.blocked(*keys):
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Te veel pogingen, probeer later opnieuw")
+    name = data.username.lower()
+    # Foute wachtwoorden tellen per IP (streng) en per gebruikersnaam (ruim, zie USER_FAILURE_FACTOR).
+    # Foute 2FA-codes na een juist wachtwoord tellen ook streng per gebruiker: die kent het wachtwoord al.
+    ip_key, user_key, totp_key = f"ip:{ip}", f"user:{name}", f"totp:{name}"
+    if limiter.blocked(ip_key, totp_key) or limiter.blocked(
+            user_key, limit=get_settings().login_max_failures * USER_FAILURE_FACTOR):
+        raise _too_many()
     user = (await db.execute(select(User).where(User.username == data.username))).scalar_one_or_none()
     if not verify_password(user.password_hash if user else None, data.password):
-        limiter.fail(*keys)
+        limiter.fail(ip_key, user_key)
         await audit(db, request, user, "login_failed", username=data.username[:64])
         await db.commit()
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Onjuiste gebruikersnaam of wachtwoord")
@@ -153,11 +176,11 @@ async def login(data: LoginIn, request: Request, response: Response, db: AsyncSe
         if not data.code:
             return {"ok": False, "code_required": True}
         if not _totp_ok(user, data.code):
-            limiter.fail(*keys)
+            limiter.fail(ip_key, user_key, totp_key)
             await audit(db, request, user, "login_failed_totp")
             await db.commit()
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "2FA-code klopt niet")
-    limiter.reset(*keys)
+    limiter.reset(ip_key, user_key, totp_key)
     if user.last_login_ip and user.last_login_ip != ip:
         cc = client_country(request)
         notify(db, "Login vanaf nieuw IP", f"{user.username} logde in vanaf {ip}{f' ({cc})' if cc else ''}.",
@@ -170,14 +193,24 @@ async def login(data: LoginIn, request: Request, response: Response, db: AsyncSe
     return {"ok": True, "mfa_ok": user.totp_enabled}
 
 
+def _confirm_keys(request: Request, user: User) -> tuple[str, str]:
+    """Bevestigen (reauth, wachtwoord wijzigen) telt apart van het inloggen, per gebruiker en per IP."""
+    return f"confirm:{user.id}", f"confirm-ip:{client_ip(request) or '?'}"
+
+
 @router.post("/reauth")
 async def reauth(data: ReauthIn, request: Request, sess: Session = Depends(current_session),
                  user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    keys = _confirm_keys(request, user)
+    if limiter.blocked(*keys):
+        raise _too_many()
     ok = (data.password and verify_password(user.password_hash, data.password)) or _totp_ok(user, data.code)
     if not ok:
+        limiter.fail(*keys)
         await audit(db, request, user, "reauth_failed")
         await db.commit()
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Bevestiging mislukt")
+    limiter.reset(*keys)
     sess.auth_at = datetime.now(timezone.utc)
     await db.commit()
     return {"ok": True}
@@ -186,8 +219,13 @@ async def reauth(data: ReauthIn, request: Request, sess: Session = Depends(curre
 @router.post("/password")
 async def change_password(data: PasswordIn, request: Request, sess: Session = Depends(current_session),
                           user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    keys = _confirm_keys(request, user)
+    if limiter.blocked(*keys):
+        raise _too_many()
     if not verify_password(user.password_hash, data.current):
+        limiter.fail(*keys)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Huidig wachtwoord klopt niet")
+    limiter.reset(*keys)
     user.password_hash = hash_password(data.new)
     # Alle andere sessies afmelden.
     await db.execute(delete(Session).where(Session.user_id == user.id, Session.id != sess.id))
@@ -232,7 +270,7 @@ async def revoke_session(short_id: str, request: Request, sess: Session = Depend
     if len(short_id) != 16 or sess.id.startswith(short_id):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Gebruik afmelden voor je eigen sessie")
     target = (await db.execute(select(Session).where(Session.user_id == user.id,
-                                                     Session.id.startswith(short_id)))).scalars().first()
+                                                     Session.id.startswith(short_id, autoescape=True)))).scalars().first()
     if target is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Sessie niet gevonden")
     await audit(db, request, user, "session_revoked", ip=target.ip, country=target.country)

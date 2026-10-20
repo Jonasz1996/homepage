@@ -29,7 +29,8 @@
     if (open) await load()
   }
 
-  const clickable = (n) => n.source === 'rapport' || n.source === 'updates' || !!n.service_id
+  const SOURCES = ['rapport', 'updates', 'cron', 'config', 'apparaat', 'hardware', 'snapshots', 'domein', 'homepage']
+  const clickable = (n) => SOURCES.includes(n.source) || !!n.service_id
   async function pick(n) {
     if (!clickable(n)) return
     open = false
@@ -39,13 +40,13 @@
 
   async function readAll() {
     sparkle()
-    await api('/notifications/read-all', { method: 'POST' })
+    try { await api('/notifications/read-all', { method: 'POST' }) } catch { /* volgende poging */ }
     await load()
   }
 
   async function clearRead() {
     boom(undefined, 0.8)
-    await api('/notifications', { method: 'DELETE' })
+    try { await api('/notifications', { method: 'DELETE' }) } catch { /* volgende poging */ }
     await load()
   }
 

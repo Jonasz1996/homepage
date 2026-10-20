@@ -2,21 +2,12 @@
   import { onMount } from 'svelte'
   import { api, poll, withReauth } from './api.js'
   import { boom, fxEnabled, flash, RED, setFx, storm } from './fx.js'
-  import Capacity from './Capacity.svelte'
   import Card from './Card.svelte'
-  import Configs from './Configs.svelte'
-  import History from './History.svelte'
-  import ImportDialog from './ImportDialog.svelte'
+  import Lazy from './Lazy.svelte'
   import NameForm from './NameForm.svelte'
-  import Network from './Network.svelte'
   import Notifications from './Notifications.svelte'
   import ReauthDialog from './ReauthDialog.svelte'
-  import Revisions from './Revisions.svelte'
-  import Security from './Security.svelte'
-  import ServiceForm from './ServiceForm.svelte'
-  import ServiceDetail from './ServiceDetail.svelte'
   import ServiceTile from './ServiceTile.svelte'
-  import Updates from './Updates.svelte'
 
   let { user, onlogout } = $props()
 
@@ -29,9 +20,10 @@
   let error = $state('')
   let now = $state(new Date())
   let searchEl = $state()
-  let status = $state({})
-  let widgets = $state({})
-  let updates = $state({ total: 0, security: 0, by_service: {} })
+  // Wordt bij elke poll volledig vervangen, nooit aangepast: geen diepe proxy nodig.
+  let status = $state.raw({})
+  let widgets = $state.raw({})
+  let updates = $state.raw({ total: 0, security: 0, by_service: {} })
   let net = $state(null)
   let menuOpen = $state(false)
   let termOpen = $state(false)
@@ -247,7 +239,8 @@
 
   async function logout() {
     boom()
-    await api('/auth/logout', { method: 'POST' })
+    // Ook als de server niet antwoordt: lokaal uitloggen.
+    try { await api('/auth/logout', { method: 'POST' }) } catch { /* sessie is dan toch weg of onbereikbaar */ }
     setTimeout(onlogout, fxEnabled() ? 600 : 0)
   }
 
@@ -457,6 +450,7 @@
         class="search"
         type="search"
         placeholder="Zoeken...  (Ctrl+K of /)"
+        aria-label="Zoeken"
         bind:value={query}
         bind:this={searchEl}
         onkeydown={searchKey}
@@ -546,11 +540,11 @@
             {#snippet right()}
               {#if editing}
                 <span class="handle" draggable="true" ondragstart={(e) => startDrag(e, 'group', g.id)} title="Sleep groep" role="button" tabindex="-1">⠿</span>
-                <button class="mini" onclick={() => (modal = { kind: 'service', service: null, groupId: g.id })}>+</button>
-                <button class="mini" onclick={() => (modal = { kind: 'group', group: g })}>✎</button>
+                <button class="mini" onclick={() => (modal = { kind: 'service', service: null, groupId: g.id })} aria-label="Service toevoegen aan {g.name}">+</button>
+                <button class="mini" onclick={() => (modal = { kind: 'group', group: g })} aria-label="Groep {g.name} bewerken">✎</button>
               {/if}
               {#if editing}
-                <button class="mini" onclick={() => groupMaintenance(g)} title="Onderhoud voor de hele groep">⏸</button>
+                <button class="mini" onclick={() => groupMaintenance(g)} title="Onderhoud voor de hele groep" aria-label="Onderhoud voor groep {g.name}">⏸</button>
               {/if}
               <button class="mini fold" onclick={() => toggleGroup(g)} aria-label={g.collapsed ? 'Openklappen' : 'Dichtklappen'}>
                 {g.collapsed ? '▸' : '▾'} {g.services.length}
@@ -595,7 +589,7 @@
 </main>
 
 {#if modal?.kind === 'service'}
-  <ServiceForm
+  <Lazy load={() => import('./ServiceForm.svelte')}
     service={modal.service}
     groupId={modal.groupId}
     groups={groupOptions}
@@ -620,7 +614,7 @@
     onclose={() => (modal = null)}
   />
 {:else if modal?.kind === 'detail'}
-  <ServiceDetail
+  <Lazy load={() => import('./ServiceDetail.svelte')}
     service={modal.service}
     groups={groupOptions}
     onchanged={load}
@@ -629,43 +623,51 @@
     onedit={(svc) => (modal = { kind: 'service', service: svc })}
   />
 {:else if modal?.kind === 'import'}
-  <ImportDialog pages={layout.pages} onclose={() => (modal = null)} ondone={load} />
+  <Lazy load={() => import('./ImportDialog.svelte')} pages={layout.pages} onclose={() => (modal = null)} ondone={load} />
 {:else if modal?.kind === 'capacity'}
-  <Capacity onclose={() => (modal = null)} />
+  <Lazy load={() => import('./Capacity.svelte')} onclose={() => (modal = null)} />
 {:else if modal?.kind === 'history'}
-  <History tab={modal.tab} onclose={() => (modal = null)} />
+  <Lazy load={() => import('./History.svelte')} tab={modal.tab} onclose={() => (modal = null)} />
 {:else if modal?.kind === 'network'}
-  <Network initialTab={modal.tab} onclose={() => (modal = null)} onchanged={(d) => (net = d)} />
+  <Lazy load={() => import('./Network.svelte')} initialTab={modal.tab} onclose={() => (modal = null)} onchanged={(d) => (net = d)} />
 {:else if modal?.kind === 'configs'}
-  <Configs onclose={() => (modal = null)} />
+  <Lazy load={() => import('./Configs.svelte')} onclose={() => (modal = null)} />
 {:else if modal?.kind === 'updates'}
-  <Updates onclose={() => (modal = null)} onchanged={loadUpdates} />
+  <Lazy load={() => import('./Updates.svelte')} onclose={() => (modal = null)} onchanged={loadUpdates} />
 {:else if modal?.kind === 'security'}
-  <Security onclose={() => (modal = null)} />
+  <Lazy load={() => import('./Security.svelte')} onclose={() => (modal = null)} />
 {:else if modal?.kind === 'revisions'}
-  <Revisions onclose={() => (modal = null)} ondone={load} />
+  <Lazy load={() => import('./Revisions.svelte')} onclose={() => (modal = null)} ondone={load} />
 {/if}
 
 {#if termUsed}
   <!-- xterm.js is groot: pas laden als je de terminal voor het eerst opent. -->
   {#await import('./Terminal.svelte') then { default: Terminal }}
     <Terminal open={termOpen} request={termRequest} services={allServices} onclose={() => (termOpen = false)} />
+  {:catch}
+    <Lazy load={() => Promise.reject()} />
   {/await}
 {/if}
 {#if cronUsed}
   {#await import('./Cron.svelte') then { default: Cron }}
     <Cron open={cronOpen} initial={cronInitial} onclose={() => (cronOpen = false)}
           onterminal={(hostId) => { cronOpen = false; openTerminal(hostId) }} />
+  {:catch}
+    <Lazy load={() => Promise.reject()} />
   {/await}
 {/if}
 {#if healthUsed}
   {#await import('./Health.svelte') then { default: Health }}
     <Health open={healthOpen} initial={healthInitial} onclose={() => (healthOpen = false)} />
+  {:catch}
+    <Lazy load={() => Promise.reject()} />
   {/await}
 {/if}
 {#if logsUsed}
   {#await import('./Logs.svelte') then { default: Logs }}
     <Logs open={logsOpen} initialHost={logsHost} onclose={() => (logsOpen = false)} />
+  {:catch}
+    <Lazy load={() => Promise.reject()} />
   {/await}
 {/if}
 <ReauthDialog />

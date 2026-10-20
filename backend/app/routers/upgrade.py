@@ -91,8 +91,14 @@ async def install(body: InstallIn, request: Request, user: User = Depends(recent
                   db: AsyncSession = Depends(get_db)):
     st = await db.get(AppState, UPDATES_KEY)
     names = {t["key"]: t["name"] for t in (st.value.get("targets", []) if st else [])}
-    keys = [(k, names.get(k)) for k in dict.fromkeys(body.targets)]
-    runs, refused = await upgrade.create_runs(db, keys, body.security_only, body.snapshot, "manueel", user.id)
+    # Alleen machines uit de laatste scan. Uitzondering: een eigen SSH-host (ssh:<id>…), die plan_for
+    # zelf opzoekt; na een installatie verdwijnt hij uit de scan maar opnieuw installeren mag.
+    wanted = list(dict.fromkeys(body.targets))
+    known = [k for k in wanted if k in names or k.startswith("ssh:")]
+    runs, refused = await upgrade.create_runs(db, [(k, names.get(k)) for k in known], body.security_only,
+                                              body.snapshot, "manueel", user.id)
+    refused += [{"key": k[:200], "name": None, "why": "Staat niet in de laatste updatescan"}
+                for k in wanted if k not in known]
     if runs:
         await audit(db, request, user, "updates_install", targets=[r.target_name for r in runs],
                     security_only=body.security_only, snapshot=body.snapshot)

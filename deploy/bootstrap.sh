@@ -21,6 +21,8 @@ apt-get install -y -q git ca-certificates curl
 has_app() { git ls-remote --exit-code "$REPO" "refs/heads/$1" >/dev/null 2>&1 \
   && curl -fsSL -o /dev/null "${REPO/github.com/raw.githubusercontent.com}/$1/deploy/install.sh"; }
 
+# Een eerder gekozen branch (BRANCH=...) blijft bij een update gekozen.
+[ -n "${BRANCH:-}" ] || BRANCH=$(cat /etc/homepage/branch 2>/dev/null || true)
 if [ -z "${BRANCH:-}" ]; then
   if has_app "$LATEST_BRANCH"; then
     BRANCH=$LATEST_BRANCH
@@ -41,5 +43,11 @@ else
   git clone -q -b "$BRANCH" "$REPO" "$APP_DIR"
 fi
 git -C "$APP_DIR" log -1 --format='versie: %h %s'
+# Alleen een zelf gekozen branch onthouden; de standaard volgt nieuwste of main.
+if [ "$BRANCH" != "$LATEST_BRANCH" ] && [ "$BRANCH" != main ]; then
+  install -d /etc/homepage && echo "$BRANCH" > /etc/homepage/branch
+elif [ -f /etc/homepage/branch ] && [ "$(cat /etc/homepage/branch)" != "$BRANCH" ]; then
+  rm -f /etc/homepage/branch
+fi
 
 exec bash "$APP_DIR/deploy/install.sh"

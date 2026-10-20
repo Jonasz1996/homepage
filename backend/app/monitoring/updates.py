@@ -20,6 +20,7 @@ import asyncssh
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..db import job_lock
 from ..deps import event
 from ..integrations import IntegrationError, build
 from ..models import AppState, Service, SshHost
@@ -267,6 +268,10 @@ def record_changes(db: AsyncSession, old: dict[str, dict], new: list[dict]) -> N
 
 
 async def run_updates(db: AsyncSession, clients: HttpClients) -> dict:
+    if not await job_lock(db, KEY):
+        # Loopt al (worker, knop of na een installatie): de vorige stand teruggeven.
+        state = await db.get(AppState, KEY)
+        return state.value if state else {}
     state = await db.get(AppState, KEY)
     old = {t["key"]: t for t in (state.value.get("targets", []) if state else [])}
     new = await collect(db, clients)

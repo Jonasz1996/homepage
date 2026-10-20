@@ -21,6 +21,12 @@ ProtectHome=true
 ReadOnlyPaths=/opt/homepage /etc/homepage
 # Kopie van de back-up buiten de container (zie README, "De homepage zelf"); "-" = mag ontbreken.
 ReadWritePaths=-/mnt/homepage-backup
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 [Install]
 WantedBy=multi-user.target

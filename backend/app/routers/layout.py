@@ -4,9 +4,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..deps import audit, current_user
+from ..deps import audit, current_session, current_user, recent_auth
 from ..layout import load_pages, pages_out, record_revision, restore_snapshot, service_out
-from ..models import Group, Page, Revision, Service, User
+from ..models import Group, Page, Revision, Service, Session, User
 from ..schemas import GroupIn, OrderIn, PageIn, ServiceIn
 from ..security import decrypt_json, encrypt_json
 
@@ -147,10 +147,22 @@ async def get_service(service_id: int, user: User = Depends(current_user), db: A
     return service_out(await _get(db, Service, service_id))
 
 
+def _target(type_: str | None, url: str | None, config: dict | None) -> tuple:
+    return type_, url, (config or {}).get("url")
+
+
 @router.patch("/services/{service_id}")
-async def update_service(service_id: int, data: ServiceIn, request: Request,
+async def update_service(service_id: int, data: ServiceIn, request: Request, sess: Session = Depends(current_session),
                          user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     service = await _get(db, Service, service_id)
+    # Bewaarde secrets naar een ander adres of type sturen = ze kunnen weglekken: vraagt een recente 2FA,
+    # tenzij alle secrets in hetzelfde verzoek opnieuw ingegeven (of gewist) worden.
+    moved = _target(data.type, data.url, data.config) != _target(service.type, service.url, service.config)
+    stored = set(decrypt_json(service.secrets)) if moved and service.secrets else set()
+    if stored and not stored <= set(data.secrets or {}):
+        await recent_auth(sess, user)
+        await audit(db, request, user, "service_target_changed", service=service.name, url=data.url,
+                    type=data.type, old_url=service.url, old_type=service.type)
     await _check_parent(db, service_id, data.parent_id)
     if data.group_id != service.group_id:
         await _get(db, Group, data.group_id)

@@ -6,13 +6,18 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..deps import notify
-from ..models import AuditLog, CheckResult, Event, Metric, Notification, Service, ServiceState, Session
+from ..models import AuditLog, CheckResult, Event, Metric, Notification, Service, ServiceState, Session, UpdateRun
 from .checks import Outcome
+from .upgrade import DONE
 
 # Pas na zoveel mislukte checks op rij is een service "down" (vermijdt valse meldingen).
 DOWN_AFTER = 3
-# Zonder TimescaleDB ruimt de worker zelf op.
-KEEP_DAYS = 90
+# Zonder TimescaleDB ruimt de worker zelf op: checks een jaar (de 1j-grafiek), metingen een half jaar.
+KEEP_CHECKS_DAYS = 365
+KEEP_METRICS_DAYS = 180
+# Ongelezen meldingen die na een half jaar nog openstaan, leest niemand meer.
+KEEP_UNREAD_DAYS = 180
+KEEP_UPDATE_RUNS_DAYS = 365
 
 
 def _fmt_duration(delta: timedelta) -> str:
@@ -135,16 +140,21 @@ async def record(db: AsyncSession, service: Service, outcome: Outcome, now: date
 
 
 async def cleanup(db: AsyncSession) -> None:
-    cutoff = datetime.now(timezone.utc) - timedelta(days=KEEP_DAYS)
-    await db.execute(delete(CheckResult).where(CheckResult.ts < cutoff))
-    await db.execute(delete(Metric).where(Metric.ts < cutoff))
+    now = datetime.now(timezone.utc)
+    await db.execute(delete(CheckResult).where(CheckResult.ts < now - timedelta(days=KEEP_CHECKS_DAYS)))
+    await db.execute(delete(Metric).where(Metric.ts < now - timedelta(days=KEEP_METRICS_DAYS)))
 
 
 async def housekeeping(db: AsyncSession) -> None:
-    """Verlopen sessies, oude auditlog, oude tijdlijn en oude gelezen meldingen opruimen."""
+    """Verlopen sessies, oude auditlog, oude tijdlijn, oude meldingen en oude update-runs opruimen."""
     now = datetime.now(timezone.utc)
     await db.execute(delete(Session).where(Session.expires_at < now))
     await db.execute(delete(AuditLog).where(AuditLog.ts < now - timedelta(days=365)))
     await db.execute(delete(Event).where(Event.ts < now - timedelta(days=365)))
     await db.execute(delete(Notification).where(Notification.read_at.is_not(None),
                                                 Notification.ts < now - timedelta(days=30)))
+    await db.execute(delete(Notification).where(Notification.read_at.is_(None),
+                                                Notification.ts < now - timedelta(days=KEEP_UNREAD_DAYS)))
+    # Alleen afgeronde runs: een run die (nog) loopt blijft staan, hoe oud ook.
+    await db.execute(delete(UpdateRun).where(UpdateRun.status.in_(DONE),
+                                             UpdateRun.created_at < now - timedelta(days=KEEP_UPDATE_RUNS_DAYS)))

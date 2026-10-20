@@ -16,6 +16,15 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadOnlyPaths=/opt/homepage /etc/homepage
+# De knop "nu controleren" onder hw → homepage zelf maakt ook de kopie buiten de container.
+ReadWritePaths=-/mnt/homepage-backup
+CapabilityBoundingSet=
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 [Install]
 WantedBy=multi-user.target

@@ -5,6 +5,7 @@
   import { Terminal } from '@xterm/xterm'
   import '@xterm/xterm/css/xterm.css'
   import { onMount } from 'svelte'
+  import { requestReauth } from './api.js'
 
   // Eén SSH-sessie: xterm.js in de browser, de shell zelf loopt via de WebSocket van de API.
   // Zoals PuTTY: selecteren = kopiëren, rechtsklik = plakken, middenklik = de laatste selectie plakken.
@@ -37,18 +38,24 @@
     hostkey = null
     setState('verbinden')
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    ws = new WebSocket(`${proto}//${location.host}/api/ssh/ws/${host.id}?cols=${term.cols}&rows=${term.rows}`)
+    const sock = ws = new WebSocket(`${proto}//${location.host}/api/ssh/ws/${host.id}?cols=${term.cols}&rows=${term.rows}`)
     ws.binaryType = 'arraybuffer'
-    ws.onmessage = (e) => {
+    ws.onmessage = async (e) => {
+      if (sock !== ws) return
       if (typeof e.data !== 'string') return term.write(new Uint8Array(e.data))
       const m = JSON.parse(e.data)
       if (m.t === 'status') term.write(dim(m.m))
       else if (m.t === 'hostkey') hostkey = m
       else if (m.t === 'ready') { setState('verbonden'); if (active) term.focus() }
+      else if (m.t === 'error' && m.m === 'reauth_required') {
+        // Na 15 minuten vraagt opnieuw verbinden weer de 2FA-code.
+        try { await requestReauth(); connect() } catch { term.write(red('Bevestiging geannuleerd')); setState('fout') }
+      }
       else if (m.t === 'error') { term.write(red(m.m)); setState('fout') }
       else if (m.t === 'closed') { term.write('\r\n' + dim(m.m)); setState('gesloten') }
     }
     ws.onclose = () => {
+      if (sock !== ws) return
       if (phase === 'verbonden' || phase === 'verbinden') { term.write('\r\n' + dim('Verbinding gesloten')); setState('gesloten') }
     }
   }

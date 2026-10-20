@@ -7,7 +7,8 @@ Bronnen:
 - bestanden of mappen die je zelf kiest op een SSH-host (bv. /etc/nginx), als root gelezen.
 
 Een nieuwe versie wordt alleen bewaard als ze verschilt; dan komt er een regel op de tijdlijn en een melding.
-De inhoud staat versleuteld in de database. In de diff worden wachtwoorden en sleutels uit OPNsense gemaskeerd.
+De inhoud staat versleuteld in de database. In de diff worden wachtwoorden en sleutels gemaskeerd (OPNsense-XML,
+JSON en regels als `KEY=waarde` of `key: waarde`).
 """
 
 import difflib
@@ -43,6 +44,9 @@ SECRET_TAGS = ("password", "passwd", "secret", "apikey", "api_key", "key", "prv"
                "radius_secret", "shared_secret", "pass", "token")
 _SECRET = re.compile(r"<(" + "|".join(re.escape(t) for t in SECRET_TAGS) + r")>([^<]+)</\1>", re.I)
 _JSON_SECRET = re.compile(r'("(?:password|secret|token|api_key|key)"\s*:\s*)"[^"]*"', re.I)
+# Regels als `PrivateKey = x` (WireGuard), `DB_PASSWORD=x` (.env) of `api_token: x` (YAML).
+_LINE_SECRET = re.compile(r"^(\s*(?:export\s+|-\s+)?[\w.\-]*(?:pass|secret|token|key|psk|private)[\w.\-]*\s*[=:]\s*)"
+                          r"(?!•••)\S.*$", re.I | re.M)
 # Velden van NPM die bij elke aanvraag veranderen of niets zeggen.
 NPM_NOISE = {"created_on", "modified_on", "owner", "owner_user_id", "certificate", "access_list"}
 
@@ -71,7 +75,8 @@ async def settings(db: AsyncSession) -> dict:
 
 def mask(text: str) -> str:
     text = _SECRET.sub(lambda m: f"<{m[1]}>•••</{m[1]}>", text)
-    return _JSON_SECRET.sub(lambda m: m[1] + '"•••"', text)
+    text = _JSON_SECRET.sub(lambda m: m[1] + '"•••"', text)
+    return _LINE_SECRET.sub(lambda m: m[1] + "•••", text)
 
 
 def _npm_text(hosts: dict[str, list]) -> str:

@@ -151,7 +151,7 @@ async def list_hosts(user: User = Depends(current_user), db: AsyncSession = Depe
 
 
 @router.post("/hosts", status_code=201)
-async def create_host(data: HostIn, request: Request, user: User = Depends(current_user),
+async def create_host(data: HostIn, request: Request, user: User = Depends(recent_auth),
                       db: AsyncSession = Depends(get_db)):
     await _check_refs(db, data)
     pos = (await db.execute(select(func.coalesce(func.max(SshHost.position), -1)))).scalar_one() + 1
@@ -164,7 +164,7 @@ async def create_host(data: HostIn, request: Request, user: User = Depends(curre
 
 
 @router.patch("/hosts/{host_id}")
-async def update_host(host_id: int, data: HostIn, request: Request, user: User = Depends(current_user),
+async def update_host(host_id: int, data: HostIn, request: Request, user: User = Depends(recent_auth),
                       db: AsyncSession = Depends(get_db)):
     h = await _get_host(db, host_id)
     await _check_refs(db, data)
@@ -180,7 +180,7 @@ async def update_host(host_id: int, data: HostIn, request: Request, user: User =
 
 
 @router.delete("/hosts/{host_id}")
-async def delete_host(host_id: int, request: Request, user: User = Depends(current_user),
+async def delete_host(host_id: int, request: Request, user: User = Depends(recent_auth),
                       db: AsyncSession = Depends(get_db)):
     h = await _get_host(db, host_id)
     await db.delete(h)
@@ -268,7 +268,7 @@ async def get_snippets(user: User = Depends(current_user), db: AsyncSession = De
 
 
 @router.put("/snippets")
-async def put_snippets(data: list[Snippet], request: Request, user: User = Depends(current_user),
+async def put_snippets(data: list[Snippet], request: Request, user: User = Depends(recent_auth),
                        db: AsyncSession = Depends(get_db)):
     if len(data) > 100:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Maximaal 100 snippets")
@@ -299,7 +299,7 @@ class ImportItem(BaseModel):
 
 
 @router.post("/import")
-async def import_hosts(items: list[ImportItem], request: Request, user: User = Depends(current_user),
+async def import_hosts(items: list[ImportItem], request: Request, user: User = Depends(recent_auth),
                        db: AsyncSession = Depends(get_db)):
     if len(items) > 1000:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Te veel hosts in één keer")
@@ -328,6 +328,25 @@ async def _ws_user(ws: WebSocket, db: AsyncSession, reauth: bool = True) -> tupl
 
 async def _send(ws: WebSocket, **msg) -> None:
     await ws.send_text(json.dumps(msg))
+
+
+SESSION_CHECK = 60
+REVOKED = "Je sessie is afgemeld (elders uitgelogd of wachtwoord gewijzigd): verbinding gesloten"
+
+
+async def watch_session(ws: WebSocket, db: AsyncSession) -> None:
+    """Loopt zolang de sessie bestaat; keert terug zodra ze ingetrokken of verlopen is.
+    Naast de pompen van een WebSocket starten: wie afgemeld wordt, houdt geen open shell over."""
+    token = ws.cookies.get(COOKIE)
+    sid = token_id(token) if token else ""
+    while True:
+        await asyncio.sleep(SESSION_CHECK)
+        expires = (await db.execute(select(Session.expires_at).where(Session.id == sid))).scalar_one_or_none()
+        await db.commit()
+        if expires is None or expires.replace(tzinfo=expires.tzinfo or timezone.utc) < datetime.now(timezone.utc):
+            with contextlib.suppress(Exception):
+                await _send(ws, t="error", m=REVOKED)
+            return
 
 
 @router.websocket("/ws/{host_id}")
@@ -419,7 +438,8 @@ async def terminal(ws: WebSocket, host_id: int, cols: int = 100, rows: int = 30,
                         if m.get("t") == "r":
                             proc.change_terminal_size(max(10, int(m["c"])), max(4, int(m["r"])))
 
-        tasks = [asyncio.create_task(ssh_to_ws()), asyncio.create_task(ws_to_ssh())]
+        watch = asyncio.create_task(watch_session(ws, db))
+        tasks = [asyncio.create_task(ssh_to_ws()), asyncio.create_task(ws_to_ssh()), watch]
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for t in pending:
             t.cancel()
@@ -430,5 +450,6 @@ async def terminal(ws: WebSocket, host_id: int, cols: int = 100, rows: int = 30,
                     detail={"name": h.name, "seconds": round(time.monotonic() - started)}))
     await db.commit()
     with contextlib.suppress(Exception):
-        await _send(ws, t="closed", m="Afgemeld wegens 30 minuten inactiviteit" if idle else "Verbinding gesloten")
+        await _send(ws, t="closed", m=REVOKED if watch in done else
+                    "Afgemeld wegens 30 minuten inactiviteit" if idle else "Verbinding gesloten")
         await ws.close()
