@@ -11,7 +11,7 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
-from .. import zonderlogin
+from .. import bestanden, zonderlogin
 from ..config import get_settings
 from ..db import get_db
 from ..deps import (COOKIE, audit, client_country, client_ip, current_session, current_user, limit_ip, notify,
@@ -399,6 +399,9 @@ async def change_password(data: PasswordIn, request: Request, response: Response
     notify(db, "Wachtwoord gewijzigd", f"Voor {user.username}, vanaf {client_ip(request) or '?'}. Alle andere "
            f"apparaten zijn afgemeld en tellen als nieuw toestel tot ze opnieuw inloggen.", level="warn", source="auth")
     await db.commit()
+    # Hun bestandenvensters (en downloads die lopen) ook dicht, zoals bij "alle andere afmelden".
+    await bestanden.close_where(lambda f: f.user_id == user.id and f.sess_id != sess.id
+                                and not f.sess_id.startswith(zonderlogin.TRANSIENT_PREFIX))
     if not vluchtig:  # zonder login logde dit toestel niet in, zoals in state()
         _set_device(request, response, user)
     return {"ok": True}
@@ -411,6 +414,8 @@ async def logout(request: Request, response: Response, sess: Session | None = De
         await audit(db, request, sess.user, "logout")
         await db.delete(sess)
         await db.commit()
+        # Open bestandenvensters (en downloads die lopen) van deze sessie dicht, zoals de terminal.
+        await bestanden.close_where(lambda f: f.sess_id == sess.id)
     request.state.renew_cookie = None
     response.delete_cookie(COOKIE, path="/")
     return {"ok": True}
@@ -444,8 +449,10 @@ async def revoke_session(short_id: str, request: Request, sess: Session = Depend
     if target is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Sessie niet gevonden")
     await audit(db, request, user, "session_revoked", ip=target.ip, country=target.country)
+    gone = target.id
     await db.delete(target)
     await db.commit()
+    await bestanden.close_where(lambda f: f.sess_id == gone)
     return {"ok": True}
 
 
@@ -456,6 +463,8 @@ async def revoke_others(request: Request, sess: Session = Depends(current_sessio
     await webpush.forget_renew(db, user.id)
     await audit(db, request, user, "sessions_revoked", count=result.rowcount)
     await db.commit()
+    await bestanden.close_where(lambda f: f.user_id == user.id and f.sess_id != sess.id
+                                and not f.sess_id.startswith(zonderlogin.TRANSIENT_PREFIX))
     return {"ok": True, "count": result.rowcount}
 
 

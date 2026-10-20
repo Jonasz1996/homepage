@@ -95,6 +95,17 @@ def test_welke_routes_van_buitenaf_uit_staan():
         "PATCH /api/ssh/hosts/{host_id}": "terminal", "DELETE /api/ssh/hosts/{host_id}": "terminal",
         "POST /api/ssh/hosts/{host_id}/forget-hostkey": "terminal", "PUT /api/ssh/defaults": "terminal",
         "PUT /api/ssh/snippets": "terminal", "POST /api/ssh/import": "terminal",
+        # Bestanden naast de terminal (zoals WinSCP): openen, bladeren, bewerken, uploaden en downloaden. Sluiten mag
+        # altijd (het ruimt alleen op).
+        "POST /api/ssh/hosts/{host_id}/files": "terminal", "POST /api/ssh/hosts/{host_id}/files/hostkey": "terminal",
+        "POST /api/ssh/files/{fs}/list": "terminal", "POST /api/ssh/files/{fs}/read": "terminal",
+        "POST /api/ssh/files/{fs}/write": "terminal", "POST /api/ssh/files/{fs}/mkdir": "terminal",
+        "POST /api/ssh/files/{fs}/rename": "terminal", "POST /api/ssh/files/{fs}/delete": "terminal",
+        "POST /api/ssh/files/{fs}/chmod": "terminal", "POST /api/ssh/files/{fs}/download": "terminal",
+        "GET /api/ssh/files/dl/{token}": "terminal", "POST /api/ssh/files/{fs}/upload": "terminal",
+        "PUT /api/ssh/files/{fs}/upload/{uid}/{index}": "terminal",
+        "POST /api/ssh/files/{fs}/upload/{uid}/finish": "terminal",
+        "DELETE /api/ssh/files/{fs}/upload/{uid}": "terminal",
         "POST /api/backups/sync/create": "terminal",
         # De proef van de PBS-sync meldt zich via SSH aan op beide PBS'en (alleen lezen), net als de echte knop.
         "POST /api/backups/sync/proef": "terminal",

@@ -36,6 +36,7 @@
       case 'detail':
         return { service: m.service, groups: dash.groupOptions, onchanged: reload, onclose: close,
                  onterminal: (hostId) => dash.open('terminal', { hostId }),
+                 onfiles: (hostId) => dash.open('terminal', { hostId, files: true }),
                  onedit: (svc) => dash.open('service', { service: svc }),
                  oncleanup: (svc) => dash.open('nieuweservice', { tab: 'opruimen', service: svc }) }
       case 'nieuweservice':

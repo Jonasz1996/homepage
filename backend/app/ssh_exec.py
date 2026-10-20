@@ -19,13 +19,13 @@ class SshFail(Exception):
     """Fout die we zo aan de gebruiker tonen."""
 
 
-@asynccontextmanager
-async def connect(h: SshHost, login: Login, keepalive: int | None = None):
+async def open_conn(h: SshHost, login: Login, keepalive: int | None = None) -> asyncssh.SSHClientConnection:
+    """Een open verbinding (sluiten is aan de aanroeper); fouten als SshFail met de uitleg van de terminal."""
     if not h.host_key:
         raise SshFail("Hostsleutel nog niet bevestigd: open één keer een terminal naar deze host")
     tcp = TcpVolger()
     try:
-        conn = await asyncio.wait_for(asyncssh.connect(
+        return await asyncio.wait_for(asyncssh.connect(
             h.host, port=h.port, username=login.username, keepalive_interval=keepalive or 0,
             known_hosts=([asyncssh.import_public_key(h.host_key)], [], []),
             client_keys=[login.key] if login.key else None, password=login.password,
@@ -38,7 +38,11 @@ async def connect(h: SshHost, login: Login, keepalive: int | None = None):
         raise SshFail(geweigerd(login)) from e
     except (OSError, asyncssh.Error, asyncio.TimeoutError) as e:
         raise SshFail(f"SSH naar {h.host} mislukt: {waarom(e, h.host, h.port, CONNECT_TIMEOUT, tcp.tcp)}") from e
-    async with conn:
+
+
+@asynccontextmanager
+async def connect(h: SshHost, login: Login, keepalive: int | None = None):
+    async with await open_conn(h, login, keepalive) as conn:
         yield conn
 
 

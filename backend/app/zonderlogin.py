@@ -50,6 +50,8 @@ NAME = re.compile(r"^[a-z0-9]([a-z0-9-]{0,62}\.)*[a-z0-9-]{1,63}$")
 LABELS = {"uit": "altijd met 2FA", "thuis": "thuis zonder login", "overal": "overal zonder login"}
 # Hoe los: van buitenaf mag de stand alleen strenger (routers/outside.put_aanmelden).
 LOOSE = {"uit": 0, "thuis": 1, "overal": 2}
+# De id van de sessie zonder login (niet in de database).
+TRANSIENT_PREFIX = "zonder-login:"
 # De eigen adressen van het dashboard (monitoring/upgrade.me), een minuut onthouden.
 OWN_TTL = 60.0
 _own: tuple[float, frozenset[str]] = (float("-inf"), frozenset())
@@ -154,7 +156,7 @@ async def home_user(db: AsyncSession) -> User | None:
 def transient(user: User, conn: HTTPConnection) -> Session:
     """Een sessie die alleen voor dit verzoek bestaat. Nooit db.add/delete/merge: ze staat niet in de database."""
     now = _now()
-    s = Session(id=f"zonder-login:{user.id}", user_id=user.id, mfa_ok=True, created_at=now, auth_at=now,
+    s = Session(id=f"{TRANSIENT_PREFIX}{user.id}", user_id=user.id, mfa_ok=True, created_at=now, auth_at=now,
                 expires_at=now + timedelta(hours=1), ip=conn.client.host if conn.client else None,
                 user_agent=(conn.headers.get("user-agent") or "")[:255] or None, country=None, last_seen_at=now)
     set_committed_value(s, "user", user)

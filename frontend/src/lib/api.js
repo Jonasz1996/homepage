@@ -8,20 +8,23 @@ export class ApiError extends Error {
   }
 }
 
-export async function api(path, { method = 'GET', body } = {}) {
+// Een Blob als body gaat zoals hij is (een stuk van een upload), al de rest als JSON. signal: afbreken.
+export async function api(path, { method = 'GET', body, signal } = {}) {
   const headers = { 'X-Requested-With': 'homepage' }
-  if (body !== undefined) headers['Content-Type'] = 'application/json'
+  const raw = typeof Blob !== 'undefined' && body instanceof Blob
+  if (body !== undefined) headers['Content-Type'] = raw ? 'application/octet-stream' : 'application/json'
   let r
   try {
     r = await fetch('/api' + path, {
       method,
       headers,
       credentials: 'same-origin',
-      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal,
+      body: body === undefined ? undefined : raw ? body : JSON.stringify(body),
     })
   } catch (e) {
-    // Geen antwoord (geen netwerk, de server herstart): voor de diagnose als status 0.
-    apiFailed(method, '/api' + path, 0, e?.message)
+    // Geen antwoord (geen netwerk, de server herstart): voor de diagnose als status 0. Zelf afgebroken telt niet.
+    if (e?.name !== 'AbortError') apiFailed(method, '/api' + path, 0, e?.message)
     throw e
   }
   const text = await r.text()

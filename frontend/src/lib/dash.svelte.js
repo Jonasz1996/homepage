@@ -266,7 +266,8 @@ function bigStart(o, prev) {
   if (o.id === 'cron') return o.job ? { job: o.job } : o.filter ? { filter: o.filter } : null
   if (o.id === 'health') return o.tab ? { tab: o.tab } : null
   // Terminal: zonder host of venster blijft het vorige verzoek staan (de terminal deed dat al).
-  if (o.id === 'terminal') return o.hostId || o.sub ? { hostId: o.hostId ?? null, modal: o.sub ?? null } : prev?.initial ?? null
+  // files: de bestanden van die host (📁) in plaats van een shell.
+  if (o.id === 'terminal') return o.hostId || o.sub ? { hostId: o.hostId ?? null, modal: o.sub ?? null, files: !!o.files } : prev?.initial ?? null
   return null
 }
 

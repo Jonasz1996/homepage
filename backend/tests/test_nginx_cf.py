@@ -252,9 +252,9 @@ def test_cloudflare_headers(nginx, name):
     assert _get(nginx, headers, source) == want
 
 
-@pytest.mark.parametrize("path", ["/api/push/geheim", "/api/hooks/geheim", "/api/auth/login"])
+@pytest.mark.parametrize("path", ["/api/push/geheim", "/api/hooks/geheim", "/api/auth/login", "/api/ssh/files/dl/x"])
 def test_elke_locatie(nginx, path):
-    """Ook de push-monitors en webhooks (eigen location) krijgen de vlag."""
+    """Ook de push-monitors, webhooks en downloads van bestanden (eigen location) krijgen de vlag."""
     assert _get(nginx, {"X-Forwarded-For": "203.0.113.9", **CF_IP}, path=path) == _want("203.0.113.9", forged="1")
     assert _get(nginx, {"X-Forwarded-For": "172.70.1.2", **CF_IP}, path=path) == _want("94.224.1.7", via="1")
 
@@ -306,11 +306,11 @@ def _blocked(port: int, source: str, path: str) -> bool:
     return False
 
 
-ALWAYS = ["/api/outside", "/api/auth/login", "/api/ssh/ws", "/"]
+ALWAYS = ["/api/outside", "/api/auth/login", "/api/ssh/ws", "/api/ssh/files/dl/x", "/"]
 LAN_OK = ["/api/healthz", "/api/healthz?x=1", "/api/push/geheim", "/api/push/geheim?status=up", "/api/hooks/geheim"]
 # Ook met omwegen in het pad: nginx kijkt naar het opgeschoonde pad ($uri), net als de locations.
-LAN_NOT = ["/", "/index.html", "/assets/x.js", "/api/outside", "/api/auth/login", "/api/ssh/ws", "/api/healthz/",
-           "/api/healthzx", "/api/push", "/api/push/../auth/login", "/api/push/%2e%2e/auth/login",
+LAN_NOT = ["/", "/index.html", "/assets/x.js", "/api/outside", "/api/auth/login", "/api/ssh/ws", "/api/ssh/files/dl/x",
+           "/api/healthz/", "/api/healthzx", "/api/push", "/api/push/../auth/login", "/api/push/%2e%2e/auth/login",
            "/api/hooks/x/../../auth/login", "//api/auth/login", "/api/./push/../outside"]
 
 

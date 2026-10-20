@@ -12,7 +12,7 @@ from .config import get_settings
 from .db import get_db, get_maker
 from .deps import COOKIE, csrf_guard, secure_cookie
 from .monitoring import watchdog
-from .routers import (apis, attention, auth, backups, buitencheck, capacity, configs, cron, diagnose, exposure, heal, health, hooks, importexport, integrations, layout, logs, monitoring, network, notifications,
+from .routers import (apis, attention, auth, backups, bestanden, buitencheck, capacity, configs, cron, diagnose, exposure, heal, health, hooks, importexport, integrations, layout, logs, monitoring, network, notifications,
                       netmap, nieuweservice, noodplan, npmroutes, oidc, outside, overzicht, planning, restoretest, search, securitycheck, ssh, timeline, upgrade, versie,
                       webpush, zabbix)
 from .routers import push
@@ -52,6 +52,9 @@ async def lifespan(_: FastAPI):
         watch.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await watch
+    # Open bestandenvensters: hun SSH-verbindingen sluiten en halve uploads opruimen.
+    from . import bestanden as files
+    await files.close_all()
 
 
 app = FastAPI(
@@ -70,6 +73,7 @@ app.include_router(notifications.router)
 app.include_router(monitoring.router)
 app.include_router(integrations.router)
 app.include_router(ssh.router)
+app.include_router(bestanden.router)
 app.include_router(logs.router)
 app.include_router(capacity.router)
 app.include_router(timeline.router)
