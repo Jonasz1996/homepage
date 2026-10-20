@@ -56,6 +56,18 @@
   async function loadCron() {
     try { cron = await api('/cron/summary') } catch { /* volgende poging */ }
   }
+  let healthOpen = $state(false)
+  let healthUsed = $state(false)
+  let healthInitial = $state(null)
+  let health = $state({ err: 0, warn: 0 })
+  function openHealth(initial = null) {
+    healthUsed = true
+    healthOpen = true
+    healthInitial = initial
+  }
+  async function loadHealth() {
+    try { health = await api('/health/summary') } catch { /* volgende poging */ }
+  }
   function openTerminal(hostId = null) {
     termUsed = true
     termOpen = true
@@ -85,6 +97,7 @@
     { label: 'logs openen', run: () => openLogs() },
     { label: 'terminal openen', run: () => openTerminal() },
     { label: 'cron: alle geplande taken, agenda, verbanden', run: () => openCron() },
+    { label: 'gezondheid: schijven, temperatuur, snapshots, domeinen, back-up', run: () => openHealth() },
     { label: 'beveiliging: sessies en auditlog', run: () => (modal = { kind: 'security' }) },
     { label: 'capaciteit: opslag, cpu en ram', run: () => (modal = { kind: 'capacity' }) },
     { label: 'tijdlijn: storingen, herstarts, back-ups', run: () => (modal = { kind: 'history' }) },
@@ -198,10 +211,12 @@
   async function loadUpdates() {
     try { updates = await api('/updates') } catch { /* volgende poging */ }
   }
+  const HEALTH_TAB = { hardware: 'schijven', snapshots: 'snapshots', domein: 'domeinen', homepage: 'homepage' }
   function openNotification(n) {
     if (n.source === 'rapport') modal = { kind: 'history', tab: 'report' }
     else if (n.source === 'updates') modal = { kind: 'updates' }
     else if (n.source === 'cron') openCron({ filter: 'probleem' })
+    else if (HEALTH_TAB[n.source]) openHealth({ tab: HEALTH_TAB[n.source] })
     else if (n.service_id) {
       const s = allServices.find((x) => x.id === n.service_id)
       if (s) modal = { kind: 'detail', service: s }
@@ -369,6 +384,7 @@
                     security: 'security' }
     if (what === 'logs') openLogs()
     else if (what === 'cron') openCron()
+    else if (what === 'health') openHealth()
     else if (what === 'terminal') openTerminal()
     else if (kinds[what]) modal = { kind: kinds[what], tab: what === 'report' ? 'report' : undefined }
   }
@@ -381,13 +397,15 @@
     loadUpdates()
     loadNet()
     loadCron()
+    loadHealth()
     const stopCron = poll(loadCron, 120000)
+    const stopHealth = poll(loadHealth, 120000)
     const stopNet = poll(loadNet, 120000)
     const stopWidgets = poll(loadWidgets, 60000)
     const stopUpdates = poll(loadUpdates, 300000)
     const stopClock = poll(() => (now = new Date()), 15000)
     const stopStatus = poll(loadStatus, 30000)
-    return () => { stopClock(); stopStatus(); stopWidgets(); stopUpdates(); stopNet(); stopCron() }
+    return () => { stopClock(); stopStatus(); stopWidgets(); stopUpdates(); stopNet(); stopCron(); stopHealth() }
   })
 </script>
 
@@ -409,6 +427,8 @@
         <button class="mini" onclick={() => (modal = { kind: 'history' })} title="Tijdlijn en weekrapport">history</button>
         <button class="mini" class:cronbad={cron.fout} onclick={() => openCron(cron.fout || cron.gemist ? { filter: 'probleem' } : null)}
                 title="Cronjobs, timers en Proxmox/PBS-jobs van alle machines">cron{#if cron.fout + cron.gemist}<b class="n">{cron.fout + cron.gemist}</b>{/if}</button>
+        <button class="mini" class:cronbad={health.err} onclick={() => openHealth(health.problems?.length ? { tab: 'homepage' } : null)}
+                title="Gezondheid: schijven, temperatuur, snapshots, domeinen en de homepage zelf">hw{#if health.err + health.warn}<b class="n" class:wn={!health.err}>{health.err + health.warn}</b>{/if}</button>
         <button class="mini" class:upd={updates.security} onclick={() => (modal = { kind: 'updates' })}
                 title="Openstaande updates">apt{#if updates.total}<b class="n">{updates.total}</b>{/if}</button>
         <button class="mini" onclick={() => (modal = { kind: 'security' })} title="Beveiliging: sessies, auditlog en wachtwoord">⚿<span class="ml">beveiliging</span></button>
@@ -629,6 +649,11 @@
           onterminal={(hostId) => { cronOpen = false; openTerminal(hostId) }} />
   {/await}
 {/if}
+{#if healthUsed}
+  {#await import('./Health.svelte') then { default: Health }}
+    <Health open={healthOpen} initial={healthInitial} onclose={() => (healthOpen = false)} />
+  {/await}
+{/if}
 {#if logsUsed}
   {#await import('./Logs.svelte') then { default: Logs }}
     <Logs open={logsOpen} initialHost={logsHost} onclose={() => (logsOpen = false)} />
@@ -643,6 +668,7 @@
   .n { margin-left: 5px; color: var(--text-h); font-size: 11px; font-weight: 500 }
   .upd .n { color: var(--mid) }
   .cronbad .n { color: var(--err) }
+  .n.wn { color: var(--mid) }
   .menu { display: contents }
   /* De kopkaart boven de groepen houden: het menu en de meldingen klappen eroverheen open
      (backdrop-filter maakt van elke kaart een eigen stapel). */

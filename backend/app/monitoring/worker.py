@@ -4,12 +4,17 @@ import asyncio
 import logging
 import random
 import time
+from datetime import datetime, timezone
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from ..cron.scan import CRON_EVERY, run_scan as cron_scan
 from ..db import get_engine
+from ..health.domains import DOMAINS_EVERY, run_domains
+from ..health.scan import HEALTH_EVERY, run_health, settings as health_settings
+from ..health.selfcheck import HEARTBEAT_EVERY, SELFCHECK_EVERY, heartbeat, run_selfcheck
+from ..health.snapshots import SNAPSHOTS_EVERY, run_snapshots
 from ..models import Service
 from ..ssh_discovery import SYNC_EVERY, auto_sync
 from .checks import HttpClients, run_check
@@ -37,6 +42,7 @@ class Worker:
         self.tasks: set[asyncio.Task] = set()
         self.self_cleanup = True
         self.http = HttpClients()
+        self.started = datetime.now(timezone.utc).replace(microsecond=0)
 
     async def detect_timescale(self) -> None:
         async with self.maker() as db:
@@ -138,6 +144,26 @@ class Worker:
             await cron_scan(db)
             await db.commit()
 
+    async def health(self, what: str) -> None:
+        """Schijven en temperaturen (10 min), snapshots (6 u), domeinen (dagelijks), de homepage zelf (elk uur)."""
+        async with self.maker() as db:
+            cfg = await health_settings(db)
+            if what == "hardware":
+                await run_health(db)
+            elif what == "snapshots":
+                await run_snapshots(db, self.http, cfg["snapshot_days"])
+            elif what == "domains":
+                if cfg["domains"]:
+                    await run_domains(db, self.http, cfg["domains"])
+            elif what == "selfcheck":
+                await run_selfcheck(db, cfg["offsite"])
+            await db.commit()
+
+    async def beat(self) -> None:
+        async with self.maker() as db:
+            await heartbeat(db, self.started)
+            await db.commit()
+
     def spawn(self, coro) -> None:
         task = asyncio.create_task(coro)
         self.tasks.add(task)
@@ -157,6 +183,12 @@ class Worker:
         last_ip = time.monotonic() - PUBLIC_IP_EVERY - 1
         last_ssh = time.monotonic() - SYNC_EVERY + 120
         last_cron = time.monotonic() - CRON_EVERY + 180
+        start = time.monotonic()
+        health = {"hardware": (HEALTH_EVERY, start - HEALTH_EVERY + 240),
+                  "snapshots": (SNAPSHOTS_EVERY, start - SNAPSHOTS_EVERY + 300),
+                  "domains": (DOMAINS_EVERY, start - DOMAINS_EVERY + 360),
+                  "selfcheck": (SELFCHECK_EVERY, start - SELFCHECK_EVERY + 90)}
+        last_beat = 0.0
         while True:
             try:
                 for sid, check, url in await self.due_services():
@@ -182,6 +214,13 @@ class Worker:
                 if time.monotonic() - last_cron > CRON_EVERY:
                     last_cron = time.monotonic()
                     self.spawn(self.cron())
+                for what, (every, last) in health.items():
+                    if time.monotonic() - last > every:
+                        health[what] = (every, time.monotonic())
+                        self.spawn(self.health(what))
+                if time.monotonic() - last_beat > HEARTBEAT_EVERY:
+                    last_beat = time.monotonic()
+                    self.spawn(self.beat())
                 if time.monotonic() - last_cleanup > 3600:
                     async with self.maker() as db:
                         if self.self_cleanup:

@@ -33,7 +33,7 @@ AUDIT_TITLES = {
     "integration_action_failed": lambda d: f"{d.get('service')}: {d.get('op')} mislukt",
 }
 KINDS = ("storing", "herstart", "backup", "updates", "wijziging", "actie", "capaciteit", "netwerk", "toegang", "log", "cron",
-         "melding")
+         "gezondheid", "melding")
 
 
 def _aware(dt: datetime) -> datetime:

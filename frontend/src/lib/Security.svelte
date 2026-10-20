@@ -107,6 +107,7 @@
     service_secrets_changed: 'geheimen gewijzigd', import: 'import', npm_import: 'NPM-import',
     ssh_defaults_changed: 'standaard SSH-login gewijzigd', ssh_hosts_imported: 'SSH-hosts uit Proxmox', ssh_snippets_changed: 'snippets gewijzigd',
     cron_monitor: 'cronjob bewaken aan/uit', cron_run: 'cronjob zelf gestart', cron_job_changed: 'cronjob aangepast',
+    health_settings: 'gezondheid: instellingen', offsite_key_set: 'wachtzin voor back-upsleutel ingesteld', snapshot_delete: 'snapshot verwijderd',
     ssh_open: 'terminal geopend', ssh_close: 'terminal gesloten', ssh_key_added: 'SSH-sleutel toegevoegd',
     ssh_key_deleted: 'SSH-sleutel verwijderd', ssh_host_added: 'SSH-host toegevoegd', ssh_host_changed: 'SSH-host gewijzigd',
     ssh_host_deleted: 'SSH-host verwijderd', ssh_hostkey_accepted: 'hostsleutel aanvaard',

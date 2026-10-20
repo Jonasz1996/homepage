@@ -109,7 +109,8 @@ async def audit(db: AsyncSession, request: Request, user: User | None, action: s
 # Bron van een melding → soort gebeurtenis op de tijdlijn.
 EVENT_KIND = {"monitor": "storing", "backup": "backup", "capaciteit": "capaciteit", "log": "log", "npm": "wijziging",
               "updates": "updates", "herstart": "herstart", "netwerk": "netwerk", "actie": "actie",
-              "auth": "toegang", "cron": "cron"}
+              "auth": "toegang", "cron": "cron",
+              "hardware": "gezondheid", "snapshots": "gezondheid", "domein": "gezondheid", "homepage": "gezondheid"}
 
 
 def event(db: AsyncSession, kind: str, title: str, body: str | None = None, level: str = "info",

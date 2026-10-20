@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     syslog_target: str = ""
     # Elke 5 minuten het publieke IP opvragen bij Cloudflare (1.1.1.1), melding als het verandert.
     public_ip_check: bool = True
+    # Zelfcontrole: waar de dagelijkse pg_dump staat, en een gemounte map (NAS, PBS, USB) voor de kopie buiten de
+    # container. De worker mag alleen in die map schrijven (ReadWritePaths in homepage-worker.service).
+    backup_dir: Path = Path("/var/backups/homepage")
+    offsite_dir: Path = Path("/mnt/homepage-backup")
 
 
 @lru_cache
