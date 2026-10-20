@@ -11,11 +11,11 @@
 
   const ONE = {
     storing: 'storing', herstart: 'herstart', backup: 'back-up', updates: 'updates', wijziging: 'wijziging', actie: 'actie',
-    capaciteit: 'capaciteit', netwerk: 'netwerk', toegang: 'toegang', log: 'log', melding: 'melding',
+    capaciteit: 'capaciteit', netwerk: 'netwerk', toegang: 'toegang', log: 'log', cron: 'cron', melding: 'melding',
   }
   const KINDS = {
     storing: 'storingen', herstart: 'herstarts', backup: "back-ups", updates: 'updates', wijziging: 'wijzigingen',
-    actie: 'acties', capaciteit: 'capaciteit', netwerk: 'netwerk', toegang: 'toegang', log: 'logs', melding: 'overig',
+    actie: 'acties', capaciteit: 'capaciteit', netwerk: 'netwerk', toegang: 'toegang', log: 'logs', cron: 'cronjobs', melding: 'overig',
   }
 
   // --- Tijdlijn ---

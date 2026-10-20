@@ -32,7 +32,7 @@ AUDIT_TITLES = {
     "log_rule_deleted": lambda d: f"Logregel {d.get('name')} verwijderd",
     "integration_action_failed": lambda d: f"{d.get('service')}: {d.get('op')} mislukt",
 }
-KINDS = ("storing", "herstart", "backup", "updates", "wijziging", "actie", "capaciteit", "netwerk", "toegang", "log",
+KINDS = ("storing", "herstart", "backup", "updates", "wijziging", "actie", "capaciteit", "netwerk", "toegang", "log", "cron",
          "melding")
 
 
