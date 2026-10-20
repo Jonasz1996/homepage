@@ -50,12 +50,13 @@ def _summary(hardware: dict, snaps: dict, domains: dict, selfc: dict, worker: di
         problems.append("back-up onleesbaar")
     if (selfc.get("offsite") or {}).get("enabled") and (selfc.get("offsite") or {}).get("error"):
         problems.append("kopie buiten de container")
-    if (selfc.get("alerts") or {}).get("disk"):
+    disk = sc.disk_alert(selfc)
+    if disk == "err":
         problems.append("schijf bijna vol")
     err = sum(1 for d in disks if d.get("level") == "err") + sum(1 for h in hosts if h.get("error"))
     warn = sum(1 for d in disks if d.get("level") == "warn") + sum(
         1 for h in hosts for p in h.get("pools", []) if p.get("level") in ("warn", "err"))
-    warn += sum(1 for h in hosts if (h.get("throttle") or {}).get("now"))
+    warn += sum(1 for h in hosts if (h.get("throttle") or {}).get("now")) + (disk == "warn")
     hot = [h["name"] for h in hosts if h.get("cpu_temp") is not None and h["cpu_temp"] >= cfg["cpu_warn"]]
     return {"err": err + len(problems) + sum(1 for d in soon if d["days_left"] <= 7),
             "warn": warn + len(old) + len(hot) + sum(1 for d in soon if d["days_left"] > 7),
@@ -81,12 +82,14 @@ async def overview(user: User = Depends(current_user), db: AsyncSession = Depend
     domains, selfc = await _value(db, dom.STATE_KEY), await _value(db, sc.STATE_KEY)
     key = await _value(db, sc.KEY_STATE)
     snaps.pop("warned", None)
+    # Eerst de samenvatting: die kijkt in alerts of de schijf vol is.
+    summ = await _with_cluster(db, _summary(hardware, snaps, domains, selfc, worker, cfg))
     selfc.pop("alerts", None)
     return {"settings": cfg, "hardware": hardware, "snapshots": snaps, "domains": domains, "selfcheck": selfc,
             "worker": worker, "offsite_key": {"set": bool(key.get("blob")), "at": key.get("at")},
             "offsite_dir": str(get_settings().offsite_dir),
             "running": [k for k in _tasks if _running(k)],
-            "summary": await _with_cluster(db, _summary(hardware, snaps, domains, selfc, worker, cfg))}
+            "summary": summ}
 
 
 @router.get("/summary")

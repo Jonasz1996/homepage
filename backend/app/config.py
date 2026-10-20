@@ -11,6 +11,16 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="HOMEPAGE_", env_file=None)
 
     database_url: str = "postgresql+asyncpg://homepage@/homepage"
+    # Maximaal aantal databaseverbindingen per proces. Samen ruim onder max_connections (100) van PostgreSQL, zodat
+    # psql, pg_dump en de hersteltest er nog bij kunnen. Uitleg bij pool_max in db.py.
+    db_pool_api: int = 20
+    db_pool_worker: int = 40
+    db_pool_syslog: int = 5
+    # Een query die langer loopt dan zoveel seconden breekt PostgreSQL af (0 = geen limiet).
+    db_statement_timeout: int = 60
+    # Een transactie die zoveel seconden stilligt, sluit PostgreSQL af: een vangnet voor een taak die een
+    # transactie vergeet af te sluiten (0 = geen limiet).
+    db_idle_in_transaction_timeout: int = 900
     # Fernet-sleutel voor secrets (API-sleutels, TOTP, later SSH-sleutels).
     secret_key_file: Path = Path("/etc/homepage/secret.key")
     # Eenmalige code om het eerste account aan te maken.

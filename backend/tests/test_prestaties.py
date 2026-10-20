@@ -204,7 +204,8 @@ async def test_interrupted_update_runs_marked_on_startup(authed, monkeypatch):
 
 async def test_ensure_state_and_job_lock(authed):
     agen, db = await _db()
-    assert await job_lock(db, "cron")  # SQLite: altijd toegelaten
+    async with job_lock(db, "cron") as ok:
+        assert ok  # niemand anders heeft het slot (SQLite: altijd toegelaten)
     st = await ensure_state(db, "net_gw:1")
     st.value = {"x": 1}
     await db.commit()

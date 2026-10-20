@@ -92,6 +92,9 @@ async def test_planned_maintenance(authed):
     during = datetime(2026, 10, 11, 3, 30).astimezone()
     assert planned.active(win, during)
     assert not planned.active(win, during + timedelta(hours=1))
+    # Loopt de test zelf op zondag tussen 3 en 4 u, dan zette het aanmaken het onderhoud al: opnieuw beginnen.
+    for s in (await db.execute(select(Service).where(Service.group_id == g))).scalars():
+        s.maintenance_until = None
     assert await planned.apply(db, during) == 2
     await db.commit()
     assert (await db.execute(select(Event).where(Event.title == "Gepland onderhoud: back-up"))).scalars().first()

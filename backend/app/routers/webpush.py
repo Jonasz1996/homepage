@@ -18,7 +18,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..deps import audit, client_ip, current_user, notify, recent_auth
+from ..deps import audit, current_user, limit_ip, notify, recent_auth
 from ..models import PushSubscription, User
 from ..monitoring import webpush
 from ..security import LoginLimiter, decrypt_json, encrypt
@@ -184,7 +184,7 @@ async def _rotate(db: AsyncSession, s: PushSubscription, used: str | None) -> st
 @router.put("/subscriptions/renew")
 async def renew_subscription(body: RenewIn, request: Request, db: AsyncSession = Depends(get_db)):
     """Zonder sessie: de service worker doet dit op de achtergrond. Het vernieuwgeheim is het bewijs."""
-    who = f"webpush:{client_ip(request) or '?'}"
+    who = f"webpush:{limit_ip(request)}"
     if renew_limiter.blocked(who, limit=RENEW_MAX_FAILURES):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Te veel pogingen")
     s = await db.get(PushSubscription, body.id)

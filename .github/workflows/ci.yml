@@ -37,7 +37,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: pip install -e ".[dev]"
+      # Dezelfde vaste versies als install.sh in productie, plus pytest; de backend zelf wordt niet geïnstalleerd.
+      - name: Bibliotheken uit requirements(-dev).lock
+        run: pip install --no-deps -r requirements-dev.lock && pip check
+      # Zou pip voor pyproject.toml nog iets anders installeren dan de backend zelf, dan ontbreekt het in de lock.
+      - name: Lock volledig voor pyproject.toml
+        run: |
+          pip install --dry-run --quiet --report /tmp/lock.json ".[dev]"
+          python - <<'EOF'
+          import json, sys
+          meer = [f"{i['metadata']['name']}=={i['metadata']['version']}" for i in json.load(open("/tmp/lock.json"))["install"]
+                  if i["metadata"]["name"] != "homepage"]
+          sys.exit(f"Niet (of met een andere versie) in requirements(-dev).lock: {meer}" if meer else 0)
+          EOF
       - name: Migraties
         run: alembic upgrade head && alembic check
         env:
@@ -103,7 +115,7 @@ jobs:
         run: |
           mkdir -p /tmp/hp
           echo "$HOMEPAGE_SETUP_TOKEN" > /tmp/hp/setup-token
-          pip install -q ./backend
+          pip install -q --no-deps -r backend/requirements.lock
           python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" > /tmp/hp/secret.key
           cd backend && alembic upgrade head
           nohup uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/hp/api.log 2>&1 &

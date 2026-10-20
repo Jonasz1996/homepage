@@ -99,11 +99,6 @@ async def prepare(db: AsyncSession, action: dict, http: HttpClients) -> Callable
     return go_ssh
 
 
-async def perform(db: AsyncSession, action: dict, http: HttpClients) -> str:
-    """Voert de actie uit en geeft een korte beschrijving terug. Gooit IntegrationError of SshFail."""
-    return await (await prepare(db, action, http))()
-
-
 async def check(maker: async_sessionmaker, service_id: int, http: HttpClients,
                 now: datetime | None = None) -> str | None:
     """Na elke check van een service die faalt: moet er een regel afgaan? Geeft het resultaat terug.
@@ -174,6 +169,9 @@ async def check(maker: async_sessionmaker, service_id: int, http: HttpClients,
 
 
 async def test_rule(db: AsyncSession, rule: HealRule, http: HttpClients) -> str:
-    msg = await perform(db, rule.action, http)
+    go = await prepare(db, rule.action, http)
+    # Geen transactie open tijdens de herstart zelf (via SSH tot drie minuten).
+    await db.commit()
+    msg = await go()
     event(db, "actie", f"Zelfherstel getest: {describe(rule.action)}", msg, level="info", service_id=rule.service_id)
     return msg

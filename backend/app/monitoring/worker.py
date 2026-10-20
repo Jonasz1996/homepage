@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from ..cron.scan import CRON_EVERY, run_scan as cron_scan
 from ..db import get_engine
+from ..health.diskguard import GUARD_EVERY, run_diskguard
 from ..health.domains import DOMAINS_EVERY, run_domains
 from ..health.scan import HEALTH_EVERY, run_health, settings as health_settings
 from ..health.selfcheck import HEARTBEAT_EVERY, SELFCHECK_EVERY, heartbeat, run_selfcheck
@@ -233,6 +234,8 @@ class Worker:
                     await run_domains(db, self.http, cfg["domains"])
             elif what == "selfcheck":
                 await run_selfcheck(db, cfg["offsite"])
+            elif what == "diskguard":
+                await run_diskguard(db)
             await db.commit()
 
     async def lan(self) -> None:
@@ -312,7 +315,8 @@ class Worker:
         health = {"hardware": (HEALTH_EVERY, start - HEALTH_EVERY + 240),
                   "snapshots": (SNAPSHOTS_EVERY, start - SNAPSHOTS_EVERY + 300),
                   "domains": (DOMAINS_EVERY, start - DOMAINS_EVERY + 360),
-                  "selfcheck": (SELFCHECK_EVERY, start - SELFCHECK_EVERY + 90)}
+                  "selfcheck": (SELFCHECK_EVERY, start - SELFCHECK_EVERY + 90),
+                  "diskguard": (GUARD_EVERY, start - GUARD_EVERY + 60)}
         last_beat = 0.0
         last_lan = start - devices.DEVICES_EVERY + 45
         last_cluster = start - cluster.CLUSTER_EVERY + 20
@@ -388,7 +392,7 @@ class Worker:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    maker = async_sessionmaker(get_engine(), expire_on_commit=False)
+    maker = async_sessionmaker(get_engine("worker"), expire_on_commit=False)
     asyncio.run(Worker(maker).run())
 
 

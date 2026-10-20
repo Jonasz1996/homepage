@@ -11,8 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
 from ..db import get_db
-from ..deps import (COOKIE, audit, client_country, client_ip, current_session, current_user, notify, optional_session,
-                    recent_auth, secure_cookie)
+from ..deps import (COOKIE, audit, client_country, client_ip, current_session, current_user, limit_ip, notify,
+                    optional_session, recent_auth, secure_cookie)
 from ..models import AuditLog, Session, User
 from ..monitoring import webpush
 from ..security import (
@@ -163,7 +163,7 @@ async def login(data: LoginIn, request: Request, response: Response, db: AsyncSe
     name = data.username.lower()
     # Foute wachtwoorden tellen per IP (streng) en per gebruikersnaam (ruim, zie USER_FAILURE_FACTOR).
     # Foute 2FA-codes na een juist wachtwoord tellen ook streng per gebruiker: die kent het wachtwoord al.
-    ip_key, user_key, totp_key = f"ip:{ip}", f"user:{name}", f"totp:{name}"
+    ip_key, user_key, totp_key = f"ip:{limit_ip(request)}", f"user:{name}", f"totp:{name}"
     if limiter.blocked(ip_key, totp_key) or limiter.blocked(
             user_key, limit=get_settings().login_max_failures * USER_FAILURE_FACTOR):
         raise _too_many()
@@ -196,7 +196,7 @@ async def login(data: LoginIn, request: Request, response: Response, db: AsyncSe
 
 def _confirm_keys(request: Request, user: User) -> tuple[str, str]:
     """Bevestigen (reauth, wachtwoord wijzigen) telt apart van het inloggen, per gebruiker en per IP."""
-    return f"confirm:{user.id}", f"confirm-ip:{client_ip(request) or '?'}"
+    return f"confirm:{user.id}", f"confirm-ip:{limit_ip(request)}"
 
 
 @router.post("/reauth")

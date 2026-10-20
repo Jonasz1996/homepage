@@ -35,12 +35,20 @@ STATE_KEY = "selfcheck"
 KEY_STATE = "offsite_key"
 WORKER_STALE = timedelta(minutes=5)
 BACKUP_STALE = timedelta(hours=36)
-DISK_WARN = 90
+# Schijf: oranje vanaf 75% (dan ruimt de schijfbewaker oude logregels op), rood vanaf 90%.
+DISK_WARN = 75
+DISK_ERR = 90
+GUARD_KEY = "diskguard"
+# Het percentage is gebruikt/totaal. Op ext4 is 5% voor root gereserveerd: PostgreSQL vindt dan al rond 95% geen
+# plaats meer, niet pas bij 100%.
+DISK_FULL = ("Raakt de vrije ruimte op, dan stopt PostgreSQL (op ext4 al rond 95%: de rest is voor root). "
+             "Ruim op of maak de schijf van de CT groter.")
 OFFSITE_KEEP_DAYS = 30
 MIN_PASSPHRASE = 12
 README = """Kopie van de homepage-database, gemaakt door de homepage zelf.
 
-homepage-JJJJ-MM-DD.dump  pg_dump -Fc van de database (dagelijks, {keep} dagen bewaard)
+homepage-JJJJ-MM-DD.dump  pg_dump -Fc van de database (dagelijks, {keep} dagen bewaard), zonder de logregels:
+                          de tabel log_entries is na het terugzetten leeg
 secret.key.enc            de sleutel waarmee wachtwoorden en API-sleutels in de database versleuteld zijn,
                           zelf versleuteld met jouw wachtzin
 
@@ -173,6 +181,22 @@ def disk(path: Path) -> dict | None:
     return {"path": str(path), "total": u.total, "used": u.used, "free": u.free, "pct": round(u.used * 100 / u.total, 1)}
 
 
+def measure_disks(backup_dir: Path) -> list[dict]:
+    """De schijf van de container en die van de back-ups (meestal dezelfde: dan één keer)."""
+    disks = [d for d in (disk(Path("/")), disk(backup_dir) if backup_dir.exists() else None) if d]
+    return list({d["total"]: d for d in disks}.values())
+
+
+def disk_level(pct: float) -> str | None:
+    return "err" if pct >= DISK_ERR else "warn" if pct >= DISK_WARN else None
+
+
+def disk_alert(value: dict) -> str | None:
+    """Ernst van de schijf uit de toestand van de zelfcontrole (vroeger True/False, True was vanaf 90%)."""
+    a = (value.get("alerts") or {}).get("disk")
+    return "err" if a is True else a or None
+
+
 # --- versleutelde sleutel -------------------------------------------------------------------------------------
 
 def _kdf(salt: bytes, n: int) -> Scrypt:
@@ -235,6 +259,11 @@ async def run_selfcheck(db: AsyncSession, offsite_on: bool) -> dict:
     now = datetime.now(timezone.utc).replace(microsecond=0)
     state = await db.get(AppState, STATE_KEY)
     prev = state.value if state else {}
+    ks = await db.get(AppState, KEY_STATE) if offsite_on else None
+    guard = await db.get(AppState, GUARD_KEY)
+    # Alles gelezen: geen transactie open tijdens het nakijken en kopiëren van de dumps (kan minuten duren). Tot de
+    # kopie hieronder dus niets meer lezen: dat opent een nieuwe transactie die tijdens de kopie blijft openstaan.
+    await db.commit()
     dumps = list_dumps(s.backup_dir)
     latest = dumps[0] if dumps else None
     verified = prev.get("verified") or {}
@@ -253,18 +282,22 @@ async def run_selfcheck(db: AsyncSession, offsite_on: bool) -> dict:
                source="homepage")
     alerts["stale"] = stale
 
-    disks = [d for d in (disk(Path("/")), disk(s.backup_dir) if s.backup_dir.exists() else None) if d]
-    disks = list({d["total"]: d for d in disks}.values())
-    full = any(d["pct"] >= DISK_WARN for d in disks)
-    if full and not alerts.get("disk"):
-        d = max(disks, key=lambda d: d["pct"])
-        notify(db, f"Schijf van de homepage is {d['pct']:.0f}% vol", f"{d['path']}: nog {d['free'] // 2**20} MB vrij",
-               level="warn", source="homepage")
-    alerts["disk"] = full
+    disks = measure_disks(s.backup_dir)
+    d = max(disks, key=lambda d: d["pct"], default=None)
+    level = disk_level(d["pct"]) if d else None
+    was = disk_alert({"alerts": alerts})
+    # Eén melding per keer dat de schijf volloopt, en nog één als het van oranje naar rood gaat. Tussen 75 en 90%
+    # meldt de schijfbewaker het al als hij aan het opruimen is (met wat hij opruimde en wat de schijf vult).
+    told = level == "warn" and bool(guard and (guard.value or {}).get("since"))
+    if level and (was is None or (level, was) == ("err", "warn")) and not told:
+        body = f"{d['path']}: nog {d['free'] // 2**20} MB vrij"
+        if level == "err":
+            body += "\n" + DISK_FULL
+        notify(db, f"Schijf van de homepage is {d['pct']:.0f}% vol", body, level=level, source="homepage")
+    alerts["disk"] = level
 
     offsite = {"enabled": offsite_on, "dir": str(s.offsite_dir), "error": None}
     if offsite_on:
-        ks = await db.get(AppState, KEY_STATE)
         blob = ks.value.get("blob") if ks else None
         try:
             offsite.update(await asyncio.to_thread(offsite_copy, s.backup_dir, s.offsite_dir, blob, now))

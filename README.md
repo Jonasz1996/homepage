@@ -11,7 +11,7 @@ Fase 1 en 2 van het [stappenplan](https://claude.ai/code/artifact/fe2b226c-d5ef-
 - export naar YAML, en een versiegeschiedenis van de layout waarmee je elke wijziging terugzet
 - eigen meldingencentrum in de titelbalk (bv. login vanaf een nieuw IP)
 - zoeken met `Ctrl+K` of `/`, Enter opent het eerste resultaat
-- dagelijkse back-up van de database (`/var/backups/homepage`, 14 dagen)
+- dagelijkse back-up van de database, zonder de logregels (`/var/backups/homepage`, de 5 nieuwste blijven)
 
 Fase 3, monitoring:
 
@@ -100,7 +100,9 @@ Fase 5, SSH-terminal (knop `>_` in de titelbalk):
 Fase 6, logs (knop `logs` in de titelbalk):
 
 - eigen syslog-ontvanger op poort 514 (udp en tcp, service `homepage-syslog`), alleen van je eigen netwerken
-- alle regels in PostgreSQL; met TimescaleDB gecomprimeerd na 3 dagen en 30 dagen bewaard
+- alle regels in PostgreSQL; met TimescaleDB gecomprimeerd na 1 dag en 30 dagen bewaard. Zit de schijf van de
+  container boven 75%, dan gaan de oudste logregels eerder weg (de laatste 3 dagen blijven altijd). De dagelijkse
+  back-up neemt de logregels niet mee
 - logviewer: per machine, zoeken, filter op ernst, 1 u tot 30 dagen, histogram, live meekijken
 - meldingsregels (regex, machine, ernst, max. één melding per x minuten) naar het meldingencentrum;
   standaard staat "alles vanaf crit" aan
@@ -257,7 +259,16 @@ Later, deel 3 (Authentik en gsm):
   - **domeinen**: dagelijks vervaldatum, registrar en nameservers via RDAP (rdap.org). Meldingen 30, 7 en 1 dag op
     voorhand, en als de nameservers veranderen. DNS Belgium geeft voor .be geen vervaldatum: vul die zelf in
   - **homepage zelf**: leeft de worker (zo niet, dan meldt de API het), is er een back-up van vannacht en is die
-    leesbaar (`pg_restore --list`), hoe groot is de database per tabel, hoe vol de schijf
+    leesbaar (`pg_restore --list`), hoe groot is de database per tabel, hoe vol de schijf (oranje vanaf 75%, rood
+    vanaf 90%). De back-up van elke nacht (03:30, `homepage-backup`) laat de logregels weg: de tabel is er na het
+    terugzetten wel, maar leeg. De 5 nieuwste blijven staan
+  - **schijfbewaker**: elke 10 minuten kijkt de worker hoe vol de schijf van de container is. Vanaf 75% gooit hij de
+    oudste logregels weg, dag per dag, tot de schijf weer onder 75% zit of alleen de laatste 3 dagen nog over zijn.
+    Daarover één melding; helpt het niet, dan zegt een melding wat de schijf wel vult (de grootste tabellen en de
+    back-ups). Zonder TimescaleDB komt de plaats van verwijderde regels niet terug op de schijf, maar gebruikt
+    PostgreSQL ze opnieuw voor nieuwe regels. Staan er bij de back-ups nog meer dan 5 dagelijkse dumps (net na de
+    update, met alle logregels erin), dan wacht hij onder 90% op de back-up van 03:30 die ze opruimt; niet
+    wachten kan met `systemctl start homepage-backup`
   - **kopie buiten de container**: elk uur de nieuwste dumps naar `/mnt/homepage-backup`, samen met `secret.key`
     versleuteld met een wachtzin die nergens bewaard wordt (scrypt + AES-GCM). Koppel er een NAS-share, PBS-opslag of
     USB-schijf aan, bv. `pct set <id> -mp0 /mnt/nas/homepage,mp=/mnt/homepage-backup` en
@@ -307,8 +318,9 @@ Later, deel 3 (Authentik en gsm):
   NPM-hosts ernaar doorsturen, welke services en welke cronjobs van die machine erbij horen
 - **containerlogs uit Portainer** in de logviewer: elke 30 s de nieuwe regels van elke draaiende container, als
   machine met de containernaam (▣) en app `docker`. Zoeken, filters, live meekijken en meldingsregels werken zoals
-  bij syslog; de ernst komt uit de regel zelf (ERROR, WARN, ...). Uit te zetten per Portainer-tegel met de
-  instelling `logs` = `false`
+  bij syslog; de ernst komt uit de regel zelf (ERROR, WARN, ...). Staat standaard uit, want het vult de kleine schijf
+  van de container snel: zet het aan per Portainer-tegel met de instelling `logs` = `true` (of in de instellingen
+  van de API in API-beheer, dan voor al zijn tegels)
 - **net → apparaten**: elke 5 minuten de ARP- en DHCP-tabel van OPNsense (ISC en Kea), met IP, MAC, fabrikant,
   hostnaam en interface. Wat er bij de eerste keer al is, geldt als gekend; een nieuw MAC-adres daarna geeft een
   melding. Geef apparaten een naam of zet ze op "ken ik". Met **volgen** wordt een apparaat elke 6 uur gescand op
@@ -358,13 +370,15 @@ Later, deel 3 (Authentik en gsm):
   (Gebruikers → API-tokens, voor een gebruiker die alle hosts mag lezen, bv. een eigen gebruiker in een groep met
   leesrechten op alle hostgroepen) en als adres de webinterface (`https://zabbix.jbogaert.be`, zonder
   `/api_jsonrpc.php`). Gebruikt alleen lezen: host.get, trigger.get, item.get en trend.get
-- **van buitenaf** (⚿ → van buitenaf): komt een bezoek via Cloudflare (NPM gaf een `CF-Connecting-IP` door) of
-  vanaf een publiek IP, dan staan de terminal (ook cronjobs starten of bewaken, rsyslog uitrollen, sleutels
-  vastzetten), updates installeren, acties (aan/uit, Wake-on-LAN, zelfherstel, snapshots verwijderen, hersteltest,
-  API-calls die iets veranderen, poortscan) en configuraties downloaden standaard uit. Kijken kan altijd; bovenaan
-  staat dan "buiten". Per functie: uit, één uur aan (ook onderweg, met je 2FA-code) of altijd aan (alleen thuis).
-  Aanzetten geeft een melding. Je LAN, VPN en Tailscale tellen als thuis, net als je eigen publieke IP (wie thuis via
-  Cloudflare surft); extra thuisnetwerken (bv. je IPv6-voorvoegsel) stel je daar ook in, alleen thuis
+- **van buitenaf** (⚿ → van buitenaf): komt een bezoek via Cloudflare (NPM kreeg het met een `CF-Connecting-IP` van
+  Cloudflare of een tunnel), met een vervalste header van Cloudflare of vanaf een publiek IP, dan staan de terminal
+  (ook cronjobs starten of bewaken, rsyslog uitrollen, sleutels vastzetten), updates installeren, acties (aan/uit,
+  Wake-on-LAN, zelfherstel, snapshots verwijderen, hersteltest, API-calls die iets veranderen, poortscan) en
+  configuraties downloaden standaard uit. Kijken kan altijd; bovenaan staat dan "buiten". Per functie: uit, één uur
+  aan (ook onderweg, met je 2FA-code) of altijd aan (alleen thuis). Aanzetten geeft een melding. Je LAN, VPN en
+  Tailscale tellen als thuis, net als je eigen publieke IP (wie thuis via Cloudflare surft); extra thuisnetwerken (bv.
+  je IPv6-voorvoegsel) stel je daar ook in, alleen thuis. Een vervalste header van Cloudflare telt altijd als van
+  buitenaf en geeft een melding (zie Installeren → Cloudflare)
 - **net → firewall**: welke IP's en poorten het dashboard echt gebruikt (uit de tegels, API-beheer, de SSH-hosts en
   de DNS-server), wat er binnenkomt, en een voorstel voor aliassen en regels in OPNsense voor de firewall tussen de
   VLAN's. Bovenaan staat of er een slot voor het dashboard stond bij het laatste bezoek van buitenaf: Cloudflare
@@ -406,7 +420,8 @@ Optimalisaties:
 
 - je blijft ingelogd zolang je het dashboard gebruikt (sessie verlengt zich, na 14 dagen niets doen moet je opnieuw inloggen)
 - geen verzoeken naar de server zolang het tabblad verborgen is, bij terugkeren meteen verse status
-- achter Cloudflare zien login-limiet, audit-log en meldingen het echte IP van de bezoeker
+- achter Cloudflare zien login-limiet, audit-log en meldingen het echte IP van de bezoeker (alleen als NPM het
+  verzoek van Cloudflare of een tunnel kreeg)
 - gzip, beveiligingsheaders op elke response, installeerbaar als app (manifest)
 - de worker hergebruikt HTTP-verbindingen en ruimt verlopen sessies, oude audit-regels (1 jaar) en gelezen meldingen (30 dagen) op
 
@@ -558,8 +573,43 @@ Testen kan meteen op `http://<IP>`. Via NPM met HTTPS is de sessiecookie automat
 (`HOMEPAGE_COOKIE_SECURE=auto`).
 
 Zet in Proxmox de firewall van de container aan en laat poort 80 alleen toe vanaf NPM (192.168.0.245).
-nginx gelooft de `X-Forwarded-For`- en `CF-Connecting-IP`-headers enkel van dat adres, maar zo kan
-niemand op het LAN NPM en Cloudflare omzeilen. Laat daarnaast poort 514 (udp en tcp) toe vanaf je LAN voor de logs.
+nginx gelooft de `X-Forwarded-For`-header enkel van dat adres, maar zo kan niemand op het LAN NPM en Cloudflare
+omzeilen. Laat daarnaast poort 514 (udp en tcp) toe vanaf je LAN voor de logs.
+
+**Cloudflare.** De headers van Cloudflare (`CF-Connecting-IP` met het echte IP, `CF-IPCountry` met het land,
+`Cf-Access-Jwt-Assertion` van Cloudflare Access) gelooft nginx alleen als het verzoek van NPM komt én NPM het zelf
+van Cloudflare of een tunnel kreeg. Dat werkt voor allebei:
+
+- een poortdoorverwijzing naar NPM via de proxy van Cloudflare (oranje wolk): NPM krijgt het verzoek van een adres
+  van Cloudflare. Die adresblokken staan in `deploy/nginx-map.conf` (bron: https://www.cloudflare.com/ips)
+- een Cloudflare Tunnel: cloudflared (in een CT of op de host van NPM) komt van een privé-adres bij NPM. Laat de
+  tunnel naar NPM wijzen, niet rechtstreeks naar de container. Op de host van NPM mag dat `localhost`, het
+  Docker-netwerk of het LAN-adres van NPM zelf zijn
+
+Wie NPM rechtstreeks bereikt (poort 443 zonder Cloudflare, of vanaf het LAN) en zelf zo'n header meestuurt, bv. met
+je eigen publieke IP om als thuis te tellen, telt als van buitenaf en geeft een melding "Vervalste Cloudflare-header"
+(hoogstens één per uur). Het dashboard neemt dan het adres waarvan NPM het verzoek kreeg: van het internet is dat
+het echte IP. NPM gelooft wel `X-Real-IP` van je LAN (en van Cloudflare), dus een toestel op je LAN kan NPM een
+ander adres voorwenden: een adres van Cloudflare geeft niets (wie op het LAN zit, is toch thuis), een ander publiek
+IP telt als vervalst. Daarom delen alle vervalste verzoeken één limiet op mislukte logins en bevestigingen, welk IP
+ze ook tonen. Cloudflare haalt een `X-Real-IP` van de bezoeker weg; alleen een Worker kan er een meesturen. Wil je
+dat NPM voor het dashboard nooit `X-Real-IP` gelooft, zet dan in NPM bij de proxy host van het dashboard onder
+*Advanced* `set_real_ip_from 192.0.2.255/32;` (een adres dat nooit verbindt: zo vervangt die host de lijst die NPM
+vertrouwt). De logs van NPM en een access list op die host zien dan het adres van Cloudflare of cloudflared in
+plaats van dat van de bezoeker; het dashboard ziet nog altijd het echte IP.
+
+De adressen van Cloudflare zijn van alle klanten van Cloudflare. Wil je zeker zijn dat alleen je eigen zone bij NPM
+komt, gebruik dan alleen een Cloudflare Tunnel (geen poortdoorverwijzing naar 443) of Authenticated Origin Pulls.
+
+Krijg je de melding voor je eigen bezoek via Cloudflare, dan heeft Cloudflare een nieuw adresblok. Dat hoort in
+de repository: vul het aan in `deploy/nginx-map.conf` en werk bij (op het kanaal stabiel pas met een nieuwe
+release). Een wijziging in `/opt/homepage` zelf verdwijnt bij de update. Tot dan kan het tijdelijk op de server:
+voeg het blok toe in `/etc/nginx/conf.d/homepage-map.conf` en doe `nginx -t && systemctl reload nginx` (de
+volgende update overschrijft dat bestand weer).
+
+`X-authentik-username` (de forward-auth van Authentik in NPM) telt alleen van NPM en niet samen met een vervalste
+header. NPM geeft hem op een host zonder forward-auth ook van de bezoeker door, dus het dashboard gebruikt hem
+alleen voor de veiligheidscheck "slot voor het dashboard".
 
 **Bewaar een kopie van `/etc/homepage/secret.key`.** Zonder die sleutel zijn de opgeslagen
 wachtwoorden, API-sleutels en 2FA-geheimen onleesbaar.
@@ -572,14 +622,33 @@ Hetzelfde bootstrap-commando opnieuw, of:
 bash /opt/homepage/deploy/bootstrap.sh
 ```
 
-Voor elke update maakt het script een kopie van de database (de laatste 3 blijven in `/var/backups/homepage`).
+Zo verloopt een update:
+
+1. terwijl het dashboard gewoon blijft draaien, worden de bibliotheken en de frontend gebouwd. De bibliotheken
+   hebben vaste versies (`backend/requirements.lock`, dezelfde als in de tests) en krijgen een eigen venv per lock:
+   `/opt/homepage/.venv-…`, met `.venv` als verwijzing naar de actieve. Verandert de lock niet, dan blijft de venv
+   dezelfde. De frontend komt in `frontend/dist.new`
+2. is er niet genoeg plaats in `/var/backups/homepage` voor een kopie van de database, dan stopt het hier
+3. de diensten stoppen en het script maakt een kopie van de database (`voor-update-*.dump`, de laatste 2 blijven staan)
+4. het schakelt over op de nieuwe venv en frontend (de vorige blijven staan) en werkt de database bij
+5. de diensten starten weer
+
+Mislukt de kopie of het bijwerken van de database (of al iets daarvoor), dan wordt de update netjes afgebroken: de
+vorige versie van de code, de bibliotheken en de frontend komt terug, de database is niet veranderd (alle migraties
+lopen samen in één transactie) en de diensten draaien weer. Het script zegt wat er misliep: los dat op en voer de
+update opnieuw uit. Pas als de database bijgewerkt is, onthoudt het de nieuwe versie (in `/etc/homepage/versie`).
+Een onderbroken update (Ctrl+C, de SSH-verbinding valt weg) wordt net zo afgebroken; was de database op dat moment
+al bijgewerkt, dan blijft de nieuwe versie staan en starten de diensten (voer de update dan nog eens uit).
+
 Na de update toont het dashboard één keer wat er nieuw is en wat je zelf moet instellen (later: `Ctrl+K` →
 "wat is er nieuw").
 
 **Een update terugdraaien**: `homepage-terugzetten` in de container zet de vorige versie terug, met de database
-van vlak voor die update. Wat sinds die update in het dashboard veranderde, gaat verloren; de database van
-daarvoor wordt eerst nog bewaard als `voor-terugzetten-*.dump`. `homepage-terugzetten --lijst` toont welke kopieën er
-zijn. Het werkt vanaf de tweede update met deze versie van het script.
+van vlak voor die update en met de bibliotheken die die versie had (de venv van daarvoor blijft daarvoor staan). Wat
+sinds die update in het dashboard veranderde, gaat verloren; de database van daarvoor wordt eerst nog bewaard als
+`voor-terugzetten-*.dump` (alleen de laatste blijft staan). `homepage-terugzetten --lijst` toont welke kopieën er
+zijn. Stopt het terugzetten halverwege, bijvoorbeeld omdat de frontend niet gebouwd kon worden, los de fout op en
+voer het opnieuw uit. Het werkt vanaf de tweede update met deze versie van het script.
 
 Een release maken (voor `stabiel`): een tag `vX.Y.Z` op `main`, bv. `git tag v1.1.0 && git push origin v1.1.0`.
 
@@ -596,12 +665,16 @@ De database is PostgreSQL. TimescaleDB wordt al geïnstalleerd voor de ping- en 
 ## Ontwikkelen
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -e "backend[dev]"
+python3 -m venv .venv && .venv/bin/pip install -r backend/requirements-dev.lock   # vaste versies, zoals in productie
 cd backend && ../.venv/bin/pytest            # tests op SQLite
 HOMEPAGE_TEST_DATABASE_URL=postgresql+asyncpg://... ../.venv/bin/pytest   # tests op PostgreSQL
 
 cd frontend && npm ci && npm run dev         # proxy't /api naar 127.0.0.1:8000
 ```
+
+Een bibliotheek toevoegen of bijwerken: in `backend/pyproject.toml`, en daarna `backend/requirements.lock` (en
+`requirements-dev.lock`) opnieuw maken, zoals bovenaan dat bestand staat. De tests en de CI controleren dat de lock
+bij `pyproject.toml` past.
 
 Zoals in productie, met TimescaleDB (de CI doet dit ook): het schema komt dan uit de migraties en de tests zetten
 oude metingen in gecomprimeerde chunks.
