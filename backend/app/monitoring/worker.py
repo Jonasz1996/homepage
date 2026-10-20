@@ -24,7 +24,7 @@ from .network import NETWORK_EVERY, PUBLIC_IP_EVERY, sample_power, watch_gateway
 from .report import weekly_notification
 from .updates import UPDATES_EVERY, run_updates
 from .upgrade import auto_updates, cleanup_snapshots, mark_interrupted
-from . import configs, devices, healing
+from . import cluster, configs, devices, healing, planned
 from .watchers import watch_npm, watch_pbs
 
 log = logging.getLogger("homepage.worker")
@@ -249,6 +249,7 @@ class Worker:
                   "selfcheck": (SELFCHECK_EVERY, start - SELFCHECK_EVERY + 90)}
         last_beat = 0.0
         last_lan = start - devices.DEVICES_EVERY + 45
+        last_cluster = start - cluster.CLUSTER_EVERY + 20
         while True:
             try:
                 for sid, check, url in await self.due_services():
@@ -278,12 +279,16 @@ class Worker:
                     if time.monotonic() - last > every:
                         health[what] = (every, time.monotonic())
                         self.job(f"health:{what}", lambda what=what: self.health(what))
+                if time.monotonic() - last_cluster > cluster.CLUSTER_EVERY:
+                    last_cluster = time.monotonic()
+                    self.job("cluster", lambda: self.step("clusterstatus", lambda db: cluster.run_cluster(db, self.http)))
                 if time.monotonic() - last_lan > devices.DEVICES_EVERY:
                     last_lan = time.monotonic()
                     self.job("lan", self.lan)
                 if time.monotonic() - last_beat > HEARTBEAT_EVERY:
                     last_beat = time.monotonic()
                     self.job("beat", self.beat)
+                    self.job("planned", lambda: self.step("gepland onderhoud", planned.apply))
                     self.job("config_copy", self.config_copy)
                     self.job("auto_updates", self.auto_updates)
                 if time.monotonic() - last_cleanup > 3600:

@@ -13,6 +13,7 @@ from ..config import get_settings
 from ..db import get_db
 from ..deps import audit, current_user, recent_auth
 from ..health import domains as dom, scan as hw, selfcheck as sc, snapshots as snap
+from ..monitoring import cluster
 from ..integrations import IntegrationError
 from ..models import AppState, Reading, Service, User
 from .integrations import clients
@@ -61,6 +62,12 @@ def _summary(hardware: dict, snaps: dict, domains: dict, selfc: dict, worker: di
             "hot": hot, "problems": problems}
 
 
+async def _with_cluster(db: AsyncSession, summ: dict) -> dict:
+    """Problemen met de Proxmox-cluster tellen mee in de knop hw (tabblad cluster)."""
+    c = cluster.summary(await _value(db, cluster.STATE_KEY))
+    return {**summ, "err": summ["err"] + c["err"], "warn": summ["warn"] + c["warn"], "cluster": c}
+
+
 @router.get("")
 async def overview(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     cfg = await hw.settings(db)
@@ -75,7 +82,7 @@ async def overview(user: User = Depends(current_user), db: AsyncSession = Depend
             "worker": worker, "offsite_key": {"set": bool(key.get("blob")), "at": key.get("at")},
             "offsite_dir": str(get_settings().offsite_dir),
             "running": [k for k in _tasks if _running(k)],
-            "summary": _summary(hardware, snaps, domains, selfc, worker, cfg)}
+            "summary": await _with_cluster(db, _summary(hardware, snaps, domains, selfc, worker, cfg))}
 
 
 @router.get("/summary")
@@ -84,8 +91,8 @@ async def summary(user: User = Depends(current_user), db: AsyncSession = Depends
     cfg = await hw.settings(db)
     worker = await sc.check_worker(db)
     await db.commit()
-    return _summary(await _value(db, hw.STATE_KEY), await _value(db, snap.STATE_KEY),
-                    await _value(db, dom.STATE_KEY), await _value(db, sc.STATE_KEY), worker, cfg)
+    return await _with_cluster(db, _summary(await _value(db, hw.STATE_KEY), await _value(db, snap.STATE_KEY),
+                                            await _value(db, dom.STATE_KEY), await _value(db, sc.STATE_KEY), worker, cfg))
 
 
 @router.get("/temps")

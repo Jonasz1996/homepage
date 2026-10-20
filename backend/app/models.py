@@ -306,6 +306,9 @@ class Event(Base):
     service_id: Mapped[int | None] = mapped_column(ForeignKey("services.id", ondelete="SET NULL"), index=True)
     # Extra gegevens, bv. {"down_s": 340} bij een herstelde storing.
     data: Mapped[dict] = mapped_column(Json, default=dict)
+    # Incidentnotitie: wat de oorzaak was en hoe het opgelost werd (vooral bij een storing).
+    note: Mapped[str | None] = mapped_column(Text)
+    note_at: Mapped[datetime | None]
 
 
 class CronJob(Base):
@@ -476,3 +479,44 @@ class Device(Base):
     ports_at: Mapped[datetime | None]
     first_seen: Mapped[datetime] = mapped_column(default=utcnow)
     last_seen: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class MaintenanceWindow(Base):
+    """Gepland onderhoud voor een service of een hele groep: eenmalig, elke dag of op vaste weekdagen."""
+
+    __tablename__ = "maintenance_windows"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(80))
+    service_id: Mapped[int | None] = mapped_column(ForeignKey("services.id", ondelete="CASCADE"), index=True)
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), index=True)
+    # once | daily | weekly
+    repeat: Mapped[str] = mapped_column(String(8), default="once")
+    # Eenmalig: begin als tijdstip. Herhalend: het uur en de minuut tellen (lokale tijd), plus de weekdagen.
+    start: Mapped[datetime]
+    minutes: Mapped[int] = mapped_column(Integer)
+    # 0 = maandag ... 6 = zondag
+    weekdays: Mapped[list] = mapped_column(Json, default=list)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class WebhookSource(Base):
+    """Een eigen webhook-adres voor een externe tool (Proxmox, PBS, Uptime Kuma, ...): wat binnenkomt wordt
+    een melding in het meldingencentrum."""
+
+    __tablename__ = "webhook_sources"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(80))
+    # proxmox | pbs | uptimekuma | homeassistant | generic
+    kind: Mapped[str] = mapped_column(String(16), default="generic")
+    # Zoekindex: sha256 van het token; het token zelf staat versleuteld zodat het adres opnieuw te tonen is.
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    token: Mapped[str] = mapped_column(Text)
+    service_id: Mapped[int | None] = mapped_column(ForeignKey("services.id", ondelete="SET NULL"))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    last_at: Mapped[datetime | None]
+    count: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(300))

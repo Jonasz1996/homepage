@@ -5,11 +5,12 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import select
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..deps import current_user
+from ..deps import audit, current_user
 from ..models import AppState, AuditLog, Event, Revision, Service, User
 from ..monitoring.report import build_report, week_bounds
 from ..monitoring.updates import KEY as UPDATES_KEY, run_updates
@@ -57,7 +58,8 @@ async def timeline(before: datetime | None = None, kind: list[str] | None = Quer
         q = q.where(Event.kind.in_(kinds))
     for e in (await db.execute(q)).scalars():
         items.append({"id": f"e{e.id}", "ts": _aware(e.ts), "kind": e.kind, "level": e.level, "title": e.title,
-                      "body": e.body, "service_id": e.service_id, "data": e.data or {}})
+                      "body": e.body, "service_id": e.service_id, "data": e.data or {}, "event_id": e.id,
+                      "note": e.note})
 
     if "wijziging" in kinds and not service_id:
         q = select(Revision.id, Revision.created_at, Revision.summary).order_by(Revision.id.desc()).limit(limit)
@@ -78,6 +80,42 @@ async def timeline(before: datetime | None = None, kind: list[str] | None = Quer
     items.sort(key=lambda i: i["ts"], reverse=True)
     items = items[:limit]
     return {"items": items, "more": len(items) == limit, "kinds": KINDS}
+
+
+class NoteIn(BaseModel):
+    note: str = Field(default="", max_length=4000)
+
+
+@router.put("/timeline/events/{eid}/note")
+async def put_note(eid: int, body: NoteIn, request: Request, user: User = Depends(current_user),
+                   db: AsyncSession = Depends(get_db)):
+    """Incidentnotitie: wat de oorzaak was en hoe je het oploste. Leeg = notitie weg."""
+    e = await db.get(Event, eid)
+    if e is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Niet gevonden")
+    e.note = body.note.strip() or None
+    e.note_at = datetime.now(timezone.utc) if e.note else None
+    await audit(db, request, user, "incident_note", title=e.title[:80])
+    await db.commit()
+    return {"event_id": e.id, "note": e.note, "note_at": e.note_at}
+
+
+@router.get("/services/{sid}/incidents")
+async def incidents(sid: int, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Vorige storingen van deze service, met hun notities eerst: bij een nieuwe storing meteen zien wat toen hielp."""
+    since = datetime.now(timezone.utc) - timedelta(days=365)
+    base = select(Event).where(Event.service_id == sid, Event.kind == "storing", Event.ts >= since)
+    noted = (await db.execute(base.where(Event.note.is_not(None)).order_by(Event.ts.desc()).limit(10))).scalars()
+    recent = (await db.execute(base.order_by(Event.ts.desc()).limit(10))).scalars()
+    count = (await db.execute(select(func.count()).select_from(base.where(Event.level == "err").subquery()))).scalar()
+    seen, out = set(), []
+    for e in [*noted, *recent]:
+        if e.id in seen:
+            continue
+        seen.add(e.id)
+        out.append({"event_id": e.id, "ts": _aware(e.ts), "level": e.level, "title": e.title, "body": e.body,
+                    "note": e.note, "note_at": e.note_at, "data": e.data or {}})
+    return {"items": out[:12], "count_year": count}
 
 
 @router.get("/report")

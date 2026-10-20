@@ -45,6 +45,9 @@ async def csrf_guard(conn: HTTPConnection) -> None:
     if conn.scope["type"] != "http":
         return
     request = conn
+    # Webhooks komen van andere tools (Proxmox, Uptime Kuma, ...): het geheime adres is daar de beveiliging.
+    if request.scope["path"].startswith("/api/hooks/"):
+        return
     if request.scope["method"] in UNSAFE and request.headers.get(CSRF_HEADER) != "homepage":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "CSRF-header ontbreekt")
 
@@ -111,7 +114,8 @@ EVENT_KIND = {"monitor": "storing", "backup": "backup", "capaciteit": "capacitei
               "updates": "updates", "herstart": "herstart", "netwerk": "netwerk", "actie": "actie",
               "auth": "toegang", "cron": "cron",
               "hardware": "gezondheid", "snapshots": "gezondheid", "domein": "gezondheid", "homepage": "gezondheid",
-              "herstel": "actie", "config": "wijziging", "apparaat": "netwerk"}
+              "herstel": "actie", "config": "wijziging", "apparaat": "netwerk",
+              "cluster": "gezondheid", "webhook": "melding"}
 
 
 def event(db: AsyncSession, kind: str, title: str, body: str | None = None, level: str = "info",
