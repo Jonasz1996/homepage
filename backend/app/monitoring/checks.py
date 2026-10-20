@@ -91,14 +91,16 @@ async def check_ping(target: str) -> Outcome:
 class HttpClients:
     """Twee gedeelde clients (met en zonder certificaatcontrole), zodat verbindingen hergebruikt worden."""
 
-    def __init__(self) -> None:
+    def __init__(self, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self._clients: dict[bool, httpx.AsyncClient] = {}
+        self.transport = transport  # alleen voor tests
 
     def get(self, insecure: bool) -> httpx.AsyncClient:
         if insecure not in self._clients:
             self._clients[insecure] = httpx.AsyncClient(
                 verify=not insecure, timeout=TIMEOUT, follow_redirects=True,
                 limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+                transport=self.transport,
             )
         return self._clients[insecure]
 

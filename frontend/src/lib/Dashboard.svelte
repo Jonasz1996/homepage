@@ -22,6 +22,7 @@
   let now = $state(new Date())
   let searchEl = $state()
   let status = $state({})
+  let widgets = $state({})
 
   // Slepen: wat er gesleept wordt en waar het zou landen.
   let drag = $state(null) // { kind: 'service' | 'group' | 'page', id }
@@ -73,6 +74,9 @@
 
   async function loadStatus() {
     try { status = await api('/status') } catch { /* volgende poging over 30 s */ }
+  }
+  async function loadWidgets() {
+    try { widgets = await api('/widgets') } catch { /* volgende poging over 60 s */ }
   }
 
   async function act(fn) {
@@ -221,9 +225,11 @@
   onMount(() => {
     load()
     loadStatus()
+    loadWidgets()
+    const stopWidgets = poll(loadWidgets, 60000)
     const stopClock = poll(() => (now = new Date()), 15000)
     const stopStatus = poll(loadStatus, 30000)
-    return () => { stopClock(); stopStatus() }
+    return () => { stopClock(); stopStatus(); stopWidgets() }
   })
 </script>
 
@@ -296,7 +302,7 @@
     <Card title={`grep -i "${query.trim()}"`} class="results">
       <div class="tiles pad">
         {#each results as s (s.id)}
-          <ServiceTile service={s} status={status[s.id]} {editing} onedit={(svc) => (modal = { kind: 'service', service: svc })}
+          <ServiceTile service={s} status={status[s.id]} widget={widgets[s.id]} {editing} onedit={(svc) => (modal = { kind: 'service', service: svc })}
                        ondetail={(svc) => (modal = { kind: 'detail', service: svc })} />
         {:else}
           <p class="hint">Niets gevonden.</p>
@@ -342,6 +348,7 @@
                   <ServiceTile
                     service={s}
                     status={status[s.id]}
+                    widget={widgets[s.id]}
                     {editing}
                     onedit={(svc) => (modal = { kind: 'service', service: svc })}
                     ondetail={(svc) => (modal = { kind: 'detail', service: svc })}
@@ -378,7 +385,7 @@
     groupId={modal.groupId}
     groups={groupOptions}
     onclose={() => (modal = null)}
-    onsaved={load}
+    onsaved={() => { load(); setTimeout(loadWidgets, 300) }}
   />
 {:else if modal?.kind === 'page'}
   <NameForm
@@ -399,6 +406,8 @@
 {:else if modal?.kind === 'detail'}
   <ServiceDetail
     service={modal.service}
+    groups={groupOptions}
+    onchanged={load}
     onclose={() => (modal = null)}
     onedit={(svc) => (modal = { kind: 'service', service: svc })}
   />

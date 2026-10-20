@@ -27,6 +27,10 @@
   let busy = $state(false)
   let iconBroken = $state(false)
 
+  let integrations = $state([])
+  api('/integrations').then((r) => (integrations = r)).catch(() => {})
+  let integ = $derived(integrations.find((i) => i.name === type))
+
   let preview = $derived(iconUrl(icon))
   $effect(() => { preview; iconBroken = false })
 
@@ -152,8 +156,19 @@
           <label class="lbl" for="sf-type">Type</label>
           <input id="sf-type" bind:value={type} list="sf-types" />
           <datalist id="sf-types">
-            {#each ['link', 'proxmox', 'proxmoxbackupserver', 'adguard', 'npm', 'plex', 'tautulli', 'portainer', 'homeassistant', 'authentik', 'uptimekuma', 'grafana', 'gitea', 'nextcloud', 'json'] as t}<option value={t}></option>{/each}
+            <option value="link">gewone snelkoppeling</option>
+            {#each integrations as i}<option value={i.name}>{i.label}</option>{/each}
           </datalist>
+          {#if integ}
+            <div class="help ihelp">
+              <b>{integ.label}</b>, instellingen:
+              {#each Object.entries(integ.config) as [k, v]}<div><code>{k}</code> {v}</div>{/each}
+              geheimen:
+              {#each Object.entries(integ.secrets) as [k, v]}<div><code>{k}</code> {v}</div>{/each}
+            </div>
+          {:else if type && type !== 'link'}
+            <p class="help">Voor dit type is er nog geen integratie; de tegel werkt als gewone snelkoppeling.</p>
+          {/if}
         </div>
         <div class="full">
           <label class="lbl" for="sf-config">Instellingen (JSON, niet geheim)</label>
@@ -207,6 +222,8 @@
   .adv[open] summary::before { content: "▾ " }
   .secret { margin-bottom: 6px }
   .tls { margin-top: 10px }
+  .ihelp div { padding-left: 10px }
+  .ihelp code { color: #d6e6ff }
   .secret code { font-size: 12.5px; color: #d6e6ff }
   .secret code.gone { text-decoration: line-through; color: var(--dim) }
   .right { margin-left: auto }
