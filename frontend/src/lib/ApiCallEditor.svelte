@@ -2,6 +2,7 @@
   import { untrack } from 'svelte'
   import { api, withReauth } from './api.js'
   import { FORMATS, SHOW, fieldValue, guess, lastKey, level, pick, starred } from './apicalls.js'
+  import { ask } from './dialog.svelte.js'
   import { value } from './format.js'
   import JsonTree from './JsonTree.svelte'
 
@@ -39,7 +40,7 @@
   }
 
   async function tryIt() {
-    if (method !== 'GET' && !window.confirm(`Dit voert de ${method}-call echt uit op ${conn.name}. Doorgaan?`)) return
+    if (method !== 'GET' && !(await ask(`Dit voert de ${method}-call echt uit op ${conn.name}. Doorgaan?`, { ok: 'Uitvoeren', danger: true }))) return
     busy = true
     error = ''
     try {
@@ -63,7 +64,7 @@
   }
 
   async function del() {
-    if (!window.confirm(`Call '${call.name}' verwijderen?`)) return
+    if (!(await ask(`Call '${call.name}' verwijderen?`, { ok: 'Verwijderen', danger: true }))) return
     try {
       await api(`/apis/calls/${call.id}`, { method: 'DELETE' })
       onsaved?.()
@@ -123,7 +124,11 @@
       {#each ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as m}<option>{m}</option>{/each}
     </select>
     <span class="base" title={conn.url + prefix}>{conn.url.replace(/^https?:\/\//, '')}{prefix}</span>
-    <input class="path" bind:value={path} placeholder="/api/v3/queue" aria-label="Pad" onkeydown={(e) => e.key === 'Enter' && tryIt()} />
+    <input class="path" bind:value={path} placeholder="/api/v3/queue" aria-label="Pad"
+           onkeydown={(e) => {
+             // Zonder preventDefault klikt dezelfde Enter meteen de knop van de vraag die tryIt() opent.
+             if (e.key === 'Enter') { e.preventDefault(); tryIt() }
+           }} />
     <button class="btn" onclick={tryIt} disabled={busy}>▶ probeer</button>
   </div>
   <p class="hint">Pad achter het adres van de API. <code>{'{node}'}</code> en andere <code>{'{namen}'}</code> komen uit de instellingen van de tegel.

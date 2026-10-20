@@ -29,6 +29,10 @@ DETAIL_TTL = 30
 ACTIONS_TTL = 60
 # (service_id, soort) -> (verloopt, vingerafdruk, resultaat)
 _cache: dict[tuple[int, str], tuple[float, tuple, dict]] = {}
+# (service_id, soort) -> wanneer de berekening begon die er laatst in schreef (of wanneer een actie het wiste). Een
+# oudere berekening die pas daarna afloopt (twee tabbladen, of het overzicht dat met vers opnieuw rekent terwijl de
+# vorige nog loopt), overschrijft zo geen nieuwer resultaat.
+_since: dict[tuple[int, str], float] = {}
 
 
 def _fingerprint(s: Service) -> tuple:
@@ -46,14 +50,17 @@ async def _cached(s: Service, kind: str, ttl: int, fn) -> dict:
     hit = _cache.get(key)
     if hit and hit[0] > time.monotonic() and hit[1] == fp:
         return hit[2]
+    begin = time.monotonic()
     try:
         result = await fn(_integration(s))
     except IntegrationError as e:
         result = {"error": str(e)}
     except Exception as e:  # een kapotte API mag het dashboard niet breken
         result = {"error": f"Onverwacht antwoord ({type(e).__name__})"}
-    # Fouten korter bewaren, zodat een herstelde service snel weer verschijnt.
-    _cache[key] = (time.monotonic() + (ttl if "error" not in result else 10), fp, result)
+    if begin >= _since.get(key, float("-inf")):
+        # Fouten korter bewaren, zodat een herstelde service snel weer verschijnt.
+        _cache[key] = (time.monotonic() + (ttl if "error" not in result else 10), fp, result)
+        _since[key] = begin
     return result
 
 
@@ -141,6 +148,7 @@ async def integration_action(service_id: int, data: ActionIn, request: Request,
     await db.commit()
     for kind in ("detail", "summary", "actions"):
         _cache.pop((s.id, kind), None)
+        _since[(s.id, kind)] = time.monotonic()
     return {"ok": True, "message": message}
 
 

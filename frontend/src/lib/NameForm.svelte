@@ -1,5 +1,6 @@
 <script>
   import { untrack } from 'svelte'
+  import { ask } from './dialog.svelte.js'
   import Modal from './Modal.svelte'
 
   // Formulier voor pagina's en groepen: naam + optioneel icoon.
@@ -25,7 +26,7 @@
   }
 
   async function del() {
-    if (!confirm(`'${initial.name}' en alles erin verwijderen? Je kunt dit terugzetten via Versies.`)) return
+    if (!(await ask(`'${initial.name}' en alles erin verwijderen? Je kunt dit terugzetten via Versies.`, { ok: 'Verwijderen', danger: true }))) return
     try {
       await ondelete()
       onclose()

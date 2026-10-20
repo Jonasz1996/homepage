@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte'
   import { api, withReauth } from './api.js'
+  import { ask, askText } from './dialog.svelte.js'
   import Modal from './Modal.svelte'
 
   // Webhooks: Proxmox, PBS, Uptime Kuma, Home Assistant en andere tools sturen hun meldingen naar het meldingencentrum.
@@ -61,11 +62,11 @@
     } catch (e) { error = e.message }
   }
   async function rotate(w) {
-    if (!confirm(`Nieuw adres voor ${w.name}? Het oude werkt meteen niet meer; pas het aan in ${KINDS[w.kind]}.`)) return
+    if (!(await ask(`Nieuw adres voor ${w.name}? Het oude werkt meteen niet meer; pas het aan in ${KINDS[w.kind]}.`, { ok: 'Vernieuwen', danger: true }))) return
     try { await withReauth(() => api(`/webhooks/${w.id}/rotate`, { method: 'POST' })); await load() } catch (e) { error = e.message }
   }
   async function remove(w) {
-    if (!confirm(`Webhook ${w.name} verwijderen?`)) return
+    if (!(await ask(`Webhook ${w.name} verwijderen?`, { ok: 'Verwijderen', danger: true }))) return
     try { await withReauth(() => api(`/webhooks/${w.id}`, { method: 'DELETE' })); await load() } catch (e) { error = e.message }
   }
   async function test(w) {
@@ -78,7 +79,17 @@
   }
   async function copy(text, key) {
     try { await navigator.clipboard.writeText(text); copied = key; setTimeout(() => (copied = null), 1500) }
-    catch { prompt('Kopieer:', text) }
+    catch {
+      // Zoals prompt(): de tekst staat meteen geselecteerd zodra het venster het veld focust, klaar om te kopiëren.
+      const pick = (e) => {
+        if (!(e.target instanceof HTMLInputElement) || e.target.value !== text) return
+        e.target.select()
+        document.removeEventListener('focusin', pick)
+      }
+      document.addEventListener('focusin', pick)
+      await askText('Kopieer:', { value: text, ok: 'Klaar' })
+      document.removeEventListener('focusin', pick)
+    }
   }
   const ago = (ts) => (ts ? new Date(ts).toLocaleString('nl-BE', { dateStyle: 'short', timeStyle: 'short' }) : 'nog nooit')
 </script>

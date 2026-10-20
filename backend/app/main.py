@@ -13,7 +13,8 @@ from .db import get_db, get_maker
 from .deps import COOKIE, csrf_guard, secure_cookie
 from .monitoring import watchdog
 from .routers import (apis, attention, auth, backups, capacity, configs, cron, diagnose, heal, health, hooks, importexport, integrations, layout, logs, monitoring, network, notifications,
-                      netmap, npmroutes, oidc, outside, planning, restoretest, search, securitycheck, ssh, timeline, upgrade, versie, webpush, zabbix)
+                      netmap, npmroutes, oidc, outside, overzicht, planning, restoretest, search, securitycheck, ssh, timeline, upgrade, versie,
+                      webpush, zabbix)
 from .routers import push
 
 log = logging.getLogger("homepage.api")
@@ -90,6 +91,7 @@ app.include_router(push.router)
 app.include_router(webpush.router)
 app.include_router(npmroutes.router)
 app.include_router(diagnose.router)
+app.include_router(overzicht.router)
 
 
 @app.middleware("http")

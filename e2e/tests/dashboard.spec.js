@@ -17,8 +17,20 @@ test.beforeAll(async ({ browser }) => {
   page.on('pageerror', (e) => errors.push(String(e)))
   // Mislukte verzoeken (401 voor het inloggen, iconen van buiten) zijn geen fout in de interface.
   page.on('console', (m) => m.type() === 'error' && !/Failed to load resource/.test(m.text()) && errors.push(m.text()))
-  page.on('dialog', (d) => d.accept())
+  // confirm() en prompt() werken niet in een WebView (de Android-app): het dashboard gebruikt eigen vensters. Een
+  // ingebouwde dialoog van de browser is dus een fout.
+  page.on('dialog', (d) => { errors.push(`ingebouwde dialoog: ${d.message()}`); d.dismiss() })
 })
+
+// Een venster uit een menu in de titelbalk openen (Infrastructuur, Beheer, Instellingen).
+async function menu(name, item) {
+  await page.getByRole('button', { name: new RegExp(`^${name}`) }).click()
+  await page.getByRole('menuitem', { name: new RegExp(`^${item}`) }).click()
+}
+// Een vraag van het dashboard zelf (in plaats van confirm()) beantwoorden.
+async function bevestig(knop) {
+  await page.getByRole('dialog', { name: 'bevestigen' }).getByRole('button', { name: knop }).click()
+}
 
 test.afterAll(async () => { await page?.close() })
 
@@ -42,7 +54,7 @@ test('eerste account met 2FA', async () => {
 })
 
 test('uitloggen en inloggen met wachtwoord en 2FA-code', async () => {
-  await page.locator('button[title="Uitloggen"]').click()
+  await menu('Instellingen', 'Uitloggen')
   await expect(page.locator('#u')).toBeVisible()
   await page.fill('#u', USER)
   await page.fill('#p', 'fout-wachtwoord-123')
@@ -64,8 +76,7 @@ test('bewerkmodus: pagina, groep en tegel', async () => {
   await page.getByRole('button', { name: 'Opslaan' }).click()
   await expect(page.getByRole('button', { name: 'Thuis' })).toBeVisible()
 
-  const edit = page.getByRole('button', { name: '✎ bewerken' })
-  if (await edit.isVisible()) await edit.click()
+  await menu('Beheer', 'Dashboard bewerken')
   await page.getByRole('button', { name: '+ groep' }).click()
   await page.fill('#nf-name', 'Infra')
   await page.getByRole('button', { name: 'Opslaan' }).click()
@@ -88,33 +99,128 @@ test('bewerkmodus: pagina, groep en tegel', async () => {
   await page.reload()
   await expect(page.locator('.tile', { hasText: 'OPNsense' })).toBeVisible()
 
-  await page.getByRole('button', { name: '✎ bewerken' }).click()
+  await menu('Beheer', 'Dashboard bewerken')
   await page.locator('.tile', { hasText: 'OPNsense' }).click()
   await page.getByRole('button', { name: 'Verwijderen' }).click()
+  await bevestig('Verwijderen')
   await expect(page.locator('.tile', { hasText: 'OPNsense' })).toHaveCount(0)
   await page.getByRole('button', { name: '✓ klaar' }).click()
 })
 
-// Elke knop in de titelbalk opent een venster dat weer dicht kan.
-const WINDOWS = ['Aandacht', 'Logs', 'SSH-terminal', 'Capaciteit', 'Internet', 'Tijdlijn', 'Configuratiewijzigingen', 'API-beheer',
-  'Cronjobs', 'Gezondheid', 'Openstaande updates', 'Beveiliging']
-
-for (const name of WINDOWS) {
-  test(`titelbalk: ${name}`, async () => {
-    await page.locator(`header button[title^="${name}"], .bar button[title^="${name}"], button.mini[title^="${name}"]`).first().click()
-    const close = page.locator('button[aria-label="Sluiten"], button[aria-label$=" sluiten"]:not([aria-label="Sessie sluiten"])')
-      .filter({ visible: true })
-    await expect(close.first()).toBeVisible()
-    await close.last().click()
-    await expect(close).toHaveCount(0)
-  })
+// Elk venster uit de menu's in de titelbalk opent en kan weer dicht.
+const MENUS = {
+  Infrastructuur: ['Gezondheid', 'Capaciteit', 'Netwerk', 'Cronjobs', 'Logs', 'Tijdlijn'],
+  Beheer: ['Terminal', 'Updates', 'Gepland onderhoud', 'Configuratiewijzigingen', 'Hersteltest'],
+  Instellingen: ['Beveiliging', 'API-beheer', 'Webhooks', 'Meldingen op je gsm', 'Instellingen-checklist', 'Wat is er nieuw'],
 }
+const closeButtons = () => page.locator('button[aria-label="Sluiten"], button[aria-label$=" sluiten"]:not([aria-label="Sessie sluiten"])')
+  .filter({ visible: true })
+
+for (const [name, items] of Object.entries(MENUS)) {
+  for (const item of items) {
+    test(`${name}: ${item}`, async () => {
+      await menu(name, item)
+      const close = closeButtons()
+      await expect(close.first()).toBeVisible()
+      await close.last().click()
+      await expect(close).toHaveCount(0)
+    })
+  }
+}
+
+test('titelbalk: Aandacht', async () => {
+  await page.locator('button.mini[title^="Aandacht"]').click()
+  await expect(closeButtons().first()).toBeVisible()
+  await closeButtons().last().click()
+  await expect(closeButtons()).toHaveCount(0)
+})
+
+test('terugknop sluit het bovenste venster, niet de pagina', async () => {
+  const url = page.url()
+  await menu('Infrastructuur', 'Gezondheid')
+  await expect(page.getByRole('button', { name: 'Gezondheid sluiten' })).toBeVisible()
+  await page.locator('.tabs button', { hasText: 'back-ups' }).click()
+  await page.goBack()
+  await expect(page.getByRole('button', { name: 'Gezondheid sluiten' })).toBeHidden()
+  expect(page.url()).toBe(url)
+  // Venster boven venster: terug sluit eerst het bovenste (de standaardlogin boven de terminal).
+  await menu('Beheer', 'Terminal')
+  await page.getByRole('button', { name: '⚙ standaard' }).click()
+  const n = await page.locator('[role=dialog]:visible').count()
+  expect(n).toBeGreaterThan(1)
+  await page.goBack()
+  await expect(page.locator('[role=dialog]:visible')).toHaveCount(n - 1)
+  await expect(page.getByRole('button', { name: 'Terminal sluiten' })).toBeVisible()
+  await page.goBack()
+  await expect(page.getByRole('button', { name: 'Terminal sluiten' })).toBeHidden()
+  // Zelf sluiten met ✕ laat geen extra stap achter: terug gaat daarna echt terug.
+  await menu('Instellingen', 'Webhooks')
+  await closeButtons().last().click()
+  await expect(closeButtons()).toHaveCount(0)
+  expect(await page.evaluate(() => history.state?.hpLaag || false)).toBe(false)
+  // Een menu sluit ook met terug.
+  await page.getByRole('button', { name: /^Beheer/ }).click()
+  await expect(page.getByRole('menu')).toBeVisible()
+  await page.goBack()
+  await expect(page.getByRole('menu')).toHaveCount(0)
+  expect(page.url()).toBe(url)
+})
+
+test('een groot venster houdt zijn tab als een ander groot venster opent en sluit', async () => {
+  await page.getByRole('searchbox', { name: 'Zoeken' }).fill('cluster: quorum')
+  await page.getByRole('searchbox', { name: 'Zoeken' }).press('Enter')
+  const health = page.getByRole('dialog', { name: 'Gezondheid' })
+  await expect(health.getByRole('tab', { name: /^cluster/ })).toHaveAttribute('aria-selected', 'true')
+  await health.getByRole('tab', { name: /^temperatuur/ }).click()
+  // Gezondheid bedekt de titelbalk: Logs via Ctrl+K.
+  await page.keyboard.press('Control+k')
+  await page.keyboard.type('syslog van je machines')
+  await page.keyboard.press('Enter')
+  await page.getByRole('button', { name: 'Logs sluiten' }).click()
+  await expect(health.getByRole('tab', { name: /^temperatuur/ })).toHaveAttribute('aria-selected', 'true')
+  await page.getByRole('button', { name: 'Gezondheid sluiten' }).click()
+  await expect(closeButtons()).toHaveCount(0)
+})
+
+test('Escape sluit alleen het venster dat bovenaan ligt', async () => {
+  const zoek = async (q) => {
+    await page.keyboard.press('Control+k')
+    await page.keyboard.type(q)
+    await page.keyboard.press('Enter')
+  }
+  await menu('Beheer', 'Terminal')
+  await page.getByRole('button', { name: '⚙ standaard' }).click()
+  const standaard = page.getByRole('dialog', { name: 'ssh --defaults' })
+  await expect(standaard).toBeVisible()
+  // Gezondheid erboven: Escape laat de standaardlogin eronder staan.
+  await zoek('cluster: quorum')
+  await expect(page.getByRole('button', { name: 'Gezondheid sluiten' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(standaard).toHaveCount(1)
+  // De terminal weer naar voren: nu sluit Escape de standaardlogin wel.
+  await zoek('ssh naar je machines')
+  await page.keyboard.press('Escape')
+  await expect(standaard).toHaveCount(0)
+  await page.getByRole('button', { name: 'Terminal sluiten' }).click()
+  await page.getByRole('button', { name: 'Gezondheid sluiten' }).click()
+  await expect(closeButtons()).toHaveCount(0)
+})
+
+test('verbinding weg: balk met opnieuw proberen, daarna weer bijgewerkt', async () => {
+  // Het dashboard ververst elke 30 seconden: binnen die tijd komt de balk.
+  await page.route('**/api/overzicht**', (r) => r.abort())
+  await expect(page.getByRole('alert').filter({ hasText: 'Geen verbinding met de homepage' })).toBeVisible({ timeout: 45000 })
+  await page.unroute('**/api/overzicht**')
+  await page.getByRole('button', { name: 'opnieuw proberen' }).click()
+  await expect(page.getByText('Geen verbinding met de homepage')).toHaveCount(0)
+  await expect(page.getByText(/bijgewerkt \d\d:\d\d/)).toBeVisible()
+})
 
 test('aandacht: wat nu mis is en de instellingen-checklist', async () => {
   await page.locator('button.mini[title^="Aandacht"]').click()
   const win = page.getByRole('dialog')
-  await expect(win.getByRole('button', { name: /^nu/ })).toBeVisible()
-  await win.getByRole('button', { name: /^instellingen/ }).click()
+  await expect(win.getByRole('tab', { name: /^nu/ })).toBeVisible()
+  await win.getByRole('tab', { name: /^instellingen/ }).click()
   await expect(win.locator('.row', { hasText: 'SSH-standaardlogin' })).toBeVisible({ timeout: 20000 })
   await win.getByRole('button', { name: 'Sluiten' }).click()
   await expect(win).toHaveCount(0)
@@ -137,9 +243,9 @@ test('diagnose: één bestand onder !, zonder wachtwoord', async () => {
 })
 
 test('proef: wat de nachtelijke updates zouden doen', async () => {
-  await page.locator('button.mini[title^="Openstaande updates"]').click()
+  await menu('Beheer', 'Updates')
   const win = page.getByRole('dialog')
-  await win.getByRole('button', { name: /^'s nachts/ }).click()
+  await win.getByRole('tab', { name: /^'s nachts/ }).click()
   await win.getByRole('button', { name: 'proef van vannacht' }).click()
   await expect(win.getByText('er is niets uitgevoerd')).toBeVisible()
   await expect(win.getByText('Er zou niets gebeuren.')).toBeVisible()
@@ -148,7 +254,7 @@ test('proef: wat de nachtelijke updates zouden doen', async () => {
 })
 
 test('hw: back-ups en cluster zonder Proxmox-tegel', async () => {
-  await page.locator('button.mini[title^="Gezondheid"]').click()
+  await menu('Infrastructuur', 'Gezondheid')
   await page.locator('.tabs button', { hasText: 'back-ups' }).click()
   await expect(page.getByText('Nog geen gegevens.')).toBeVisible()
   await page.locator('.tabs button', { hasText: 'cluster' }).click()
@@ -157,14 +263,14 @@ test('hw: back-ups en cluster zonder Proxmox-tegel', async () => {
 })
 
 test('één node \'s nachts uit', async () => {
-  await page.locator('button.mini[title^="Capaciteit"]').click()
+  await menu('Infrastructuur', 'Capaciteit')
   await page.getByRole('button', { name: 'voorstel berekenen' }).click()
   await expect(page.getByText('Nog geen Proxmox-tegel')).toBeVisible()
   await page.keyboard.press('Escape')
 })
 
 test('kuma vervangen: push-check, foute header en pauzeren', async () => {
-  await page.getByRole('button', { name: '✎ bewerken' }).click()
+  await menu('Beheer', 'Dashboard bewerken')
   await page.getByRole('button', { name: 'Service toevoegen aan Infra' }).click()
   await page.fill('#sf-name', 'Back-up')
   await page.locator('summary', { hasText: 'Monitoring' }).click()
@@ -184,6 +290,7 @@ test('kuma vervangen: push-check, foute header en pauzeren', async () => {
   await page.getByRole('button', { name: 'push-adres maken' }).click()
   await expect(page.locator('.pm code').first()).toContainText('/api/push/')
   await page.getByRole('button', { name: '⏸ pauzeren' }).click()
+  await page.getByRole('dialog', { name: 'bevestigen' }).getByRole('button', { name: 'Pauzeren' }).click()
   await expect(page.getByRole('button', { name: '▶ hervatten' }).first()).toBeVisible()
   await expect(page.getByText('De check staat gepauzeerd')).toBeVisible()
   // Bewerken vanuit het detailvenster laat de pauze staan.
@@ -200,9 +307,13 @@ test('kuma vervangen: push-check, foute header en pauzeren', async () => {
 
 test('gsm: knoppen achter het menu', async () => {
   await page.setViewportSize({ width: 390, height: 844 })
-  const menu = page.getByRole('button', { name: 'Menu' })
-  await expect(menu).toBeVisible()
-  await menu.click()
-  await expect(page.locator('button.mini[title^="Logs"]')).toBeVisible()
+  const knop = page.getByRole('button', { name: 'Menu' })
+  await expect(knop).toBeVisible()
+  await expect(page.getByRole('button', { name: /^Infrastructuur/ })).toBeHidden()
+  await knop.click()
+  await expect(page.getByRole('menuitem', { name: /^Logs/ })).toBeVisible()
+  await expect(page.getByRole('menuitem', { name: /^Uitloggen/ })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('menu')).toHaveCount(0)
   await page.setViewportSize({ width: 1400, height: 900 })
 })

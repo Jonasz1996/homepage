@@ -2,11 +2,13 @@
   import { storm } from './fx.js'
   import { untrack } from 'svelte'
   import { api, poll, withReauth } from './api.js'
+  import { ask } from './dialog.svelte.js'
   import IntegrationPanel from './IntegrationPanel.svelte'
   import LatencyChart from './LatencyChart.svelte'
   import Modal from './Modal.svelte'
   import Notes from './Notes.svelte'
   import RestoreTest from './RestoreTest.svelte'
+  import Tabs from './Tabs.svelte'
   import ZabbixPanel from './ZabbixPanel.svelte'
   import HealRules from './HealRules.svelte'
   import Incidents from './Incidents.svelte'
@@ -26,7 +28,7 @@
 
   let wolMsg = $state('')
   async function wake() {
-    if (!confirm(`${service.name} wekken met Wake-on-LAN?`)) return
+    if (!(await ask(`${service.name} wekken met Wake-on-LAN?`, { ok: 'Wekken' }))) return
     try {
       wolMsg = '✓ ' + (await withReauth(() => api(`/services/${service.id}/wol`, { method: 'POST' }))).message
       storm()
@@ -34,6 +36,7 @@
   }
 
   const RANGES = ['1h', '24h', '7d', '30d', '1y']
+  const RANGE_TABS = RANGES.map((r) => ({ key: r, label: r }))
   let range = $state('24h')
   let data = $state(null)
   let error = $state('')
@@ -107,7 +110,7 @@
   let paused = $state(untrack(() => !!service.check?.paused))
   let pauseMsg = $state('')
   async function setPaused(on) {
-    if (on && !confirm(`De check van ${service.name} pauzeren? Zolang hij gepauzeerd is, merkt het dashboard niet als dit uitvalt.`)) return
+    if (on && !(await ask(`De check van ${service.name} pauzeren? Zolang hij gepauzeerd is, merkt het dashboard niet als dit uitvalt.`, { ok: 'Pauzeren', danger: true }))) return
     try {
       await withReauth(() => api(`/services/${service.id}/pause`, { method: 'POST', body: { paused: on } }))
       paused = on
@@ -225,11 +228,7 @@
         </div>
       {/if}
 
-      <div class="tabs" role="tablist">
-        {#each RANGES as r}
-          <button class="mini" class:on={range === r} role="tab" aria-selected={range === r} onclick={() => (range = r)}>{r}</button>
-        {/each}
-      </div>
+      <div class="rng"><Tabs items={RANGE_TABS} bind:value={range} label="Periode" /></div>
       <span class="lbl">Latency (ms) en uptime</span>
       <LatencyChart points={data.points} bucketSeconds={data.bucket_seconds} />
 
@@ -304,7 +303,7 @@
   .route { margin: 8px 0 0; font-size: 12px; color: var(--muted) }
   .route.warn { color: var(--mid) }
   .kpi.down b, .kpi.bad b { color: var(--err) }
-  .tabs { display: flex; gap: 6px; margin: 16px 0 0 }
+  .rng { margin-top: 16px }
   .tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 6px }
   .tbl th { text-align: left; color: var(--muted); font-weight: 400; font-size: 11.5px; padding: 5px 6px; border-bottom: 1px solid rgba(255, 255, 255, .1) }
   .tbl td { padding: 5px 6px; border-bottom: 1px solid rgba(255, 255, 255, .05); vertical-align: top; word-break: break-word }

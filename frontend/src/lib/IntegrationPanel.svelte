@@ -2,6 +2,7 @@
   import { storm } from './fx.js'
   import { onMount } from 'svelte'
   import { ApiError, api, poll } from './api.js'
+  import { ask } from './dialog.svelte.js'
   import { bytes, value } from './format.js'
   import NpmImport from './NpmImport.svelte'
   import NpmRoutes from './NpmRoutes.svelte'
@@ -34,7 +35,7 @@
   })
 
   async function run(a) {
-    if (a.confirm && !confirm(`${a.label}?`)) return
+    if (a.confirm && !(await ask(`${a.label}?`, { ok: 'Uitvoeren', danger: true }))) return
     busy = true
     msg = ''
     try {

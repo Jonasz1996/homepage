@@ -1,6 +1,7 @@
 <script>
   import { untrack } from 'svelte'
   import { api, withReauth } from './api.js'
+  import { ask } from './dialog.svelte.js'
   import ProefPlan from './ProefPlan.svelte'
 
   // Zelfherstel voor één service: "als hij N checks na elkaar down is, voer deze actie uit", met een limiet per uur.
@@ -78,17 +79,17 @@
   }
 
   async function toggleProef(r) {
-    if (r.dry_run && !confirm(`Regel "${r.describe}" echt laten uitvoeren als ${service.name} down is?`)) return
+    if (r.dry_run && !(await ask(`Regel "${r.describe}" echt laten uitvoeren als ${service.name} down is?`, { ok: 'Echt maken', danger: true }))) return
     try { await put(r, { dry_run: !r.dry_run }); await load() } catch (e) { msg = e.message }
   }
 
   async function test(r) {
-    if (!confirm(`Nu echt uitvoeren: ${r.describe}?\nDit herstart echt, ook bij een regel op alleen proef. Met "proef" zie je eerst wat er zou gebeuren.`)) return
+    if (!(await ask(`Nu echt uitvoeren: ${r.describe}?\nDit herstart echt, ook bij een regel op alleen proef. Met "proef" zie je eerst wat er zou gebeuren.`, { ok: 'Uitvoeren', danger: true }))) return
     try { msg = '✓ ' + (await withReauth(() => api(`/heal/${r.id}/test`, { method: 'POST' }))).message } catch (e) { msg = '✕ ' + e.message }
   }
 
   async function remove(r) {
-    if (!confirm(`Regel "${r.describe}" verwijderen?`)) return
+    if (!(await ask(`Regel "${r.describe}" verwijderen?`, { ok: 'Verwijderen', danger: true }))) return
     try { await withReauth(() => api(`/heal/${r.id}`, { method: 'DELETE' })); await load() } catch (e) { msg = e.message }
   }
 

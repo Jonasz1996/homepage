@@ -3,9 +3,12 @@
   import Cluster from './Cluster.svelte'
   import SecurityCheck from './SecurityCheck.svelte'
   import ProefPlan from './ProefPlan.svelte'
+  import Tabs from './Tabs.svelte'
+  import Window from './Window.svelte'
   import { onMount, untrack } from 'svelte'
   import { api, poll, withReauth } from './api.js'
   import { rel } from './cronfmt.js'
+  import { ask } from './dialog.svelte.js'
   import { bytes } from './format.js'
 
   // Gezondheid van de hardware en van de homepage zelf: schijven (SMART, ZFS), temperaturen en throttling,
@@ -73,9 +76,21 @@
   let rt = $derived(sc.restore || {})
   let rtTables = $derived(Object.entries(rt.tables || {}))
   let s = $derived(data?.summary)
+  // Tabbladen met een teller: oranje opletten, rood probleem.
+  const problems = (x) => (x?.err + x?.warn) || 0
+  let tabs = $derived([
+    { key: 'schijven', label: 'schijven' },
+    { key: 'temperatuur', label: 'temperatuur' },
+    { key: 'snapshots', label: 'snapshots', count: s?.old_snapshots, level: 'warn' },
+    { key: 'domeinen', label: 'domeinen', count: s?.domains_soon, level: 'warn' },
+    { key: 'cluster', label: 'cluster', count: problems(s?.cluster), level: s?.cluster?.err ? 'err' : 'warn' },
+    { key: 'backups', label: 'back-ups', count: problems(s?.backups) && (s.backups.err || s.backups.warn), level: s?.backups?.err ? 'err' : 'warn' },
+    { key: 'homepage', label: 'homepage zelf', count: s?.problems?.length, level: 'err' },
+    { key: 'beveiliging', label: 'beveiliging' },
+  ])
 
   async function delSnap(x) {
-    if (!confirm(`Snapshot "${x.name}" van ${x.guest} (${x.vmid}) verwijderen? Dit kan niet ongedaan gemaakt worden.`)) return
+    if (!(await ask(`Snapshot "${x.name}" van ${x.guest} (${x.vmid}) verwijderen? Dit kan niet ongedaan gemaakt worden.`, { ok: 'Verwijderen', danger: true }))) return
     busy = `${x.vmid}/${x.name}`
     try {
       await withReauth(() => api('/health/snapshots/delete', { method: 'POST', body: { service_id: x.service_id, node: x.node, type: x.type, vmid: x.vmid, name: x.name } }))
@@ -142,286 +157,261 @@
   let hidden = $state(new Set())
 </script>
 
-<div class="ov" class:hidden={!open}>
-  <div class="win card glow">
-    <div class="bar">
-      <div class="dots"><i></i><i></i><i></i></div>
-      <span class="title">root@jbogaert:~# smartctl --alles &amp;&amp; zpool status</span>
-      <div class="right">
-        <button class="mini x" onclick={onclose} aria-label="Gezondheid sluiten">✕</button>
-      </div>
-    </div>
+<Window {open} title="smartctl --alles &amp;&amp; zpool status" label="Gezondheid" {onclose}>
+  <Tabs items={tabs} bind:value={tab} pad />
 
-    <div class="tabs">
-      {#each [['schijven', 'schijven'], ['temperatuur', 'temperatuur'], ['snapshots', 'snapshots'], ['domeinen', 'domeinen'], ['cluster', 'cluster'], ['backups', 'back-ups'], ['homepage', 'homepage zelf'], ['beveiliging', 'beveiliging']] as [k, label]}
-        <button class="mini" class:on={tab === k} onclick={() => (tab = k)}>{label}
-          {#if k === 'snapshots' && s?.old_snapshots}<b class="n w">{s.old_snapshots}</b>{/if}
-          {#if k === 'domeinen' && s?.domains_soon}<b class="n w">{s.domains_soon}</b>{/if}
-          {#if k === 'backups' && s?.backups?.err + s?.backups?.warn}<b class="n" class:e={s.backups.err} class:w={!s.backups.err}>{s.backups.err || s.backups.warn}</b>{/if}
-          {#if k === 'cluster' && s?.cluster?.err + s?.cluster?.warn}<b class="n" class:e={s.cluster.err} class:w={!s.cluster.err}>{s.cluster.err + s.cluster.warn}</b>{/if}
-          {#if k === 'homepage' && s?.problems?.length}<b class="n e">{s.problems.length}</b>{/if}
-        </button>
+  {#if error}<p class="err pad">{error}</p>{/if}
+
+  <div class="body">
+  {#if tab === 'schijven'}
+    <div class="head">
+      <span class="hint">Elke 10 minuten via SSH (als root) op elke fysieke machine. Slapende harde schijven worden niet gewekt.</span>
+      <span class="when">{running.has('hardware') ? 'bezig…' : data?.hardware?.checked_at ? `bekeken ${ago(data.hardware.checked_at)}` : 'nog niet bekeken'}</span>
+      <button class="mini" disabled={running.has('hardware')} onclick={() => scan('hardware')}>⟳ nu</button>
+    </div>
+    {#if data && !hosts.length}
+      <p class="hint pad">Nog geen machines. De gezondheid gebruikt de SSH-hosts uit de terminal (⟳ pve) met hun standaard login;
+        open elke node één keer om de hostsleutel te bevestigen. Containers en VM's worden overgeslagen.</p>
+    {/if}
+    <div class="grid">
+      {#each hosts as h (h.key)}
+        <div class="host lv-{h.level}">
+          <div class="hh">
+            <b>{h.name}</b>
+            <small>{h.model || h.host}</small>
+            <span class="right">
+              {#if h.cpu_temp != null}<span class="t" class:hot={h.cpu_temp >= data.settings.cpu_warn}>cpu {h.cpu_temp.toFixed(0)} °C</span>{/if}
+              <span class="pill lv-{h.level}">{h.error ? 'niet bereikbaar' : LEVEL[h.level]}</span>
+            </span>
+          </div>
+          {#if h.error}<p class="e small">{h.error}</p>{/if}
+          {#if h.throttle?.now?.length}<p class="w small">⚡ nu: {h.throttle.now.join(', ')} — een Pi 5 wil een voeding van 5 V / 5 A.</p>
+          {:else if h.throttle?.since_boot?.length}<p class="dim small">sinds opstarten: {h.throttle.since_boot.join(', ')}</p>{/if}
+          {#if !h.error && h.smartctl === false}<p class="dim small">smartctl ontbreekt: <code>apt install smartmontools</code></p>{/if}
+          {#each h.disks || [] as d (d.key)}
+            <div class="disk">
+              <i class="dot lv-{d.standby && !d.why?.length ? 'sleep' : d.level}" title={d.standby ? 'slaapt' : LEVEL[d.level]}></i>
+              <span class="dn"><b>{d.model || d.dev}</b><small>{d.dev} · {d.ssd ? (d.protocol === 'NVMe' ? 'NVMe' : 'SSD') : d.ssd === false ? 'HDD' : '?'} · {bytes(d.size)}{d.serial ? ` · ${d.serial}` : ''}</small></span>
+              <span class="dv">
+                {#if d.temp != null}<span class:hot={d.temp >= data.settings.disk_warn}>{d.temp} °C</span>{/if}
+                {#if d.wear_used != null}<span title="Versleten volgens de schijf zelf">{d.wear_used}% versleten</span>{/if}
+                {#if d.hours != null}<span title="Uren in gebruik">{age(d.hours)}</span>{/if}
+                {#if d.standby}<span class="dim">slaapt</span>{/if}
+              </span>
+              {#if d.why?.length}<span class="why lv-{d.level}">{d.why.join(' · ')}</span>{/if}
+            </div>
+          {/each}
+          {#each h.pools || [] as p (p.name)}
+            <div class="disk pool">
+              <i class="dot lv-{p.level}"></i>
+              <span class="dn"><b>zfs {p.name}</b><small>{p.health} · {p.cap}% vol · frag {p.frag}%</small></span>
+              <span class="dv"><span>{p.scrubbing ? 'scrub bezig' : p.scrub_at ? `scrub ${day(p.scrub_at)}` : 'nooit gescrubd'}</span></span>
+              {#if p.why?.length}<span class="why lv-{p.level}">{p.why.join(' · ')}</span>{/if}
+            </div>
+          {/each}
+        </div>
       {/each}
     </div>
 
-    {#if error}<p class="err pad">{error}</p>{/if}
-
-    <div class="body">
-    {#if tab === 'schijven'}
-      <div class="head">
-        <span class="hint">Elke 10 minuten via SSH (als root) op elke fysieke machine. Slapende harde schijven worden niet gewekt.</span>
-        <span class="when">{running.has('hardware') ? 'bezig…' : data?.hardware?.checked_at ? `bekeken ${ago(data.hardware.checked_at)}` : 'nog niet bekeken'}</span>
-        <button class="mini" disabled={running.has('hardware')} onclick={() => scan('hardware')}>⟳ nu</button>
-      </div>
-      {#if data && !hosts.length}
-        <p class="hint pad">Nog geen machines. De gezondheid gebruikt de SSH-hosts uit de terminal (⟳ pve) met hun standaard login;
-          open elke node één keer om de hostsleutel te bevestigen. Containers en VM's worden overgeslagen.</p>
-      {/if}
-      <div class="grid">
-        {#each hosts as h (h.key)}
-          <div class="host lv-{h.level}">
-            <div class="hh">
-              <b>{h.name}</b>
-              <small>{h.model || h.host}</small>
-              <span class="right">
-                {#if h.cpu_temp != null}<span class="t" class:hot={h.cpu_temp >= data.settings.cpu_warn}>cpu {h.cpu_temp.toFixed(0)} °C</span>{/if}
-                <span class="pill lv-{h.level}">{h.error ? 'niet bereikbaar' : LEVEL[h.level]}</span>
-              </span>
-            </div>
-            {#if h.error}<p class="e small">{h.error}</p>{/if}
-            {#if h.throttle?.now?.length}<p class="w small">⚡ nu: {h.throttle.now.join(', ')} — een Pi 5 wil een voeding van 5 V / 5 A.</p>
-            {:else if h.throttle?.since_boot?.length}<p class="dim small">sinds opstarten: {h.throttle.since_boot.join(', ')}</p>{/if}
-            {#if !h.error && h.smartctl === false}<p class="dim small">smartctl ontbreekt: <code>apt install smartmontools</code></p>{/if}
-            {#each h.disks || [] as d (d.key)}
-              <div class="disk">
-                <i class="dot lv-{d.standby && !d.why?.length ? 'sleep' : d.level}" title={d.standby ? 'slaapt' : LEVEL[d.level]}></i>
-                <span class="dn"><b>{d.model || d.dev}</b><small>{d.dev} · {d.ssd ? (d.protocol === 'NVMe' ? 'NVMe' : 'SSD') : d.ssd === false ? 'HDD' : '?'} · {bytes(d.size)}{d.serial ? ` · ${d.serial}` : ''}</small></span>
-                <span class="dv">
-                  {#if d.temp != null}<span class:hot={d.temp >= data.settings.disk_warn}>{d.temp} °C</span>{/if}
-                  {#if d.wear_used != null}<span title="Versleten volgens de schijf zelf">{d.wear_used}% versleten</span>{/if}
-                  {#if d.hours != null}<span title="Uren in gebruik">{age(d.hours)}</span>{/if}
-                  {#if d.standby}<span class="dim">slaapt</span>{/if}
-                </span>
-                {#if d.why?.length}<span class="why lv-{d.level}">{d.why.join(' · ')}</span>{/if}
-              </div>
-            {/each}
-            {#each h.pools || [] as p (p.name)}
-              <div class="disk pool">
-                <i class="dot lv-{p.level}"></i>
-                <span class="dn"><b>zfs {p.name}</b><small>{p.health} · {p.cap}% vol · frag {p.frag}%</small></span>
-                <span class="dv"><span>{p.scrubbing ? 'scrub bezig' : p.scrub_at ? `scrub ${day(p.scrub_at)}` : 'nooit gescrubd'}</span></span>
-                {#if p.why?.length}<span class="why lv-{p.level}">{p.why.join(' · ')}</span>{/if}
-              </div>
-            {/each}
-          </div>
+  {:else if tab === 'temperatuur'}
+    <div class="head">
+      {#each [[6, '6 u'], [24, '24 u'], [168, '7 d'], [720, '30 d']] as [h, label]}
+        <button class="mini" class:on={hours === h} onclick={() => (hours = h)}>{label}</button>
+      {/each}
+      <span class="hint">streepjeslijnen: grens processor {data?.settings?.cpu_warn} °C (rood) en schijf {data?.settings?.disk_warn} °C (oranje), instelbaar bij domeinen. Klik een lijn in de legende om ze te verbergen.</span>
+    </div>
+    {#if chart}
+      <svg class="chart" viewBox="0 0 {W} {Hh}" preserveAspectRatio="none" role="img" aria-label="Temperaturen">
+        {#each chart.ticks as v}
+          <line x1={PAD} x2={W - 8} y1={chart.y(v)} y2={chart.y(v)} class="grid-l" />
+          <text x={PAD - 6} y={chart.y(v) + 4} class="ax">{v}°</text>
+        {/each}
+        <line x1={PAD} x2={W - 8} y1={chart.warn} y2={chart.warn} class="lim" />
+        <line x1={PAD} x2={W - 8} y1={chart.dwarn} y2={chart.dwarn} class="lim d" />
+        {#each chart.lines as l (l.target + l.sensor)}
+          {#if !hidden.has(l.target + l.sensor)}<path d={l.d} stroke={l.color} class="ln" />{/if}
+        {/each}
+      </svg>
+      <div class="legend">
+        {#each chart.lines as l (l.target + l.sensor)}
+          {@const k = l.target + l.sensor}
+          <button class="lg" class:off={hidden.has(k)} onclick={() => { const n = new Set(hidden); n.has(k) ? n.delete(k) : n.add(k); hidden = n }}>
+            <i style="background:{l.color}"></i>{l.label} <b>{l.points.at(-1)[1].toFixed(0)}°</b>
+          </button>
         {/each}
       </div>
-
-    {:else if tab === 'temperatuur'}
-      <div class="head">
-        {#each [[6, '6 u'], [24, '24 u'], [168, '7 d'], [720, '30 d']] as [h, label]}
-          <button class="mini" class:on={hours === h} onclick={() => (hours = h)}>{label}</button>
-        {/each}
-        <span class="hint">streepjeslijnen: grens processor {data?.settings?.cpu_warn} °C (rood) en schijf {data?.settings?.disk_warn} °C (oranje), instelbaar bij domeinen. Klik een lijn in de legende om ze te verbergen.</span>
-      </div>
-      {#if chart}
-        <svg class="chart" viewBox="0 0 {W} {Hh}" preserveAspectRatio="none" role="img" aria-label="Temperaturen">
-          {#each chart.ticks as v}
-            <line x1={PAD} x2={W - 8} y1={chart.y(v)} y2={chart.y(v)} class="grid-l" />
-            <text x={PAD - 6} y={chart.y(v) + 4} class="ax">{v}°</text>
-          {/each}
-          <line x1={PAD} x2={W - 8} y1={chart.warn} y2={chart.warn} class="lim" />
-          <line x1={PAD} x2={W - 8} y1={chart.dwarn} y2={chart.dwarn} class="lim d" />
-          {#each chart.lines as l (l.target + l.sensor)}
-            {#if !hidden.has(l.target + l.sensor)}<path d={l.d} stroke={l.color} class="ln" />{/if}
-          {/each}
-        </svg>
-        <div class="legend">
-          {#each chart.lines as l (l.target + l.sensor)}
-            {@const k = l.target + l.sensor}
-            <button class="lg" class:off={hidden.has(k)} onclick={() => { const n = new Set(hidden); n.has(k) ? n.delete(k) : n.add(k); hidden = n }}>
-              <i style="background:{l.color}"></i>{l.label} <b>{l.points.at(-1)[1].toFixed(0)}°</b>
-            </button>
-          {/each}
-        </div>
-      {:else}
-        <p class="hint pad">{temps ? 'Nog geen metingen in deze periode.' : 'laden…'}</p>
-      {/if}
-
-    {:else if tab === 'snapshots'}
-      <div class="head">
-        <span class="hint">Snapshots houden oude blokken vast; vergeten exemplaren laten de opslag stilletjes vollopen.
-          Ouder dan {data?.settings?.snapshot_days} dagen = vergeten. Verwijderen vraagt VM.Snapshot op het Proxmox-token.</span>
-        <span class="when">{running.has('snapshots') ? 'bezig…' : data?.snapshots?.checked_at ? `bekeken ${ago(data.snapshots.checked_at)}` : 'nog niet bekeken'}</span>
-        <button class="mini" disabled={running.has('snapshots')} onclick={() => scan('snapshots')}>⟳ nu</button>
-      </div>
-      {#each data?.snapshots?.errors || [] as e}<p class="e small pad">{e.service}{e.guest ? ` · ${e.guest}` : ''}: {e.error}</p>{/each}
-      <table class="tbl">
-        <thead><tr><th>vm/ct</th><th>snapshot</th><th>gemaakt</th><th>leeftijd</th><th>node</th><th></th></tr></thead>
-        <tbody>
-          {#each snaps as x (x.node + x.vmid + x.name)}
-            <tr class:old={(x.age_days || 0) >= data.settings.snapshot_days}>
-              <td><b>{x.guest}</b> <small>{x.type === 'qemu' ? 'VM' : 'CT'} {x.vmid}</small></td>
-              <td>{x.name}{#if x.vmstate}<small class="dim"> + RAM</small>{/if}{#if x.description}<small class="dim block">{x.description}</small>{/if}</td>
-              <td>{x.snaptime ? day(x.snaptime * 1000) : '—'}</td>
-              <td class="num">{x.age_days != null ? `${Math.floor(x.age_days)} d` : '—'}</td>
-              <td>{x.node}</td>
-              <td class="acts">
-                <button class="mini" class:on={snapProef?.key === snapKey(x)} disabled={proefBusy === snapKey(x)} onclick={() => proefSnap(x)}
-                        title="toont wat verwijderen zou doen, zonder iets te verwijderen">proef</button>
-                <button class="mini danger" disabled={busy === `${x.vmid}/${x.name}`} onclick={() => delSnap(x)}>verwijderen</button>
-              </td>
-            </tr>
-            {#if snapProef?.key === snapKey(x)}
-              <tr class="proefrow"><td colspan="6"><ProefPlan plan={snapProef.plan} onclose={() => (snapProef = null)} /></td></tr>
-            {/if}
-          {:else}
-            <tr><td colspan="6" class="hint">{data?.snapshots?.checked_at ? 'Geen snapshots. Netjes.' : 'Nog niet bekeken (heeft een Proxmox-tegel met API-token nodig).'}</td></tr>
-          {/each}
-        </tbody>
-      </table>
-      {#if oldSnaps.length}<p class="hint pad">{oldSnaps.length} vergeten snapshot{oldSnaps.length === 1 ? '' : 's'}.</p>{/if}
-
-    {:else if tab === 'domeinen'}
-      <div class="head">
-        <span class="hint">Vervaldatum, registrar en nameservers via RDAP, elke dag. Meldingen 30, 7 en 1 dag op voorhand, en als
-          de nameservers veranderen. DNS Belgium (.be) geeft geen vervaldatum: vul die dan zelf in.</span>
-        <span class="when">{running.has('domains') ? 'bezig…' : data?.domains?.checked_at ? `bekeken ${ago(data.domains.checked_at)}` : ''}</span>
-        <button class="mini" disabled={running.has('domains') || !data?.settings?.domains?.length} onclick={() => scan('domains')}>⟳ nu</button>
-      </div>
-      <table class="tbl">
-        <thead><tr><th>domein</th><th>verloopt</th><th>registrar</th><th>nameservers</th></tr></thead>
-        <tbody>
-          {#each data?.domains?.items || [] as d (d.name)}
-            <tr>
-              <td><b>{d.name}</b>{#if d.error}<small class="e block">{d.error}</small>{/if}</td>
-              <td class:e={d.days_left != null && d.days_left <= 7} class:w={d.days_left != null && d.days_left > 7 && d.days_left <= 30}>
-                {d.expires ? `${day(d.expires)} (${d.days_left} d)` : '—'}{#if d.source === 'manueel'}<small class="dim"> · zelf ingevuld</small>{/if}</td>
-              <td>{d.registrar || '—'}</td>
-              <td><small>{(d.nameservers || []).join(', ') || '—'}</small></td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-      {#if form}
-        <div class="form">
-          <span class="lbl">domeinen</span>
-          {#each form.domains as d, i}
-            <div class="row">
-              <input bind:value={d.name} placeholder="jbogaert.be" />
-              <input type="date" bind:value={d.expires} title="Alleen als RDAP geen vervaldatum geeft" />
-              <button class="mini" onclick={() => form.domains.splice(i, 1)} aria-label="Domein weghalen">✕</button>
-            </div>
-          {/each}
-          <button class="mini" onclick={() => form.domains.push({ name: '', expires: null })}>+ domein</button>
-          <span class="lbl">grenzen</span>
-          <div class="row">
-            <label>processor °C <input type="number" min="40" max="110" bind:value={form.cpu_warn} /></label>
-            <label>schijf °C <input type="number" min="30" max="80" bind:value={form.disk_warn} /></label>
-            <label>snapshot vergeten na (dagen) <input type="number" min="1" max="365" bind:value={form.snapshot_days} /></label>
-          </div>
-          <div class="row"><button class="btn" disabled={saving} onclick={save}>bewaren</button><span class="note">{note}</span></div>
-        </div>
-      {/if}
-
-    {:else if tab === 'cluster'}
-      <Cluster />
-    {:else if tab === 'backups'}
-      <Backups {onfix} />
-    {:else if tab === 'beveiliging'}
-      <SecurityCheck onfix={(fix) => (fix.window === 'health' ? (tab = fix.tab) : onfix?.(fix))} />
     {:else}
-      <div class="head">
-        <span class="hint">Leven de worker en de syslog-ontvanger, is er een recente en leesbare back-up, lukt het terugzetten, en staat er een kopie buiten de container?</span>
-        <span class="when">{running.has('selfcheck') ? 'bezig…' : sc.checked_at ? `bekeken ${ago(sc.checked_at)}` : ''}</span>
-        <button class="mini" disabled={running.has('selfcheck')} onclick={() => scan('selfcheck')}>⟳ nu</button>
-      </div>
-      <div class="grid">
-        <div class="host lv-{data?.worker?.ok ? 'ok' : 'err'}">
-          <div class="hh"><b>worker</b><span class="right"><span class="pill lv-{data?.worker?.ok ? 'ok' : 'err'}">{data?.worker?.ok ? 'draait' : 'draait niet'}</span></span></div>
-          <p class="small">{data?.worker?.ok ? `gestart ${ago(data.worker.started)}, laatste teken van leven ${ago(data.worker.at)}` : data?.worker?.why}</p>
-          {#if !data?.worker?.ok}<p class="dim small">Op de container: <code>systemctl status homepage-worker</code></p>{/if}
-        </div>
-        <div class="host lv-{!rx ? 'unknown' : !rx.ok || rx.loss || rx.down_since ? 'warn' : 'ok'}">
-          <div class="hh"><b>syslog-ontvanger</b>
-            {#if rx}<span class="right"><span class="pill lv-{rx.ok ? 'ok' : 'warn'}">{rx.ok ? 'draait' : 'draait niet'}</span></span>{/if}</div>
-          {#if !rx}
-            <p class="dim small">heeft zich nog niet gemeld</p>
-          {:else}
-            <p class="small">{rx.ok ? `gestart ${ago(rx.started)}, laatste teken van leven ${ago(rx.at)}` : rx.why}</p>
-            <p class="dim small">{num(rx.received)} regels ontvangen, {num(rx.stored)} bewaard, {num(rx.lost)} niet bewaard sinds de start</p>
-            {#if rx.down_since}<p class="small w">wacht op de database sinds {ago(rx.down_since)}: {num(rx.backlog)} regels in de wachtrij</p>{/if}
-            {#if rx.loss}<p class="small w">{num(rx.loss.n)} regels niet bewaard, {ago(rx.loss.since)} tot {ago(rx.loss.at)}{LOSS[rx.loss.why] ? ` (${LOSS[rx.loss.why]})` : ''}</p>{/if}
-            {#if rx.last_error}<p class="dim small">laatste databasefout {ago(rx.last_error.since)}{rx.last_error.until ? `, opgelost ${ago(rx.last_error.until)}` : ''}: {rx.last_error.error}</p>{/if}
-            {#if !rx.ok}<p class="dim small">Op de container: <code>systemctl status homepage-syslog</code></p>{/if}
+      <p class="hint pad">{temps ? 'Nog geen metingen in deze periode.' : 'laden…'}</p>
+    {/if}
+
+  {:else if tab === 'snapshots'}
+    <div class="head">
+      <span class="hint">Snapshots houden oude blokken vast; vergeten exemplaren laten de opslag stilletjes vollopen.
+        Ouder dan {data?.settings?.snapshot_days} dagen = vergeten. Verwijderen vraagt VM.Snapshot op het Proxmox-token.</span>
+      <span class="when">{running.has('snapshots') ? 'bezig…' : data?.snapshots?.checked_at ? `bekeken ${ago(data.snapshots.checked_at)}` : 'nog niet bekeken'}</span>
+      <button class="mini" disabled={running.has('snapshots')} onclick={() => scan('snapshots')}>⟳ nu</button>
+    </div>
+    {#each data?.snapshots?.errors || [] as e}<p class="e small pad">{e.service}{e.guest ? ` · ${e.guest}` : ''}: {e.error}</p>{/each}
+    <table class="tbl">
+      <thead><tr><th>vm/ct</th><th>snapshot</th><th>gemaakt</th><th>leeftijd</th><th>node</th><th></th></tr></thead>
+      <tbody>
+        {#each snaps as x (x.node + x.vmid + x.name)}
+          <tr class:old={(x.age_days || 0) >= data.settings.snapshot_days}>
+            <td><b>{x.guest}</b> <small>{x.type === 'qemu' ? 'VM' : 'CT'} {x.vmid}</small></td>
+            <td>{x.name}{#if x.vmstate}<small class="dim"> + RAM</small>{/if}{#if x.description}<small class="dim block">{x.description}</small>{/if}</td>
+            <td>{x.snaptime ? day(x.snaptime * 1000) : '—'}</td>
+            <td class="num">{x.age_days != null ? `${Math.floor(x.age_days)} d` : '—'}</td>
+            <td>{x.node}</td>
+            <td class="acts">
+              <button class="mini" class:on={snapProef?.key === snapKey(x)} disabled={proefBusy === snapKey(x)} onclick={() => proefSnap(x)}
+                      title="toont wat verwijderen zou doen, zonder iets te verwijderen">proef</button>
+              <button class="mini danger" disabled={busy === `${x.vmid}/${x.name}`} onclick={() => delSnap(x)}>verwijderen</button>
+            </td>
+          </tr>
+          {#if snapProef?.key === snapKey(x)}
+            <tr class="proefrow"><td colspan="6"><ProefPlan plan={snapProef.plan} onclose={() => (snapProef = null)} /></td></tr>
           {/if}
-        </div>
-        <div class="host lv-{!sc.checked_at ? 'unknown' : sc.stale || sc.verified?.ok === false || rt.status === 'fout' ? 'err' : rt.status === 'overgeslagen' ? 'warn' : 'ok'}">
-          <div class="hh"><b>back-up</b><small>{sc.backup_dir}</small>
-            {#if sc.checked_at}<span class="right"><span class="pill lv-{sc.stale ? 'err' : 'ok'}">{sc.stale ? 'te oud' : 'recent'}</span></span>{/if}</div>
-          {#if !sc.checked_at}<p class="dim small">nog niet bekeken</p>{/if}
-          {#if sc.verified?.name}
-            <p class="small">{sc.verified.name}: {sc.verified.ok ? `leesbaar (${sc.verified.why})` : sc.verified.ok === false ? `onleesbaar — ${sc.verified.why}` : `niet nagekeken (${sc.verified.why})`}</p>
-          {/if}
-          <!-- De maandelijkse test: de nieuwste dump terugzetten in een testdatabase (deploy/homepage-backuptest.sh). -->
-          {#if rt.status === 'ok'}
-            <p class="small">terugzetten getest {ago(rt.at)}: {rt.tables?.services ?? '?'} services, {rt.tables?.users ?? '?'} gebruiker{rt.tables?.users === 1 ? '' : 's'}, migratie {rt.alembic} · {rt.seconds} s</p>
-          {:else if rt.status === 'fout'}
-            <p class="small e">terugzetten mislukt {ago(rt.at)} — {rt.why}</p>
-          {:else if rt.status === 'overgeslagen'}
-            <p class="small w">terugzetten overgeslagen {ago(rt.at)} — {rt.why}</p>
-          {:else if sc.checked_at}
-            <p class="dim small">terugzetten nog niet getest (elke 1e van de maand om 04:15); nu: <code>systemctl start homepage-backuptest</code></p>
-          {/if}
-          {#if rtTables.length}
-            <details class="small tbls"><summary class="dim">{rt.dump} · {rtTables.length} tabellen nagekeken{rt.timescaledb ? ` · TimescaleDB ${rt.timescaledb}` : ''}{rt.postgresql ? ` · PostgreSQL ${rt.postgresql}` : ''}</summary>
-              {#each rtTables as [t, n]}<p class="dim small row2"><span>{t}</span><span>{n.toLocaleString('nl-BE')}</span></p>{/each}
-            </details>
-          {/if}
-          {#each (sc.backups || []).slice(0, 5) as b}<p class="dim small">{b.name} · {bytes(b.size)} · {ago(b.at)}</p>{/each}
-          {#if sc.checked_at && !(sc.backups || []).length}<p class="small e">Geen dumps gevonden. Elke nacht om 03:30 maakt homepage-backup.timer er één.</p>{/if}
-        </div>
-        <div class="host lv-{sc.rollup?.late ? 'warn' : 'ok'}">
-          <div class="hh"><b>database</b><span class="right">{bytes(sc.db?.total)}</span></div>
-          {#each sc.db?.tables || [] as t}<p class="dim small row2"><span>{t.name}</span><span>{bytes(t.size)}</span></p>{/each}
-          {#each sc.disks || [] as d}<p class="small row2" class:w={d.pct >= 75 && d.pct < 90} class:e={d.pct >= 90}><span>schijf {d.path}</span><span>{d.pct}% · {bytes(d.free)} vrij</span></p>{/each}
-          {#if sc.rollup}
-            <!-- De worker telt de checks per uur op; de grafiek en de uptime over 7 dagen tot een jaar lezen die uren. -->
-            <p class="small row2" class:w={sc.rollup.late}><span>uurtotalen van de checks</span><span>{sc.rollup.late ? `${behind(sc.rollup.behind_h)} achter` : sc.rollup.until ? `opgeteld tot ${ago(sc.rollup.until)}` : 'nog niets op te tellen'}</span></p>
-            {#if sc.rollup.late}<p class="small w">Het optellen lukt niet meer. Met TimescaleDB worden losse checks na 90 dagen gewist, ook als ze nog niet opgeteld zijn: dan krijgt de jaargrafiek een gat. Kijk in de log: <code>journalctl -u homepage-worker | grep uurtotalen</code></p>{/if}
-          {/if}
-        </div>
-        <div class="host wide lv-{!data?.settings?.offsite ? 'unknown' : sc.offsite?.key_stale ? 'err' : sc.offsite?.error ? 'warn' : 'ok'}">
-          <div class="hh"><b>kopie buiten de container</b><small>{data?.offsite_dir}</small></div>
-          {#if form}
-            <label class="chk"><input type="checkbox" bind:checked={form.offsite} onchange={save} /> elk uur de nieuwste dumps en de versleutelde sleutel kopiëren</label>
-          {/if}
-          {#if data?.settings?.offsite}
-            {#if sc.offsite?.error}<p class="small w">{sc.offsite.error}</p>{/if}
-            {#if sc.offsite?.latest}<p class="small">{sc.offsite.count} dump{sc.offsite.count === 1 ? '' : 's'} daar, nieuwste {sc.offsite.latest.name}{sc.offsite.key && !sc.offsite.key_stale ? ' · sleutel ✓' : ''}</p>{/if}
-            {#if sc.offsite?.key_stale}<p class="small e">De sleutel daar is verouderd: secret.key veranderde nadat je de wachtzin instelde. Stel de wachtzin hieronder opnieuw in.</p>{/if}
-          {/if}
-          <p class="dim small">Koppel een NAS-share, PBS-opslag of USB-schijf op {data?.offsite_dir} (bv. <code>pct set &lt;id&gt; -mp0 /mnt/nas/homepage,mp={data?.offsite_dir}</code>) en geef gebruiker homepage schrijfrechten. Zonder secret.key zijn de wachtwoorden en API-sleutels in een back-up onleesbaar; daarom gaat hij mee, versleuteld met een wachtzin die nergens bewaard wordt.</p>
-          <p class="small">{data?.offsite_key?.set ? `wachtzin ingesteld ${ago(data.offsite_key.at)}` : 'nog geen wachtzin'}</p>
+        {:else}
+          <tr><td colspan="6" class="hint">{data?.snapshots?.checked_at ? 'Geen snapshots. Netjes.' : 'Nog niet bekeken (heeft een Proxmox-tegel met API-token nodig).'}</td></tr>
+        {/each}
+      </tbody>
+    </table>
+    {#if oldSnaps.length}<p class="hint pad">{oldSnaps.length} vergeten snapshot{oldSnaps.length === 1 ? '' : 's'}.</p>{/if}
+
+  {:else if tab === 'domeinen'}
+    <div class="head">
+      <span class="hint">Vervaldatum, registrar en nameservers via RDAP, elke dag. Meldingen 30, 7 en 1 dag op voorhand, en als
+        de nameservers veranderen. DNS Belgium (.be) geeft geen vervaldatum: vul die dan zelf in.</span>
+      <span class="when">{running.has('domains') ? 'bezig…' : data?.domains?.checked_at ? `bekeken ${ago(data.domains.checked_at)}` : ''}</span>
+      <button class="mini" disabled={running.has('domains') || !data?.settings?.domains?.length} onclick={() => scan('domains')}>⟳ nu</button>
+    </div>
+    <table class="tbl">
+      <thead><tr><th>domein</th><th>verloopt</th><th>registrar</th><th>nameservers</th></tr></thead>
+      <tbody>
+        {#each data?.domains?.items || [] as d (d.name)}
+          <tr>
+            <td><b>{d.name}</b>{#if d.error}<small class="e block">{d.error}</small>{/if}</td>
+            <td class:e={d.days_left != null && d.days_left <= 7} class:w={d.days_left != null && d.days_left > 7 && d.days_left <= 30}>
+              {d.expires ? `${day(d.expires)} (${d.days_left} d)` : '—'}{#if d.source === 'manueel'}<small class="dim"> · zelf ingevuld</small>{/if}</td>
+            <td>{d.registrar || '—'}</td>
+            <td><small>{(d.nameservers || []).join(', ') || '—'}</small></td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+    {#if form}
+      <div class="form">
+        <span class="lbl">domeinen</span>
+        {#each form.domains as d, i}
           <div class="row">
-            <input type="password" bind:value={pass} placeholder="wachtzin (min. 12 tekens)" autocomplete="new-password" />
-            <input type="password" bind:value={pass2} placeholder="nog eens" autocomplete="new-password" />
-            <button class="mini" disabled={pass.length < 12} onclick={setKey}>{data?.offsite_key?.set ? 'wijzigen' : 'instellen'}</button>
+            <input bind:value={d.name} placeholder="jbogaert.be" />
+            <input type="date" bind:value={d.expires} title="Alleen als RDAP geen vervaldatum geeft" />
+            <button class="mini" onclick={() => form.domains.splice(i, 1)} aria-label="Domein weghalen">✕</button>
           </div>
-          {#if note}<p class="small note">{note}</p>{/if}
+        {/each}
+        <button class="mini" onclick={() => form.domains.push({ name: '', expires: null })}>+ domein</button>
+        <span class="lbl">grenzen</span>
+        <div class="row">
+          <label>processor °C <input type="number" min="40" max="110" bind:value={form.cpu_warn} /></label>
+          <label>schijf °C <input type="number" min="30" max="80" bind:value={form.disk_warn} /></label>
+          <label>snapshot vergeten na (dagen) <input type="number" min="1" max="365" bind:value={form.snapshot_days} /></label>
         </div>
+        <div class="row"><button class="btn" disabled={saving} onclick={save}>bewaren</button><span class="note">{note}</span></div>
       </div>
     {/if}
+
+  {:else if tab === 'cluster'}
+    <Cluster />
+  {:else if tab === 'backups'}
+    <Backups {onfix} />
+  {:else if tab === 'beveiliging'}
+    <SecurityCheck onfix={(fix) => (fix.window === 'health' ? (tab = fix.tab) : onfix?.(fix))} />
+  {:else}
+    <div class="head">
+      <span class="hint">Leven de worker en de syslog-ontvanger, is er een recente en leesbare back-up, lukt het terugzetten, en staat er een kopie buiten de container?</span>
+      <span class="when">{running.has('selfcheck') ? 'bezig…' : sc.checked_at ? `bekeken ${ago(sc.checked_at)}` : ''}</span>
+      <button class="mini" disabled={running.has('selfcheck')} onclick={() => scan('selfcheck')}>⟳ nu</button>
     </div>
+    <div class="grid">
+      <div class="host lv-{data?.worker?.ok ? 'ok' : 'err'}">
+        <div class="hh"><b>worker</b><span class="right"><span class="pill lv-{data?.worker?.ok ? 'ok' : 'err'}">{data?.worker?.ok ? 'draait' : 'draait niet'}</span></span></div>
+        <p class="small">{data?.worker?.ok ? `gestart ${ago(data.worker.started)}, laatste teken van leven ${ago(data.worker.at)}` : data?.worker?.why}</p>
+        {#if !data?.worker?.ok}<p class="dim small">Op de container: <code>systemctl status homepage-worker</code></p>{/if}
+      </div>
+      <div class="host lv-{!rx ? 'unknown' : !rx.ok || rx.loss || rx.down_since ? 'warn' : 'ok'}">
+        <div class="hh"><b>syslog-ontvanger</b>
+          {#if rx}<span class="right"><span class="pill lv-{rx.ok ? 'ok' : 'warn'}">{rx.ok ? 'draait' : 'draait niet'}</span></span>{/if}</div>
+        {#if !rx}
+          <p class="dim small">heeft zich nog niet gemeld</p>
+        {:else}
+          <p class="small">{rx.ok ? `gestart ${ago(rx.started)}, laatste teken van leven ${ago(rx.at)}` : rx.why}</p>
+          <p class="dim small">{num(rx.received)} regels ontvangen, {num(rx.stored)} bewaard, {num(rx.lost)} niet bewaard sinds de start</p>
+          {#if rx.down_since}<p class="small w">wacht op de database sinds {ago(rx.down_since)}: {num(rx.backlog)} regels in de wachtrij</p>{/if}
+          {#if rx.loss}<p class="small w">{num(rx.loss.n)} regels niet bewaard, {ago(rx.loss.since)} tot {ago(rx.loss.at)}{LOSS[rx.loss.why] ? ` (${LOSS[rx.loss.why]})` : ''}</p>{/if}
+          {#if rx.last_error}<p class="dim small">laatste databasefout {ago(rx.last_error.since)}{rx.last_error.until ? `, opgelost ${ago(rx.last_error.until)}` : ''}: {rx.last_error.error}</p>{/if}
+          {#if !rx.ok}<p class="dim small">Op de container: <code>systemctl status homepage-syslog</code></p>{/if}
+        {/if}
+      </div>
+      <div class="host lv-{!sc.checked_at ? 'unknown' : sc.stale || sc.verified?.ok === false || rt.status === 'fout' ? 'err' : rt.status === 'overgeslagen' ? 'warn' : 'ok'}">
+        <div class="hh"><b>back-up</b><small>{sc.backup_dir}</small>
+          {#if sc.checked_at}<span class="right"><span class="pill lv-{sc.stale ? 'err' : 'ok'}">{sc.stale ? 'te oud' : 'recent'}</span></span>{/if}</div>
+        {#if !sc.checked_at}<p class="dim small">nog niet bekeken</p>{/if}
+        {#if sc.verified?.name}
+          <p class="small">{sc.verified.name}: {sc.verified.ok ? `leesbaar (${sc.verified.why})` : sc.verified.ok === false ? `onleesbaar — ${sc.verified.why}` : `niet nagekeken (${sc.verified.why})`}</p>
+        {/if}
+        <!-- De maandelijkse test: de nieuwste dump terugzetten in een testdatabase (deploy/homepage-backuptest.sh). -->
+        {#if rt.status === 'ok'}
+          <p class="small">terugzetten getest {ago(rt.at)}: {rt.tables?.services ?? '?'} services, {rt.tables?.users ?? '?'} gebruiker{rt.tables?.users === 1 ? '' : 's'}, migratie {rt.alembic} · {rt.seconds} s</p>
+        {:else if rt.status === 'fout'}
+          <p class="small e">terugzetten mislukt {ago(rt.at)} — {rt.why}</p>
+        {:else if rt.status === 'overgeslagen'}
+          <p class="small w">terugzetten overgeslagen {ago(rt.at)} — {rt.why}</p>
+        {:else if sc.checked_at}
+          <p class="dim small">terugzetten nog niet getest (elke 1e van de maand om 04:15); nu: <code>systemctl start homepage-backuptest</code></p>
+        {/if}
+        {#if rtTables.length}
+          <details class="small tbls"><summary class="dim">{rt.dump} · {rtTables.length} tabellen nagekeken{rt.timescaledb ? ` · TimescaleDB ${rt.timescaledb}` : ''}{rt.postgresql ? ` · PostgreSQL ${rt.postgresql}` : ''}</summary>
+            {#each rtTables as [t, n]}<p class="dim small row2"><span>{t}</span><span>{n.toLocaleString('nl-BE')}</span></p>{/each}
+          </details>
+        {/if}
+        {#each (sc.backups || []).slice(0, 5) as b}<p class="dim small">{b.name} · {bytes(b.size)} · {ago(b.at)}</p>{/each}
+        {#if sc.checked_at && !(sc.backups || []).length}<p class="small e">Geen dumps gevonden. Elke nacht om 03:30 maakt homepage-backup.timer er één.</p>{/if}
+      </div>
+      <div class="host lv-{sc.rollup?.late ? 'warn' : 'ok'}">
+        <div class="hh"><b>database</b><span class="right">{bytes(sc.db?.total)}</span></div>
+        {#each sc.db?.tables || [] as t}<p class="dim small row2"><span>{t.name}</span><span>{bytes(t.size)}</span></p>{/each}
+        {#each sc.disks || [] as d}<p class="small row2" class:w={d.pct >= 75 && d.pct < 90} class:e={d.pct >= 90}><span>schijf {d.path}</span><span>{d.pct}% · {bytes(d.free)} vrij</span></p>{/each}
+        {#if sc.rollup}
+          <!-- De worker telt de checks per uur op; de grafiek en de uptime over 7 dagen tot een jaar lezen die uren. -->
+          <p class="small row2" class:w={sc.rollup.late}><span>uurtotalen van de checks</span><span>{sc.rollup.late ? `${behind(sc.rollup.behind_h)} achter` : sc.rollup.until ? `opgeteld tot ${ago(sc.rollup.until)}` : 'nog niets op te tellen'}</span></p>
+          {#if sc.rollup.late}<p class="small w">Het optellen lukt niet meer. Met TimescaleDB worden losse checks na 90 dagen gewist, ook als ze nog niet opgeteld zijn: dan krijgt de jaargrafiek een gat. Kijk in de log: <code>journalctl -u homepage-worker | grep uurtotalen</code></p>{/if}
+        {/if}
+      </div>
+      <div class="host wide lv-{!data?.settings?.offsite ? 'unknown' : sc.offsite?.key_stale ? 'err' : sc.offsite?.error ? 'warn' : 'ok'}">
+        <div class="hh"><b>kopie buiten de container</b><small>{data?.offsite_dir}</small></div>
+        {#if form}
+          <label class="chk"><input type="checkbox" bind:checked={form.offsite} onchange={save} /> elk uur de nieuwste dumps en de versleutelde sleutel kopiëren</label>
+        {/if}
+        {#if data?.settings?.offsite}
+          {#if sc.offsite?.error}<p class="small w">{sc.offsite.error}</p>{/if}
+          {#if sc.offsite?.latest}<p class="small">{sc.offsite.count} dump{sc.offsite.count === 1 ? '' : 's'} daar, nieuwste {sc.offsite.latest.name}{sc.offsite.key && !sc.offsite.key_stale ? ' · sleutel ✓' : ''}</p>{/if}
+          {#if sc.offsite?.key_stale}<p class="small e">De sleutel daar is verouderd: secret.key veranderde nadat je de wachtzin instelde. Stel de wachtzin hieronder opnieuw in.</p>{/if}
+        {/if}
+        <p class="dim small">Koppel een NAS-share, PBS-opslag of USB-schijf op {data?.offsite_dir} (bv. <code>pct set &lt;id&gt; -mp0 /mnt/nas/homepage,mp={data?.offsite_dir}</code>) en geef gebruiker homepage schrijfrechten. Zonder secret.key zijn de wachtwoorden en API-sleutels in een back-up onleesbaar; daarom gaat hij mee, versleuteld met een wachtzin die nergens bewaard wordt.</p>
+        <p class="small">{data?.offsite_key?.set ? `wachtzin ingesteld ${ago(data.offsite_key.at)}` : 'nog geen wachtzin'}</p>
+        <div class="row">
+          <input type="password" bind:value={pass} placeholder="wachtzin (min. 12 tekens)" autocomplete="new-password" />
+          <input type="password" bind:value={pass2} placeholder="nog eens" autocomplete="new-password" />
+          <button class="mini" disabled={pass.length < 12} onclick={setKey}>{data?.offsite_key?.set ? 'wijzigen' : 'instellen'}</button>
+        </div>
+        {#if note}<p class="small note">{note}</p>{/if}
+      </div>
+    </div>
+  {/if}
   </div>
-</div>
+</Window>
 
 <style>
-  .ov { position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, .65); padding: 2vh 1vw; display: flex }
-  .ov.hidden { display: none }
-  .win { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden }
-  .tabs { display: flex; gap: 6px; align-items: center; padding: 10px 12px 0; flex-wrap: wrap }
-  .n { margin-left: 5px; font-weight: 500 }
   .body { flex: 1; overflow: auto; padding: 4px 12px 24px; margin-top: 8px; border-top: 1px solid var(--line) }
   .head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 10px 0 }
   .head .hint { flex: 1; min-width: 240px; font-size: 12px; margin: 0 }
@@ -497,7 +487,6 @@
     .hh { flex-wrap: wrap }
     .hh .right { margin-left: 0 }
     .dv { grid-column: 2 / -1; flex-wrap: wrap; white-space: normal }
-    .ov { padding: 0 }
     .tbl th:nth-child(3), .tbl td:nth-child(3), .tbl th:nth-child(5), .tbl td:nth-child(5) { display: none }
   }
 </style>

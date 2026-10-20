@@ -3,6 +3,7 @@
   import { api, outsideMessage, requestReauth, signalOutside, withReauth } from './api.js'
   import Modal from './Modal.svelte'
   import { KIND, STATUS, STATUS_HINT, dur, full, rel, wsUrl } from './cronfmt.js'
+  import { ask } from './dialog.svelte.js'
 
   // Eén job: schema in gewone taal, de volgende keren, runs met uitvoer, nu uitvoeren met live uitvoer,
   // bewaken (wrapper) en meldingen aan/uit.
@@ -47,8 +48,8 @@
   }
 
   const dec = new TextDecoder()
-  function runNow(retried = false) {
-    if (!confirm(`${job.name} nu uitvoeren op ${job.target_name}?\n\n${job.command.slice(0, 300)}`)) return
+  async function runNow(retried = false) {
+    if (!(await ask(`${job.name} nu uitvoeren op ${job.target_name}?\n\n${job.command.slice(0, 300)}`, { ok: 'Uitvoeren' }))) return
     start(retried)
   }
   function start(retried) {

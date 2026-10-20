@@ -4,6 +4,7 @@
   import { AREA, FIX_LABEL } from './attention.js'
   import { CHANGELOG } from './changelog.js'
   import Modal from './Modal.svelte'
+  import Tabs from './Tabs.svelte'
 
   // Aandacht: alles wat nu mis is, gesorteerd op ernst (tabblad nu), en per functie of ze werkt,
   // half ingesteld is of nog niet (tabblad instellingen). Elke knop opent het venster dat het oplost.
@@ -65,17 +66,22 @@
                    c.info && `${c.info} ter info`].filter(Boolean)
     return parts.length ? `${parts.join(', ')}.` : 'Alles in orde.'
   })
+  // Tabbladen met een teller: rood als er een probleem bij is, anders oranje.
+  let tabs = $derived([
+    { key: 'nu', label: 'nu', count: data ? data.counts.err + data.counts.warn : 0, level: data?.counts.err ? 'err' : 'warn' },
+    { key: 'instellingen', label: 'instellingen', count: setup ? setup.counts.half + setup.counts.none : 0, level: 'warn' },
+  ])
   let groups = $derived((setup?.groups || []).map((g) => ({ ...g, rows: hideOk ? g.rows.filter((r) => r.state !== 'ok') : g.rows }))
     .filter((g) => g.rows.length))
 </script>
 
 <Modal title="systemctl --failed" {onclose} wide>
-  <div class="tabs">
-    <button class="mini" class:on={tab === 'nu'} onclick={() => (tab = 'nu')}>nu{#if data?.counts.err + data?.counts.warn}<b class="n" class:e={data.counts.err}>{data.counts.err + data.counts.warn}</b>{/if}</button>
-    <button class="mini" class:on={tab === 'instellingen'} onclick={() => (tab = 'instellingen')}>instellingen{#if setup?.counts.half + setup?.counts.none}<b class="n">{setup.counts.half + setup.counts.none}</b>{/if}</button>
-    <button class="mini dl" disabled={dl} onclick={diagnose}
-            title="Eén bestand voor een foutmelding: versies, de checklist, fouten per integratie en de laatste 200 logregels van API, worker en syslog. Wachtwoorden, tokens en sleutels zijn gemaskeerd, IP-adressen en namen niet. Vraagt je 2FA-code.">{dl ? 'bezig…' : 'diagnose ↓'}</button>
-  </div>
+  <Tabs items={tabs} bind:value={tab}>
+    {#snippet extra()}
+      <button class="mini" disabled={dl} onclick={diagnose}
+              title="Eén bestand voor een foutmelding: versies, de checklist, fouten per integratie en de laatste 200 logregels van API, worker en syslog. Wachtwoorden, tokens en sleutels zijn gemaskeerd, IP-adressen en namen niet. Vraagt je 2FA-code.">{dl ? 'bezig…' : 'diagnose ↓'}</button>
+    {/snippet}
+  </Tabs>
   {#if error}<p class="err">{error}</p>{/if}
   {#if saved}<p class="hint top">{saved} gedownload. Wachtwoorden, tokens en sleutels zijn gemaskeerd, IP-adressen en namen niet: kijk het na voor je het deelt.</p>{/if}
 
@@ -138,10 +144,6 @@
 </Modal>
 
 <style>
-  .tabs { display: flex; gap: 6px; margin-bottom: 12px }
-  .dl { margin-left: auto }
-  .n { margin-left: 5px; color: var(--mid); font-size: 11px; font-weight: 500 }
-  .n.e { color: var(--err) }
   .top { margin: 0 0 10px }
   .it, .row { display: flex; gap: 12px; align-items: flex-start; padding: 9px 12px; border: 1px solid var(--line);
               border-radius: 10px; margin-bottom: 6px; background: var(--fill) }
