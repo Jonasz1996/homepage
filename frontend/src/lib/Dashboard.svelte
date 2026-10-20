@@ -7,6 +7,7 @@
   import Notifications from './Notifications.svelte'
   import Revisions from './Revisions.svelte'
   import ServiceForm from './ServiceForm.svelte'
+  import ServiceDetail from './ServiceDetail.svelte'
   import ServiceTile from './ServiceTile.svelte'
 
   let { user, onlogout } = $props()
@@ -20,6 +21,7 @@
   let error = $state('')
   let now = $state(new Date())
   let searchEl = $state()
+  let status = $state({})
 
   // Slepen: wat er gesleept wordt en waar het zou landen.
   let drag = $state(null) // { kind: 'service' | 'group' | 'page', id }
@@ -36,6 +38,10 @@
       .flatMap((p) => p.groups.flatMap((g) => g.services))
       .filter((s) => [s.name, s.description, s.url].some((v) => v && v.toLowerCase().includes(q)))
       .slice(0, 40)
+  })
+  let summary = $derived.by(() => {
+    const all = Object.values(status)
+    return { up: all.filter((s) => s.status === 'up').length, down: all.filter((s) => s.status === 'down').length }
   })
   let greeting = $derived.by(() => {
     const h = now.getHours()
@@ -63,6 +69,10 @@
     } finally {
       loaded = true
     }
+  }
+
+  async function loadStatus() {
+    try { status = await api('/status') } catch { /* volgende poging over 30 s */ }
   }
 
   async function act(fn) {
@@ -210,8 +220,10 @@
 
   onMount(() => {
     load()
+    loadStatus()
     const t = setInterval(() => (now = new Date()), 15000)
-    return () => clearInterval(t)
+    const s = setInterval(loadStatus, 30000)
+    return () => { clearInterval(t); clearInterval(s) }
   })
 </script>
 
@@ -228,7 +240,12 @@
     <div class="body head">
       <div class="hello">
         <h1>{greeting}, {user.username}</h1>
-        <p class="hint">{date}<span class="cur"></span></p>
+        <p class="hint">
+          {date}
+          {#if summary.up + summary.down > 0}
+            {' · '}<span class="ok">{summary.up} up</span>{#if summary.down}{' · '}<span class="down">{summary.down} down</span>{/if}
+          {/if}<span class="cur"></span>
+        </p>
       </div>
       <input
         class="search"
@@ -279,7 +296,8 @@
     <Card title={`grep -i "${query.trim()}"`} class="results">
       <div class="tiles pad">
         {#each results as s (s.id)}
-          <ServiceTile service={s} {editing} onedit={(svc) => (modal = { kind: 'service', service: svc })} />
+          <ServiceTile service={s} status={status[s.id]} {editing} onedit={(svc) => (modal = { kind: 'service', service: svc })}
+                       ondetail={(svc) => (modal = { kind: 'detail', service: svc })} />
         {:else}
           <p class="hint">Niets gevonden.</p>
         {/each}
@@ -323,8 +341,10 @@
                 {#each g.services as s, i (s.id)}
                   <ServiceTile
                     service={s}
+                    status={status[s.id]}
                     {editing}
                     onedit={(svc) => (modal = { kind: 'service', service: svc })}
+                    ondetail={(svc) => (modal = { kind: 'detail', service: svc })}
                     dragging={drag?.kind === 'service' && drag.id === s.id}
                     dropBefore={over?.groupId === g.id && over.index === i && drag?.kind === 'service'}
                     ondragstart={(e) => startDrag(e, 'service', s.id)}
@@ -376,6 +396,12 @@
     ondelete={modal.group ? deleteGroup(modal.group) : null}
     onclose={() => (modal = null)}
   />
+{:else if modal?.kind === 'detail'}
+  <ServiceDetail
+    service={modal.service}
+    onclose={() => (modal = null)}
+    onedit={(svc) => (modal = { kind: 'service', service: svc })}
+  />
 {:else if modal?.kind === 'import'}
   <ImportDialog pages={layout.pages} onclose={() => (modal = null)} ondone={load} />
 {:else if modal?.kind === 'revisions'}
@@ -385,6 +411,7 @@
 <style>
   .wrap { max-width: 1240px; margin: 0 auto; padding: min(4vh, 32px) 14px 50px }
   .clock { color: var(--text); margin-right: 4px }
+  .down { color: var(--err) }
   .head { display: flex; gap: 18px; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; padding-bottom: 12px }
   .hello .hint { margin: 6px 0 0 }
   .search { max-width: 340px }

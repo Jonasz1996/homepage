@@ -18,6 +18,7 @@
   let checkType = $state(s.check?.type || '')
   let checkTarget = $state(s.check?.target || '')
   let checkInterval = $state(s.check?.interval || 60)
+  let checkInsecure = $state(!!s.check?.insecure)
   let configText = $state(s.config && Object.keys(s.config).length ? JSON.stringify(s.config, null, 2) : '')
   let secretKeys = $state([...(s.secret_keys || [])])
   let removed = $state([])
@@ -35,7 +36,12 @@
       try { config = JSON.parse(configText) } catch { throw new Error('Instellingen zijn geen geldige JSON') }
     }
     const check = checkType
-      ? { type: checkType, target: checkTarget || url, interval: Number(checkInterval) || 60 }
+      ? {
+          type: checkType,
+          target: checkTarget || null,
+          interval: Math.max(15, Number(checkInterval) || 60),
+          ...(checkType === 'http' && checkInsecure ? { insecure: true } : {}),
+        }
       : {}
     const secrets = {}
     for (const k of removed) secrets[k] = null
@@ -130,10 +136,13 @@
         <div class="full">
           <label class="lbl" for="sf-target">Doel</label>
           <input id="sf-target" bind:value={checkTarget} disabled={!checkType}
-                 placeholder={checkType === 'tcp' ? '192.168.0.10:22' : checkType === 'ping' ? '192.168.0.10' : 'leeg = de URL hierboven'} />
+                 placeholder={checkType === 'tcp' ? 'leeg = host en poort uit de URL, of 192.168.0.10:22' : checkType === 'ping' ? 'leeg = host uit de URL, of 192.168.0.10' : 'leeg = de URL hierboven'} />
         </div>
       </div>
-      <p class="help">De checks zelf komen in fase 3; de instellingen worden nu al bewaard.</p>
+      {#if checkType === 'http'}
+        <label class="chk tls"><input type="checkbox" bind:checked={checkInsecure} /> certificaatfouten negeren (zelfondertekend, bv. Proxmox op :8006)</label>
+      {/if}
+      <p class="help">Een service is pas down na 3 mislukte checks op rij. Je krijgt dan een melding.</p>
     </details>
 
     <details class="adv" open={type !== 'link' || secretKeys.length > 0}>
@@ -197,6 +206,7 @@
   .adv summary::before { content: "▸ "; color: var(--dim) }
   .adv[open] summary::before { content: "▾ " }
   .secret { margin-bottom: 6px }
+  .tls { margin-top: 10px }
   .secret code { font-size: 12.5px; color: #d6e6ff }
   .secret code.gone { text-decoration: line-through; color: var(--dim) }
   .right { margin-left: auto }

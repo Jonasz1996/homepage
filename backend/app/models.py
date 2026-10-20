@@ -133,3 +133,31 @@ class Notification(Base):
     source: Mapped[str] = mapped_column(String(40), default="system")
     service_id: Mapped[int | None] = mapped_column(ForeignKey("services.id", ondelete="SET NULL"))
     read_at: Mapped[datetime | None]
+
+
+class CheckResult(Base):
+    """Eén uitgevoerde check. Op PostgreSQL met TimescaleDB is dit een hypertable."""
+
+    __tablename__ = "check_results"
+
+    service_id: Mapped[int] = mapped_column(ForeignKey("services.id", ondelete="CASCADE"), primary_key=True)
+    ts: Mapped[datetime] = mapped_column(primary_key=True, default=utcnow, index=True)
+    ok: Mapped[bool] = mapped_column(Boolean)
+    latency_ms: Mapped[float | None]
+    status_code: Mapped[int | None]
+    error: Mapped[str | None] = mapped_column(String(300))
+
+
+class ServiceState(Base):
+    """Huidige toestand per service, bijgewerkt door de worker."""
+
+    __tablename__ = "service_state"
+
+    service_id: Mapped[int] = mapped_column(ForeignKey("services.id", ondelete="CASCADE"), primary_key=True)
+    # up | down | unknown
+    status: Mapped[str] = mapped_column(String(8), default="unknown")
+    since: Mapped[datetime] = mapped_column(default=utcnow)
+    last_check: Mapped[datetime | None]
+    latency_ms: Mapped[float | None]
+    fail_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(300))

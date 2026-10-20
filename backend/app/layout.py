@@ -72,16 +72,27 @@ async def record_revision(db: AsyncSession, user: User | None, summary: str) -> 
 
 
 async def restore_snapshot(db: AsyncSession, snap: dict) -> None:
-    await db.execute(delete(Page))
-    await db.flush()
-    db.expunge_all()
+    """Zet de layout terug zonder services te verwijderen die blijven bestaan,
+    zodat hun monitoring-historiek bewaard blijft."""
+    page_ids, group_ids, service_ids = set(), set(), set()
     for p in snap["pages"]:
-        page = Page(id=p["id"], name=p["name"], icon=p.get("icon"), position=p["position"])
-        db.add(page)
+        page_ids.add(p["id"])
+        await db.merge(Page(id=p["id"], name=p["name"], icon=p.get("icon"), position=p["position"]))
+    await db.flush()
+    for p in snap["pages"]:
         for g in p["groups"]:
-            group = Group(id=g["id"], page_id=p["id"], name=g["name"], icon=g.get("icon"),
-                          position=g["position"], collapsed=g.get("collapsed", False))
-            db.add(group)
+            group_ids.add(g["id"])
+            await db.merge(Group(id=g["id"], page_id=p["id"], name=g["name"], icon=g.get("icon"),
+                                 position=g["position"], collapsed=g.get("collapsed", False)))
+    await db.flush()
+    for p in snap["pages"]:
+        for g in p["groups"]:
             for s in g["services"]:
-                db.add(Service(group_id=g["id"], **{f: s.get(f) for f in SERVICE_FIELDS}))
+                service_ids.add(s["id"])
+                await db.merge(Service(group_id=g["id"], **{f: s.get(f) for f in SERVICE_FIELDS}))
+    await db.flush()
+    # Eerst services, dan groepen, dan pagina's: wat verplaatst werd, hangt al onder de juiste ouder.
+    await db.execute(delete(Service).where(Service.id.not_in(service_ids or {-1})))
+    await db.execute(delete(Group).where(Group.id.not_in(group_ids or {-1})))
+    await db.execute(delete(Page).where(Page.id.not_in(page_ids or {-1})))
     await db.flush()

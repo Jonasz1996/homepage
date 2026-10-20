@@ -1,0 +1,24 @@
+[Unit]
+Description=homepage worker (monitoring-checks)
+After=network-online.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+User=homepage
+Group=homepage
+WorkingDirectory=/opt/homepage/backend
+EnvironmentFile=/etc/homepage/homepage.env
+ExecStart=/opt/homepage/.venv/bin/python -m app.monitoring.worker
+Restart=always
+RestartSec=5
+# Nodig voor ping.
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/homepage /etc/homepage
+
+[Install]
+WantedBy=multi-user.target

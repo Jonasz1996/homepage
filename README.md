@@ -13,6 +13,15 @@ Dit is fase 1 en 2 van het [stappenplan](https://claude.ai/code/artifact/fe2b226
 - zoeken met `Ctrl+K` of `/`, Enter opent het eerste resultaat
 - dagelijkse back-up van de database (`/var/backups/homepage`, 14 dagen)
 
+Fase 3, monitoring:
+
+- checks per service: HTTP(S), ping of TCP-poort, met eigen interval (minstens 15 s)
+- status, latency en een sparkline op elke tegel; samenvatting "x up · y down" bovenaan
+- mini dashboard per service (▤ op de tegel): latency-grafiek met min/max, uptime-strook,
+  verstoringen en de laatste checks, over 1 u, 24 u, 7 d, 30 d of 1 jaar
+- melding in het meldingencentrum als een service down gaat (na 3 mislukte checks) en weer terugkomt
+- historiek: met TimescaleDB 1 jaar (gecomprimeerd na 7 dagen), zonder TimescaleDB 90 dagen
+
 ## Installeren in een Proxmox-container
 
 Container: Debian 13 (of 12), unprivileged, `nesting=1`, 2 cores, 4 GB RAM, 32 GB disk, vast IP.
@@ -44,7 +53,7 @@ cd /opt/homepage && git pull && bash deploy/install.sh
 
 | Map | Inhoud |
 | --- | --- |
-| `backend/` | FastAPI, SQLAlchemy (async), Alembic-migraties, tests |
+| `backend/` | FastAPI, SQLAlchemy (async), Alembic-migraties, tests. De checks draaien in `app/monitoring/worker.py` (service `homepage-worker`) |
 | `frontend/` | Svelte 5 + Vite. Kleuren en stijl staan in `src/app.css` |
 | `deploy/` | Installatiescript, nginx-config, systemd-units |
 
