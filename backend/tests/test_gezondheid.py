@@ -389,8 +389,10 @@ def test_leesmij_met_versies():
     t = sc.readme({"postgresql": "15.14", "timescaledb": "2.28.1"})
     assert "Bij de laatste kopie: PostgreSQL 15.14 met TimescaleDB 2.28.1." in t
     assert "CREATE EXTENSION timescaledb VERSION '2.28.1'" in t and "PostgreSQL 15." in t
+    assert "apt install timescaledb-2-2.28.1-postgresql-15" in t and "timescaledb_post_restore" in t
     t = sc.readme({"postgresql": "17.6", "timescaledb": None})
-    assert "PostgreSQL 17.6, zonder TimescaleDB" in t and "VERSION" not in t
+    assert "PostgreSQL 17.6, zonder TimescaleDB" in t and "VERSION" not in t and "timescaledb_" not in t
+    # De rest (runuser, de migraties, dezelfde opdrachten als homepage-terugzetten): test_leesmij.
 
 
 async def test_selfcheck_test_van_de_back_up(authed, tmp_path, monkeypatch):

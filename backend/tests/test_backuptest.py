@@ -1,5 +1,6 @@
-"""De maandelijkse test van de eigen back-up (deploy/homepage-backuptest.sh) en welke fouten van pg_restore tellen
-(deploy/herstelfouten.sh, dat homepage-terugzetten ook gebruikt).
+"""De maandelijkse test van de eigen back-up (deploy/homepage-backuptest.sh), welke fouten van pg_restore tellen
+(deploy/herstelfouten.sh) en of een dump TimescaleDB nodig heeft (deploy/dumpinfo.sh): homepage-terugzetten gebruikt
+die twee ook.
 
 De scripts lopen hier echt: de dump komt van homepage-backup.sh (zo is dit ook de test van het weglaten van de
 logregels, met TimescaleDB in de chunks), het terugzetten gebeurt in een eigen testdatabase, met pg_dump en co. van
@@ -73,12 +74,18 @@ def test_welke_fouten_van_pg_restore_tellen(tmp_path):
 
 
 def test_terugzetten_en_installatie_gebruiken_het():
-    # homepage-terugzetten keurt het terugzetten af zoals de test van de back-up, niet meer alleen op alembic_version.
+    # homepage-terugzetten keurt het terugzetten af zoals de test van de back-up, niet meer alleen op alembic_version,
+    # en beslist net zo of er TimescaleDB nodig is.
     t = (DEPLOY / "terugzetten.sh").read_text()
-    assert re.search(r"if ! FOUTEN=\$\(/usr/local/sbin/homepage-herstelfouten /tmp/homepage-terugzetten\.log\)", t)
-    # Bij elke installatie en update: het script, de dienst en de timer (op de 1e van de maand om 04:15).
+    assert "HERSTELFOUTEN=/usr/local/sbin/homepage-herstelfouten\n" in t and "LOG=/tmp/homepage-terugzetten.log\n" in t
+    assert re.search(r'if ! fouten=\$\("\$HERSTELFOUTEN" "\$LOG"\)', t)
+    assert "DUMPINFO=/usr/local/sbin/homepage-dumpinfo\n" in t and 'info=$(pg "$DUMPINFO" "$DUMP")' in t
+    b = (DEPLOY / "homepage-backuptest.sh").read_text()
+    assert "DI=${DUMPINFO:-/usr/local/sbin/homepage-dumpinfo}" in b and 'if [ "$(sh "$DI" "$D" 2>/dev/null)"' in b
+    # Bij elke installatie en update: de scripts, de dienst en de timer (op de 1e van de maand om 04:15).
     i = (DEPLOY / "install.sh").read_text()
     assert '"$APP_DIR/deploy/herstelfouten.sh" /usr/local/sbin/homepage-herstelfouten' in i
+    assert '"$APP_DIR/deploy/dumpinfo.sh" /usr/local/sbin/homepage-dumpinfo' in i
     assert '"$APP_DIR/deploy/homepage-backuptest.sh" /usr/local/sbin/homepage-backuptest' in i
     assert re.search(r"systemctl enable --now .*homepage-backuptest\.timer", i)
     assert "OnCalendar=*-*-01 04:15:00" in (DEPLOY / "homepage-backuptest.timer").read_text()
@@ -91,6 +98,57 @@ def test_weigert_de_echte_database(tmp_path):
                        env={**os.environ, "BACKUP_DIR": str(tmp_path), "PGDATABASE": "homepage",
                             "BACKUPTEST_DB": "homepage"})
     assert r.returncode == 2 and "andere" in r.stderr and not (tmp_path / sc.RESTORE_FILE).exists()
+
+
+# Wat pg_dump zegt als de compressie van TimescaleDB een chunk vervangt tussen zijn lijst en zijn LOCK TABLE (zo in
+# de CI gezien, met TimescaleDB 2.30 op PostgreSQL 17).
+VERDWENEN = 'pg_dump: error: query failed: ERROR:  relation "_timescaledb_internal._hyper_1_1_chunk" does not exist'
+
+
+def nep_pg_dump(d: Path, fouten: list[str]) -> Path:
+    """Een pg_dump die eerst een half bestand schrijft (na -f) en dan de volgende fout uit de lijst geeft; zijn de
+    fouten op, dan een dump. Hoe vaak het liep, staat in d/pg_dump.n."""
+    d.mkdir(exist_ok=True)
+    (d / "pg_dump.fouten").write_text("".join(f"{f}\n" for f in fouten))
+    (d / "pg_dump").write_text(f"""#!/bin/sh
+n=$(( $(cat "{d}/pg_dump.n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "{d}/pg_dump.n"
+while [ $# -gt 0 ]; do [ "$1" = -f ] && f=$2; shift; done
+echo half > "$f"
+fout=$(sed -n "${{n}}p" "{d}/pg_dump.fouten")
+[ -z "$fout" ] || {{ echo "$fout" >&2; exit 1; }}
+echo dump > "$f"
+""")
+    (d / "pg_dump").chmod(0o755)
+    return d
+
+
+@pytest.mark.parametrize("fouten, ok, keer", [
+    ([VERDWENEN, VERDWENEN], True, 3),
+    ([VERDWENEN] * 3, False, 3),
+    (["pg_dump: error: could not write to output file: No space left on device"], False, 1),
+])
+def test_back_up_opnieuw_als_timescaledb_een_chunk_vervangt(tmp_path, fouten, ok, keer):
+    """De achtergrondtaken van TimescaleDB lopen door tijdens de nachtelijke dump: een chunk die net verdween is pech
+    met het moment (nog eens, tot 3 keer), elke andere fout niet."""
+    fake = nep_pg_dump(tmp_path / "bin", fouten)
+    (fake / "psql").write_text("#!/bin/sh\nexit 0\n")
+    (fake / "systemctl").write_text("#!/bin/sh\necho active\n")
+    for f in ("psql", "systemctl"):
+        (fake / f).chmod(0o755)
+    bk = tmp_path / "bk"
+    bk.mkdir()
+    r = subprocess.run(["sh", str(DEPLOY / "homepage-backup.sh")], capture_output=True, text=True, timeout=30,
+                       env={**os.environ, "PATH": f"{fake}:{os.environ['PATH']}", "BACKUP_DIR": str(bk),
+                            "BACKUP_WACHT": "0"})
+    assert (r.returncode == 0) == ok, r.stderr
+    assert (fake / "pg_dump.n").read_text().strip() == str(keer)
+    dumps = list(bk.iterdir())
+    if ok:
+        assert len(dumps) == 1 and dumps[0].read_text() == "dump\n" and re.fullmatch(r"homepage-[\d-]+\.dump", dumps[0].name)
+        assert r.stderr.count("opnieuw") == 2
+    else:
+        assert dumps == [] and fouten[-1] in r.stderr
+        assert r.stderr.count("opnieuw") == keer - 1
 
 
 # --- met PostgreSQL ---------------------------------------------------------------------------------------------
@@ -129,7 +187,7 @@ async def _env(tmp_path: Path, url: URL) -> dict:
     return {**os.environ, "PATH": f"{path}:{os.environ['PATH']}", "PGHOST": url.host or "", "PGPORT": str(url.port or 5432),
             "PGUSER": url.username or "", "PGPASSWORD": url.password or "", "PGDATABASE": url.database,
             "BACKUP_DIR": str(tmp_path), "BACKUPTEST_DB": f"{url.database}_backuptest",
-            "HERSTELFOUTEN": str(DEPLOY / "herstelfouten.sh"),
+            "HERSTELFOUTEN": str(DEPLOY / "herstelfouten.sh"), "DUMPINFO": str(DEPLOY / "dumpinfo.sh"),
             # De schijf van tmp_path, en niet die van de server (in de CI staat die in een container). Hoe vol de
             # schijf van de testmachine al is, doet hier niet ter zake: de grens zelf komt verderop aan bod.
             "BACKUPTEST_DF_PATH": str(tmp_path), "BACKUPTEST_MAX_PCT": "100"}
@@ -160,7 +218,13 @@ async def test_back_up_terugzetten_in_een_testdatabase(tmp_path):
         _run("homepage-backup.sh", env)
         dump = next((tmp_path / "bk").glob("homepage-*.dump"))
 
-        r = _run("homepage-backuptest.sh", env)
+        # Welke opdrachten psql kreeg: de extensie in de testdatabase in de versie van de echte database.
+        fake = tmp_path / "bin"
+        fake.mkdir()
+        psql_log, real = tmp_path / "psql.log", Path(env["PATH"].split(":")[0]) / "psql"
+        (fake / "psql").write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{psql_log}"\nexec "{real}" "$@"\n')
+        (fake / "psql").chmod(0o755)
+        r = _run("homepage-backuptest.sh", {**env, "PATH": f"{fake}:{env['PATH']}"})
         log = (tmp_path / "bk" / "backuptest.log").read_text()
         assert r["status"] == "ok", (r, log)
         assert r["dump"] == dump.name and r["why"] is None and r["seconds"] is not None
@@ -176,7 +240,10 @@ async def test_back_up_terugzetten_in_een_testdatabase(tmp_path):
         engine = create_async_engine(url)
         async with engine.connect() as conn:
             if await timescale(conn):
-                assert r["timescaledb"]
+                ext = (await conn.execute(text(
+                    "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'"))).scalar()
+                assert r["timescaledb"] == ext
+                assert f"CREATE EXTENSION IF NOT EXISTS timescaledb VERSION '{ext}'" in psql_log.read_text()
                 assert (await conn.execute(text("SELECT current_setting('timescaledb.restoring')"))).scalar() == "off"
             assert (await conn.execute(text("SELECT count(*) FROM log_entries"))).scalar() > 0
         await engine.dispose()

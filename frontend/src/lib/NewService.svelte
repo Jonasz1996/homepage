@@ -1,7 +1,8 @@
 <script>
   import { onMount, untrack } from 'svelte'
-  import { api } from './api.js'
+  import { api, withReauth } from './api.js'
   import CleanupForm from './CleanupForm.svelte'
+  import { ask } from './dialog.svelte.js'
   import Modal from './Modal.svelte'
   import NewServiceForm from './NewServiceForm.svelte'
   import RunSteps from './RunSteps.svelte'
@@ -18,6 +19,11 @@
   let runs = $state(null)
   let runsErr = $state('')
   let shown = $state(null)
+  // Echt uitvoeren: standaard uit (alleen de proef). Aanzetten vraagt een verse 2FA, uitzetten niet.
+  let echt = $state(null)
+  let echtBusy = $state(false)
+  let echtErr = $state('')
+  let real = $derived(echt?.on === true)
 
   async function loadOpties() {
     try { opties = await api('/nieuweservice/opties'); optErr = '' } catch (e) { optErr = e.message; opties = { systems: {} } }
@@ -25,7 +31,23 @@
   async function loadRuns() {
     try { runs = (await api('/nieuweservice/runs')).runs; runsErr = '' } catch (e) { runsErr = e.message }
   }
-  onMount(() => { loadOpties(); loadRuns() })
+  async function loadEcht() {
+    try { echt = await api('/nieuweservice/echt'); echtErr = '' } catch (e) { echtErr = e.message }
+  }
+  onMount(() => { loadOpties(); loadRuns(); loadEcht() })
+
+  async function setEcht(e) {
+    const on = e.currentTarget.checked
+    e.currentTarget.checked = real   // pas omzetten als de server het bevestigt
+    if (on && !(await ask('Echt uitvoeren aanzetten? Maken, opruimen en ongedaan maken veranderen dan echt NPM, ' +
+      'Cloudflare, AdGuard, Proxmox en de tegels. Doe het pas als een proef op je echte systemen klopte.', { ok: 'Aanzetten' }))) return
+    echtBusy = true
+    echtErr = ''
+    try {
+      const put = () => api('/nieuweservice/echt', { method: 'PUT', body: { on } })
+      echt = on ? await withReauth(put) : await put()
+    } catch (err) { echtErr = err.message } finally { echtBusy = false }
+  }
 
   const half = (r) => (r.status === 'gestopt' || r.status === 'onderbroken') && !r.undone_by
   let tabs = $derived([
@@ -51,19 +73,26 @@
 
 <Modal title="service new" {onclose} wide>
   <Tabs items={tabs} bind:value={current} label="Nieuwe service" />
+  <div class="echt">
+    <label class="chk"><input id="ns-echt" type="checkbox" checked={real} disabled={!echt || echtBusy} onchange={setEcht} />
+      echt uitvoeren</label>
+    <span class="hint small">{real ? 'Aan: maken, opruimen en ongedaan maken veranderen echt iets (met je 2FA-code).'
+      : 'Uit: alleen de proef. Klopt een proef op je echte systemen, zet het dan aan (vraagt je 2FA-code).'}</span>
+  </div>
+  {#if echtErr}<p class="err">{echtErr}</p>{/if}
   {#if optErr}<p class="err">{optErr}</p>{/if}
 
   {#if opties?.busy && current !== 'geschiedenis'}
     <!-- Een run die al liep toen je het venster opende (bv. van een ander toestel). -->
     {#key opties.busy.id}
-      <RunSteps run={opties.busy} undo onfinish={changed} />
+      <RunSteps run={opties.busy} undo echt={real} onfinish={changed} />
     {/key}
   {/if}
 
   {#if current === 'maken'}
-    <NewServiceForm {opties} {groups} {onclose} ondone={changed} />
+    <NewServiceForm {opties} {groups} {onclose} echt={real} ondone={changed} />
   {:else if current === 'opruimen'}
-    <CleanupForm {service} {services} ondone={changed} />
+    <CleanupForm {service} {services} echt={real} ondone={changed} />
   {:else}
     {#if runsErr}<p class="err">{runsErr}</p>{/if}
     {#if runs && !runs.length}<p class="hint small">Nog niets gemaakt of opgeruimd.</p>{/if}
@@ -76,7 +105,7 @@
           </button>
           {#if shown?.id === r.id}
             {#key shown.id}
-              <RunSteps run={shown} undo onfinish={() => loadRuns()} onundo={(u) => { shown = u; changed() }} />
+              <RunSteps run={shown} undo echt={real} onfinish={() => loadRuns()} onundo={(u) => { shown = u; changed() }} />
             {/key}
           {/if}
         </li>
@@ -86,6 +115,9 @@
 </Modal>
 
 <style>
+  .echt { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 6px 0 2px; font-size: 12.5px }
+  .echt .chk { display: inline-flex; align-items: center; gap: 5px; color: var(--text-h); white-space: nowrap }
+  .echt .hint { min-width: 0; overflow-wrap: anywhere }
   .hist { list-style: none; padding: 0; margin: 4px 0 }
   .hist li { border-top: 1px solid var(--line); padding: 2px 0 }
   .row-btn { width: 100%; text-align: left; background: none; border: 0; color: var(--text); padding: 6px 2px;

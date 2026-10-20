@@ -364,6 +364,9 @@ async def lab(authed, monkeypatch):
                                                      "ips": ["192.168.0.27"], "dns": []}]}))
     await db.commit()
     await agen.aclose()
+    # Echt uitvoeren staat standaard uit; de tests van echte runs zetten het aan (de login is net, dus geen 2FA-vraag).
+    r = await authed.put("/api/nieuweservice/echt", json={"on": True})
+    assert r.status_code == 200 and r.json()["on"] is True, r.text
     f.calls.clear()
     return f
 
@@ -682,6 +685,77 @@ async def test_maken_vraagt_verse_2fa_en_de_hash(lab, authed):
     assert "call" not in runs["runs"][0]["steps"][0] and "call" in run["steps"][0]
 
 
+# --- echt uitvoeren ------------------------------------------------------------------------------------------
+
+async def _stale() -> None:
+    agen, db = await _db()
+    await db.execute(update(Session).values(auth_at=datetime.now(timezone.utc) - timedelta(hours=1)))
+    await db.commit()
+    await agen.aclose()
+
+
+async def _echt_audit() -> list:
+    agen, db = await _db()
+    rows = (await db.execute(select(AuditLog).where(AuditLog.action == "nieuwe_service_echt")
+                             .order_by(AuditLog.id))).scalars().all()
+    await agen.aclose()
+    return [r.detail["on"] for r in rows]
+
+
+async def test_echt_uitvoeren_staat_standaard_uit(authed):
+    """Ook een bestaande installatie (geen rij) start met alleen de proef."""
+    assert (await authed.get("/api/nieuweservice/echt")).json() == {"on": False, "at": None, "by": None}
+    g = await _group(authed)
+    body = {"name": "test", "ip": "192.168.0.50", "port": 8080, "tile": {"group_id": g, "label": "Test"}}
+    r = await authed.post("/api/nieuweservice/maken", json={**body, "plan_hash": "0" * 16})
+    assert r.status_code == 409 and r.json()["detail"] == ns.REAL_OFF
+
+
+async def test_zonder_echt_uitvoeren_alleen_de_proef(lab, authed):
+    """Uit: de proeven werken, maken, opruimen en ongedaan maken weigeren (vóór de 2FA-vraag) en veranderen niets."""
+    lab.fail[("POST", f"/client/v4/zones/{ZONE_ID}/dns_records")] = _cf_error(81053, "already exists.")
+    run = await _start(authed, _body(lab))
+    assert run["status"] == "gestopt"
+    # Uitzetten mag altijd, ook zonder verse 2FA.
+    await _stale()
+    r = await authed.put("/api/nieuweservice/echt", json={"on": False})
+    assert r.status_code == 200, r.text
+    assert r.json()["on"] is False and r.json()["by"] == "jonas" and r.json()["at"]
+    lab.calls.clear()
+    body = _body(lab, name="emby")
+    plan = await _proef(authed, body)
+    assert plan["kan"] is True
+    r = await authed.post("/api/nieuweservice/maken", json={**body, "plan_hash": plan["hash"]})
+    assert r.status_code == 409 and r.json()["detail"] == ns.REAL_OFF
+    assert "Beheer → Nieuwe service" in r.json()["detail"] and "2FA" in r.json()["detail"]
+    r = await authed.post("/api/nieuweservice/opruimen/proef", json={"fqdn": FQDN})
+    assert r.status_code == 200, r.text
+    r = await authed.post("/api/nieuweservice/opruimen", json={"fqdn": FQDN, "plan_hash": r.json()["plan"]["hash"]})
+    assert r.status_code == 409 and r.json()["detail"] == ns.REAL_OFF
+    r = await authed.post(f"/api/nieuweservice/runs/{run['id']}/ongedaan/proef")
+    assert r.status_code == 200, r.text
+    r = await authed.post(f"/api/nieuweservice/runs/{run['id']}/ongedaan",
+                          json={"plan_hash": r.json()["plan"]["hash"]})
+    assert r.status_code == 409 and r.json()["detail"] == ns.REAL_OFF
+    assert lab.writes() == [] and not router._tasks
+    runs = (await authed.get("/api/nieuweservice/runs")).json()
+    assert [x["id"] for x in runs["runs"]] == [run["id"]] and runs["busy"] is None
+    # Aanzetten vraagt een verse 2FA; zonder blijft het uit.
+    r = await authed.put("/api/nieuweservice/echt", json={"on": True})
+    assert r.status_code == 403 and r.json()["detail"] == "reauth_required"
+    assert (await authed.get("/api/nieuweservice/echt")).json()["on"] is False
+    assert (await authed.post("/api/auth/reauth", json={"code": pyotp.TOTP(authed.totp_secret).now()})).status_code == 200
+    r = await authed.put("/api/nieuweservice/echt", json={"on": True})
+    assert r.status_code == 200 and r.json()["on"] is True
+    # Nog eens aan: niets te doen, geen nieuwe auditregel.
+    assert (await authed.put("/api/nieuweservice/echt", json={"on": True})).json()["on"] is True
+    assert await _echt_audit() == [True, False, True]   # de opzet van de test zette het al eens aan
+    assert (await authed.put("/api/nieuweservice/echt", json={"on": "ja"})).status_code == 422
+    assert (await authed.put("/api/nieuweservice/echt", json={"on": True, "x": 1})).status_code == 422
+    plan, undo = await _undo(authed, run["id"])
+    assert undo["status"] == "klaar"
+
+
 async def test_plan_veranderd_na_de_proef(lab, authed):
     body = _body(lab)
     plan = await _proef(authed, body)
@@ -809,6 +883,14 @@ async def test_herstart_markeert_onderbroken(lab, authed):
 async def test_checklist_rij(lab, authed):
     row = await _checklist(authed)
     assert row["state"] == "ok" and row["fix"] == {"window": "api"}
+    # Echt uitvoeren uit: half, met waar je het aanzet.
+    assert (await authed.put("/api/nieuweservice/echt", json={"on": False})).status_code == 200
+    row = await _checklist(authed)
+    assert row["state"] == "half" and row["text"] == "Ingesteld, maar alleen als proef."
+    assert row["fix"] == {"window": "nieuweservice"} and row["optional"] is True
+    assert len(row["todo"]) == 1 and "echt uitvoeren" in row["todo"][0] and "2FA" in row["todo"][0]
+    assert (await authed.put("/api/nieuweservice/echt", json={"on": True})).status_code == 200
+    assert (await _checklist(authed))["state"] == "ok"
     r = await authed.patch(f"/api/apis/{lab.apis['npm']}", json={
         "name": "NPM", "kind": "npm", "url": NPM, "secrets": {"action_username": "", "action_password": ""}})
     assert r.status_code == 200, r.text

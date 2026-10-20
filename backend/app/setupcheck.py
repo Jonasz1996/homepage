@@ -702,8 +702,15 @@ async def nieuweservice_row(db: AsyncSession) -> dict:
     last = next(iter(ns.runs_of(await _state(db, ns.STATE_KEY))), None)
     if last and ns.effective(last)["status"] in ("gestopt", "onderbroken") and not last.get("undone_by"):
         todo.append("De laatste run stopte halverwege: Beheer → Nieuwe service → geschiedenis")
+    # Zoals "alleen proef" bij de nachtelijke updates: half tot Jonas het zelf aanzet.
+    proef_only = [] if (await ns.real(db))["on"] else [
+        "Echt uitvoeren staat uit: alleen de proef werkt. Klopt een proef op je echte systemen, zet dan 'echt "
+        "uitvoeren' aan in Beheer → Nieuwe service (vraagt je 2FA-code)."]
     if todo:
-        return row("nieuweservice", "netwerk", title, "half", "Werkt deels.", todo, fix, optional=True)
+        return row("nieuweservice", "netwerk", title, "half", "Werkt deels.", todo + proef_only, fix, optional=True)
+    if proef_only:
+        return row("nieuweservice", "netwerk", title, "half", "Ingesteld, maar alleen als proef.", proef_only,
+                   {"window": "nieuweservice"}, optional=True)
     return row("nieuweservice", "netwerk", title, "ok", "NPM met een eigen schrijfgebruiker en Cloudflare DNS: klaar.",
                fix=fix, optional=True)
 

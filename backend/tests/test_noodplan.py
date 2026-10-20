@@ -399,7 +399,7 @@ async def test_noodplan_inhoud(authed, monkeypatch, tmp_path):
     assert "cluster thuis, QDevice op 192.168.0.61" in md and "Nginx Proxy Manager" in md
     assert "| OPNsense | <https://192.168.0.20> | IP in de tegel | VM 100 op pve50 |" in md
     assert "| Dit dashboard | <https://home.jbogaert.be> | alleen via NPM" in md and "pct enter 101 op pve50" in md
-    assert "homepage-terugzetten" in md and "pg_restore -d homepage" in md
+    assert "homepage-terugzetten" in md and "pg_restore -d homepage" in md and "homepage-diagnose" in md
     assert "versleuteld in /mnt/homepage-backup/secret.key.enc (wachtzin ingesteld 3/9)" in md
     stored = json.dumps(value)
     for secret in SECRETS + (get_settings().secret_key_file.read_text().strip(),):

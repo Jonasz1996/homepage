@@ -29,7 +29,8 @@
     </section>
   {/each}
   <p class="hint">Werkt iets niet meer na een update? Typ <code>homepage-terugzetten</code> in de container: dat zet de vorige
-    versie terug, met de database van vlak voor de update.</p>
+    versie terug, met de database van vlak voor de update. Wat er misliep, zet <code>homepage-diagnose</code> samen
+    in één bestand.</p>
   <div class="row"><button class="btn" onclick={onclose}>Gezien</button></div>
 </Modal>
 

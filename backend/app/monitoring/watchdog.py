@@ -168,6 +168,17 @@ async def healthy(db: AsyncSession, now: datetime | None = None) -> bool:
     return newest is not None and now - _aware(newest) < limit
 
 
+def _zelf(conn: HTTPConnection) -> bool:
+    """Komt het verzoek van de container zelf (127.0.0.1 of ::1, ook via nginx)?"""
+    try:
+        ip = ipaddress.ip_address(conn.client.host) if conn.client else None
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return bool(ip and ip.is_loopback)
+
+
 async def healthz(conn: HTTPConnection, db: AsyncSession) -> bool | None:
     """None = van buitenaf (404), anders gezond of niet. Vijf seconden in het geheugen, zodat een poller niet elke
     keer de database vraagt. De sessie maakt pas verbinding bij het eerste verzoek: van buitenaf raakt dit de
@@ -182,7 +193,8 @@ async def healthz(conn: HTTPConnection, db: AsyncSession) -> bool | None:
         ok = await healthy(db)
         # Onthouden dat iets (Zabbix) dit opvraagt: de instellingen-checklist toont dat. Hoogstens elke 5 min (de
         # eerste keer altijd: de klok begint bij het opstarten van de machine, en die kan nog geen 5 min aan staan).
-        if _seen_saved is None or time.monotonic() - _seen_saved > 300:
+        # Niet van de container zelf (homepage-diagnose): wat daar draait, merkt niet dat de container uitvalt.
+        if not _zelf(conn) and (_seen_saved is None or time.monotonic() - _seen_saved > 300):
             _seen_saved = time.monotonic()
             st = await ensure_state(db, SEEN_KEY, {})
             st.value = {"at": datetime.now(timezone.utc).isoformat(), "ip": conn.client.host if conn.client else None}

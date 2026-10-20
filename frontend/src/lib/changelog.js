@@ -3,6 +3,23 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 40,
+    datum: '2026-10-17',
+    titel: 'Vangnetten die echt werken',
+    items: [
+      'homepage-terugzetten kijkt nu eerst alles na terwijl het dashboard nog draait (de kopie leesbaar, de juiste versie van TimescaleDB, genoeg vrije schijfruimte) en weigert anders zonder iets te veranderen. Bij een grote database liep het vroeger mis nadat de live database al weg was. Gaat er toch iets mis, dan zegt het precies waar je staat en hoe je terugkomt.',
+      'Nachtelijke updates en "alles bijwerken" slaan de container van het dashboard zelf over: de machine krijgt in Beheer → Updates het label "het dashboard zelf". Mislukt het verversen of downloaden van de pakketten (mirror of DNS weg), dan is er niets geïnstalleerd en wordt er niet meer teruggedraaid.',
+      'Nieuwe service staat standaard alleen op proef. Maken, opruimen en ongedaan maken werken pas als je bovenaan in het venster "echt uitvoeren" aanzet (met je 2FA-code).',
+      'Elke installatie of update schrijft een log in /var/log/homepage, kijkt na of de API, de worker en de syslog-ontvanger echt draaien, en zet max_connections van PostgreSQL hoger als dat nodig is. Nieuw commando homepage-diagnose: één tekstbestand met wat er mis is, ook als het dashboard zelf niet opstart.',
+      'De herstelstappen naast de back-ups en in het noodplan werken nu op een nieuwe container: zonder sudo, met de juiste versie van TimescaleDB en met de databasemigratie.',
+      'De diagnose (! → diagnose ↓) bevat nu ook de laatste runs van Nieuwe service, de stand van het noodplan, de laatste proeven en de fouten uit je browser.',
+    ],
+    instellen: [
+      'Kijk in Beheer → Updates of precies één machine "het dashboard zelf" heet, en of het de juiste is. Update die container voortaan met het installatiecommando, of vanuit de Proxmox-console.',
+      'Na een eerste proef van Nieuwe service op je echte systemen: zet "echt uitvoeren" aan als alles klopt.',
+    ],
+  },
+  {
     nr: 39,
     datum: '2026-10-11',
     titel: 'Noodplan',
