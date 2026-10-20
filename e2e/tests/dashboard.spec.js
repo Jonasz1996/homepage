@@ -128,6 +128,13 @@ test('hw: back-ups en cluster zonder Proxmox-tegel', async () => {
   await page.getByRole('button', { name: 'Gezondheid sluiten' }).click()
 })
 
+test('één node \'s nachts uit', async () => {
+  await page.locator('button.mini[title^="Capaciteit"]').click()
+  await page.getByRole('button', { name: 'voorstel berekenen' }).click()
+  await expect(page.getByText('Nog geen Proxmox-tegel')).toBeVisible()
+  await page.keyboard.press('Escape')
+})
+
 test('gsm: knoppen achter het menu', async () => {
   await page.setViewportSize({ width: 390, height: 844 })
   const menu = page.getByRole('button', { name: 'Menu' })

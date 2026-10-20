@@ -2,14 +2,17 @@
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
 from ..deps import current_user
+from ..integrations import IntegrationError
 from ..models import Metric, Service, User
+from ..monitoring import consolidate
 from ..monitoring.capacity import storage_trends
+from .integrations import clients
 
 router = APIRouter(prefix="/api", tags=["capacity"])
 
@@ -49,3 +52,13 @@ async def capacity(user: User = Depends(current_user), db: AsyncSession = Depend
     return {"sampled_at": sampled, "storage": storage,
             "nodes": [row(m) for m in rows if m.kind == "node"],
             "guests": [row(m) for m in rows if m.kind == "guest"]}
+
+
+@router.get("/capacity/nightly")
+async def nightly(hours: int = Query(8, ge=1, le=16), user: User = Depends(current_user),
+                  db: AsyncSession = Depends(get_db)):
+    """Welke node 's nachts uit kan als zijn VM's en CT's naar de andere verhuizen (alleen advies)."""
+    try:
+        return await consolidate.propose(db, clients, hours)
+    except IntegrationError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e)) from e

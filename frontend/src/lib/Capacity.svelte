@@ -3,6 +3,7 @@
   import { api, poll } from './api.js'
   import { bytes } from './format.js'
   import Modal from './Modal.svelte'
+  import Nightly from './Nightly.svelte'
 
   // Capaciteit: opslag met voorspelling, en CPU/RAM/schijf van alle nodes en VM's/CT's.
   let { onclose } = $props()
@@ -160,6 +161,7 @@
   {:else}
     <p class="hint">laden…</p>
   {/if}
+  {#if data}<Nightly />{/if}
 </Modal>
 
 <style>

@@ -3,6 +3,17 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 28,
+    datum: '2026-10-05',
+    titel: 'Een node \'s nachts uit',
+    items: [
+      'df → één node \'s nachts uit: welke node leeg kan, welke VM\'s en CT\'s waarheen verhuizen (met de commando\'s), wat het bespaart en een cronregel die hem \'s avonds uitzet en \'s ochtends weer aan.',
+    ],
+    instellen: [
+      'Kijk in df → voorstel berekenen welke HP \'s nachts uit kan.',
+    ],
+  },
+  {
     nr: 27,
     datum: '2026-10-05',
     titel: 'Back-ups dubbel en een sterkere cluster',
