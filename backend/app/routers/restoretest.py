@@ -23,8 +23,21 @@ _task: asyncio.Task | None = None
 
 def _out(value: dict | None) -> dict:
     value = value or {}
+    now = datetime.now(timezone.utc)
+    # Een "bezig" van meer dan 2 uur oud is een onderbroken test: die ruimt de volgende test op, en hij mag de knoppen
+    # niet blokkeren (een proef 's nachts laat hem staan).
+    busy = restoretest.is_busy(value, now)
     return {"settings": restoretest.settings(value), "history": value.get("history") or [],
-            "running": value.get("running"), "next": restoretest.next_run(value, datetime.now(timezone.utc))}
+            "dry_history": value.get("dry_history") or [],
+            "running": value.get("running") if busy else None,
+            "interrupted": value.get("running") if value.get("running") and not busy else None,
+            "next": restoretest.next_run(value, now)}
+
+
+def _conflict(value: dict | None) -> None:
+    """Dezelfde regel voor ▶ nu testen en de proef: niet terwijl er een test loopt."""
+    if (_task and not _task.done()) or restoretest.is_busy(value, datetime.now(timezone.utc)):
+        raise HTTPException(status.HTTP_409_CONFLICT, "Er loopt al een hersteltest")
 
 
 @router.get("")
@@ -58,6 +71,8 @@ class SettingsIn(BaseModel):
     hour: int = Field(default=5, ge=0, le=23)
     vmid_from: int = Field(default=9900, ge=100, le=999_000_000)
     only: list[int] = Field(default_factory=list, max_length=200)
+    # Alleen proef: de maandelijkse test toont alleen wat hij zou doen (▶ nu testen test wel echt).
+    dry: bool = False
 
 
 @router.put("/settings", dependencies=[outside.guard("acties")])
@@ -68,8 +83,16 @@ async def put_settings(body: SettingsIn, request: Request, user: User = Depends(
         if svc is None or svc.type != "proxmox":
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Kies een Proxmox-tegel")
     st = await ensure_state(db, restoretest.STATE_KEY, {})
-    st.value = {**(st.value or {}), "settings": body.model_dump()}
-    await audit(db, request, user, "restoretest_settings", enabled=body.enabled, node=body.node, pbs=body.pbs)
+    old = restoretest.settings(st.value)
+    value = {**(st.value or {}), "settings": body.model_dump()}
+    # Aanzetten (of "alleen proef" uitzetten) na het moment van deze maand: anders zet de worker binnen de minuut
+    # echt een CT terug. De volgende echte test is dan volgende maand; ▶ nu testen kan altijd.
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    if body.enabled and not body.dry and (not old["enabled"] or old["dry"]) and restoretest.due(value, now):
+        value["last_at"] = now.isoformat()
+    st.value = value
+    await audit(db, request, user, "restoretest_settings", enabled=body.enabled, node=body.node, pbs=body.pbs,
+                dry=body.dry)
     await db.commit()
     return _out(st.value)
 
@@ -78,11 +101,19 @@ async def put_settings(body: SettingsIn, request: Request, user: User = Depends(
 async def run_now(request: Request, user: User = Depends(recent_auth), db: AsyncSession = Depends(get_db)):
     global _task
     st = await db.get(AppState, restoretest.STATE_KEY)
-    busy = (st.value or {}).get("running") if st else None
-    if (_task and not _task.done()) or (
-            busy and datetime.now(timezone.utc) - datetime.fromisoformat(busy["at"]) < restoretest.STALE):
-        raise HTTPException(status.HTTP_409_CONFLICT, "Er loopt al een hersteltest")
+    _conflict(st.value if st else None)
     await audit(db, request, user, "restoretest_run")
     await db.commit()
     _task = asyncio.create_task(restoretest.run(_maker(request), clients, manual=True))
     return {"ok": True}
+
+
+@router.post("/proef")
+async def proef_run(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Wat ▶ nu testen zou doen, zonder het te doen: alleen lezen in Proxmox, niets bewaren, geen slot."""
+    st = await db.get(AppState, restoretest.STATE_KEY)
+    value = dict(st.value or {}) if st else {}
+    _conflict(value)
+    svc = await restoretest.service(db, restoretest.settings(value))
+    await db.close()
+    return await restoretest.plan(svc, clients, value, manual=True)

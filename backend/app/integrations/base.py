@@ -158,6 +158,10 @@ class Integration:
     async def detail(self) -> dict:
         return {"sections": [{"kind": "kv", "title": "overzicht", "items": await self.summary()}]}
 
+    def action_request(self, action: str, params: dict) -> tuple[str, str, dict | None]:
+        """Methode, pad en inhoud van de call die action() zou sturen, zonder aanmelding (voor de proefmodus)."""
+        raise IntegrationError("Deze integratie heeft geen acties")
+
     async def action(self, action: str, params: dict) -> str:
         raise IntegrationError("Deze integratie heeft geen acties")
 

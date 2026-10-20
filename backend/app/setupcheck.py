@@ -14,7 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .health import scan as hw, security
 from .integrations import IntegrationError, build
-from .models import AppState, CronJob, LogEntry, PushMonitor, Service, ServiceState, SshHost, WebhookSource
+from .models import (AppState, CronJob, HealRule, LogEntry, PushMonitor, Service, ServiceState, SshHost,
+                     WebhookSource)
 from .monitoring import (cluster, configs, coverage, devices, pbssync, restoretest, routes, upgrade, watchdog, webpush,
                          zabbix as zbx)
 from .monitoring.containerlogs import logs_on
@@ -95,6 +96,8 @@ async def proxmox(db: AsyncSession, clients, svcs: list[Service], results: dict[
                     "tegel van type proxmox."], {"window": "api"})
     todo = _errors(svcs, results)
     tokens = await security.proxmox_tokens(db, clients)
+    # De rechten opvragen duurt tot 8 s per token: geen transactie open.
+    await db.commit()
     split = any(i.split for _, i in tokens)
     for name, integ in tokens:
         read, act, err = await _privs(integ)
@@ -131,6 +134,10 @@ async def restore(db: AsyncSession) -> dict:
                    "actietoken heeft dan extra rechten nodig (README)."], fix, optional=True)
     last = (rt.get("history") or [None])[0]
     when = f"elke maand op dag {cfg['day']} om {int(cfg['hour']):02d}:00"
+    if cfg.get("dry"):
+        return row("restoretest", "proxmox", title, "half", "Aan in proefmodus: er wordt niets echt teruggezet.",
+                   [f"De maandelijkse test ({when}) toont alleen wat hij zou doen. Klopt het plan, zet dan \"alleen "
+                    "proef\" uit in het venster hersteltest (Ctrl+K → hersteltest)."], fix, optional=True)
     if last and not last.get("ok"):
         return row("restoretest", "proxmox", title, "half", f"Aan ({when}), maar de laatste test mislukte.",
                    [f"Bij {last.get('step')}: {last.get('error')}"], fix, optional=True)
@@ -489,10 +496,31 @@ async def ssh_rows(db: AsyncSession, has_proxmox: bool) -> list[dict]:
         out.append(row("logs", "ssh", title, "ok", f"Logs van {n} machine{'s' if n != 1 else ''} de laatste 24 uur.",
                        fix={"window": "logs"}))
     up = await upgrade.settings(db)
-    out.append(row("autoupdates", "ssh", "Nachtelijke beveiligingsupdates", "ok" if up.get("auto") else "none",
-                   f"Aan, om {int(up.get('hour', 4)):02d}:00, met een snapshot vooraf." if up.get("auto") else
-                   "Staat uit: je installeert updates zelf via apt.",
-                   [] if up.get("auto") else ["Aanzetten in apt → instellingen."], {"window": "updates"}, optional=True))
+    title, fix = "Nachtelijke beveiligingsupdates", {"window": "updates"}
+    # Opruimen als proef: de snapshots van geslaagde installaties blijven staan en nemen plaats in.
+    cleanup = (["Snapshots opruimen staat op alleen proef: de snapshots van geslaagde installaties blijven staan tot "
+                "je dat uitzet in apt → 's nachts."] if up.get("cleanup_proef") else [])
+    if up.get("auto") and up.get("proef"):
+        out.append(row("autoupdates", "ssh", title, "half",
+                       f"Aan als proef: er wordt niets geïnstalleerd. Om {int(up.get('hour', 4)):02d}:00 wordt alleen "
+                       "genoteerd wat er zou gebeuren.",
+                       ["Kijk de proef van vannacht na in apt → 's nachts; ziet ze er goed uit, zet dan 'alleen proef' uit.",
+                        *cleanup], fix, optional=True))
+    else:
+        text = (f"Aan, om {int(up.get('hour', 4)):02d}:00, met een snapshot vooraf." if up.get("auto") else
+                "Staat uit: je installeert updates zelf via apt.")
+        state = "half" if cleanup else "ok" if up.get("auto") else "none"
+        out.append(row("autoupdates", "ssh", title, state, text,
+                       cleanup + ([] if up.get("auto") else ["Aanzetten in apt → instellingen."]), fix, optional=True))
+    dry = list((await db.execute(select(HealRule.service_id).where(HealRule.dry_run.is_(True))
+                                 .order_by(HealRule.id))).scalars())
+    if dry:
+        out.append(row("zelfherstel", "ssh", "Zelfherstel", "half",
+                       f"{len(dry)} regel{'s staan' if len(dry) != 1 else ' staat'} op alleen proef: ze herstarten "
+                       "niets en zetten alleen op de tijdlijn wat ze zouden doen.",
+                       ["Kijk de regels 'Proef: Zelfherstel …' op de tijdlijn na; klopt het, zet 'alleen proef' dan uit "
+                        "in het mini dashboard van de service."], {"window": "detail", "service_id": dry[0]},
+                       optional=True))
     return out
 
 

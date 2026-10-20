@@ -1,7 +1,8 @@
 <script>
   import { onMount, untrack } from 'svelte'
-  import { api, poll } from './api.js'
+  import { api, poll, withReauth } from './api.js'
   import { AREA, FIX_LABEL } from './attention.js'
+  import { CHANGELOG } from './changelog.js'
   import Modal from './Modal.svelte'
 
   // Aandacht: alles wat nu mis is, gesorteerd op ernst (tabblad nu), en per functie of ze werkt,
@@ -14,6 +15,8 @@
   let busy = $state('')
   let showIgnored = $state(false)
   let hideOk = $state(false)
+  let dl = $state(false)
+  let saved = $state('')
 
   async function load() {
     try { data = await api('/attention'); onchanged?.(data); error = '' } catch (e) { error = e.message }
@@ -28,6 +31,23 @@
       data = await api('/attention/ignore', { method: 'PUT', body: { key: i.key, sig: on ? i.sig : null } })
       onchanged?.(data)
     } catch (e) { error = e.message } finally { busy = '' }
+  }
+  // Diagnose: één bestand om bij een foutmelding te voegen. De server maskeert de geheimen; het nummer van
+  // "wat is er nieuw" zegt welke frontend de browser geladen heeft.
+  const latestNews = Math.max(0, ...CHANGELOG.map((c) => c.nr))
+  async function diagnose() {
+    dl = true
+    saved = ''
+    try {
+      const d = await withReauth(() => api(`/diagnose?frontend=${latestNews}`))
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(new Blob([JSON.stringify(d, null, 1)], { type: 'application/json' }))
+      a.download = d.bestand || 'homepage-diagnose.json'
+      a.click()
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000)
+      saved = a.download
+      error = ''
+    } catch (e) { error = e.message } finally { dl = false }
   }
   $effect(() => { if (tab === 'instellingen' && !setup) untrack(loadSetup) })
   onMount(() => {
@@ -52,8 +72,11 @@
   <div class="tabs">
     <button class="mini" class:on={tab === 'nu'} onclick={() => (tab = 'nu')}>nu{#if data?.counts.err + data?.counts.warn}<b class="n" class:e={data.counts.err}>{data.counts.err + data.counts.warn}</b>{/if}</button>
     <button class="mini" class:on={tab === 'instellingen'} onclick={() => (tab = 'instellingen')}>instellingen{#if setup?.counts.half + setup?.counts.none}<b class="n">{setup.counts.half + setup.counts.none}</b>{/if}</button>
+    <button class="mini dl" disabled={dl} onclick={diagnose}
+            title="Eén bestand voor een foutmelding: versies, de checklist, fouten per integratie en de laatste 200 logregels van API, worker en syslog. Wachtwoorden, tokens en sleutels zijn gemaskeerd, IP-adressen en namen niet. Vraagt je 2FA-code.">{dl ? 'bezig…' : 'diagnose ↓'}</button>
   </div>
   {#if error}<p class="err">{error}</p>{/if}
+  {#if saved}<p class="hint top">{saved} gedownload. Wachtwoorden, tokens en sleutels zijn gemaskeerd, IP-adressen en namen niet: kijk het na voor je het deelt.</p>{/if}
 
   {#if tab === 'nu'}
     {#if !data}
@@ -115,6 +138,7 @@
 
 <style>
   .tabs { display: flex; gap: 6px; margin-bottom: 12px }
+  .dl { margin-left: auto }
   .n { margin-left: 5px; color: var(--mid); font-size: 11px; font-weight: 500 }
   .n.e { color: var(--err) }
   .top { margin: 0 0 10px }

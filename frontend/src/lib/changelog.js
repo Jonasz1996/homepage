@@ -3,6 +3,22 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 32,
+    datum: '2026-10-11',
+    titel: 'Proefmodus en diagnose',
+    items: [
+      'Naast updates installeren en terugdraaien, zelfherstel, de PBS-sync, de hersteltest en snapshots verwijderen staat een knop proef. Die toont welke machine, via SSH of welke API, als wie en met welk commando, zonder iets uit te voeren.',
+      'Alleen proef: de nachtelijke updates, het opruimen van hun snapshots, een zelfherstelregel en de maandelijkse hersteltest lopen dan zoals altijd, maar zetten alleen op de tijdlijn wat ze zouden doen, zonder melding.',
+      'Onder ! maakt "diagnose ↓" één bestand voor een foutmelding: versies, de instellingen-checklist, de fouten per integratie, wat de proefmodus zou doen en de laatste 200 logregels van API, worker en syslog. Wachtwoorden, tokens en sleutels zijn gemaskeerd; IP-adressen en namen staan er nog in.',
+      'Zelfherstel grijpt niet meer in tijdens onderhoud. "nu testen" heet nu "nu testen (echt)", want het herstart echt.',
+      'De PBS-sync weigert vooraf wat niet kan, nog voor er iets op de eerste PBS verandert, en vervangt een token alleen als het al bestaat.',
+      'Opgelost: de hersteltest aanzetten na het moment van deze maand startte binnen de minuut een echte test. Een update-snapshot die je in hw → snapshots verwijdert, biedt geen terugdraaien meer aan.',
+    ],
+    instellen: [
+      'Voor de testronde op je echte nodes: probeer eerst de proefknoppen en zet de automatische functies op "alleen proef" tot de proef klopt (README → proefmodus).',
+    ],
+  },
+  {
     nr: 31,
     datum: '2026-10-11',
     titel: 'Veiliger en zuiniger met de schijf',

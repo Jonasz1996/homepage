@@ -21,7 +21,7 @@ def rule_out(r: HealRule, names: dict[int, str]) -> dict:
     return {"id": r.id, "service_id": r.service_id, "service": names.get(r.service_id), "enabled": r.enabled,
             "after": r.after, "max_per_hour": r.max_per_hour, "action": r.action,
             "describe": healing.describe(r.action), "fired": r.fired or [], "last_at": r.last_at,
-            "last_result": r.last_result}
+            "last_result": r.last_result, "dry_run": r.dry_run}
 
 
 async def _names(db: AsyncSession) -> dict[int, str]:
@@ -43,6 +43,8 @@ class RuleIn(BaseModel):
     after: int = Field(default=3, ge=1, le=60)
     max_per_hour: int = Field(default=2, ge=1, le=6)
     action: dict
+    # Alleen proef. None: bij een wijziging blijft het zoals het was (aan/uit zetten stuurt het niet altijd mee).
+    dry_run: bool | None = None
 
 
 async def _clean(db: AsyncSession, body: RuleIn) -> dict:
@@ -58,12 +60,23 @@ async def _clean(db: AsyncSession, body: RuleIn) -> dict:
 async def create(body: RuleIn, request: Request, user: User = Depends(recent_auth), db: AsyncSession = Depends(get_db)):
     action = await _clean(db, body)
     r = HealRule(service_id=body.service_id, enabled=body.enabled, after=body.after, max_per_hour=body.max_per_hour,
-                 action=action, fired=[])
+                 action=action, fired=[], dry_run=bool(body.dry_run))
     db.add(r)
     await db.flush()
-    await audit(db, request, user, "heal_rule_added", rule=r.id, what=healing.describe(action))
+    await audit(db, request, user, "heal_rule_added", rule=r.id, what=healing.describe(action), dry_run=r.dry_run)
     await db.commit()
     return rule_out(r, await _names(db))
+
+
+@router.post("/proef", dependencies=[outside.guard("acties")])
+async def proef_new(body: RuleIn, request: Request, user: User = Depends(current_user),
+                    db: AsyncSession = Depends(get_db)):
+    """Proef van een regel die nog niet bewaard is (het formulier): wat zou ze doen? Voert niets uit en bewaart niets.
+    Van buitenaf uit, zoals de regels zelf: de proef kan met de bewaarde login via SSH kijken."""
+    action = await _clean(db, body)
+    r = HealRule(service_id=body.service_id, enabled=body.enabled, after=body.after, max_per_hour=body.max_per_hour,
+                 action=action, fired=[], last_at=None, last_result=None, dry_run=bool(body.dry_run))
+    return await _proef(db, request, user, r)
 
 
 async def _rule(db: AsyncSession, rule_id: int) -> HealRule:
@@ -80,7 +93,12 @@ async def update(rule_id: int, body: RuleIn, request: Request, user: User = Depe
     r.action = await _clean(db, body)
     r.service_id, r.enabled, r.after, r.max_per_hour = body.service_id, body.enabled, body.after, body.max_per_hour
     r.last_result = None if r.last_result and r.last_result.startswith("limiet") else r.last_result
-    await audit(db, request, user, "heal_rule_changed", rule=r.id, enabled=r.enabled)
+    if body.dry_run is not None:
+        if r.dry_run and not body.dry_run:
+            # Van proef naar echt: de proefbeurten mogen de eerste echte herstart niet tegenhouden (wachttijd, limiet).
+            r.fired, r.last_at, r.last_result = [], None, None
+        r.dry_run = body.dry_run
+    await audit(db, request, user, "heal_rule_changed", rule=r.id, enabled=r.enabled, dry_run=r.dry_run)
     await db.commit()
     return rule_out(r, await _names(db))
 
@@ -104,3 +122,18 @@ async def test(rule_id: int, request: Request, user: User = Depends(recent_auth)
     await audit(db, request, user, "heal_rule_tested", rule=r.id, what=healing.describe(r.action))
     await db.commit()
     return {"ok": True, "message": msg}
+
+
+@router.post("/{rule_id}/proef", dependencies=[outside.guard("acties")])
+async def proef(rule_id: int, request: Request, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Proef: wat zou deze regel doen, en zou ze nu afgaan? Kijkt alleen (de stand via de API of via SSH), voert niets
+    uit en verandert de regel niet."""
+    return await _proef(db, request, user, await _rule(db, rule_id))
+
+
+async def _proef(db: AsyncSession, request: Request, user: User, r: HealRule) -> dict:
+    plan = await healing.plan_rule(db, r, clients)
+    # Alleen dit wordt bewaard: wie keek er met de bewaarde login op de machine.
+    await audit(db, request, user, "heal_rule_proef", rule=r.id, what=healing.describe(r.action))
+    await db.commit()
+    return plan

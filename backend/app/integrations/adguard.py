@@ -54,8 +54,13 @@ class AdGuard(Integration):
              "rows": [[cell(d), cell(n)] for d, n in _top(stats.get("top_clients"))]},
         ]}
 
-    async def action(self, action: str, params: dict) -> str:
+    def action_request(self, action: str, params: dict) -> tuple[str, str, dict | None]:
+        """Methode, pad en inhoud van de call die action() stuurt: de proefmodus toont precies deze."""
         if action != "protection" or not isinstance(params.get("enabled"), bool):
             raise IntegrationError("Onbekende actie")
-        await self.request("POST", "/control/protection", auth=self.auth(), json={"enabled": params["enabled"]})
+        return "POST", "/control/protection", {"enabled": params["enabled"]}
+
+    async def action(self, action: str, params: dict) -> str:
+        method, path, body = self.action_request(action, params)
+        await self.request(method, path, auth=self.auth(), json=body)
         return "Bescherming " + ("aangezet" if params["enabled"] else "uitgezet")

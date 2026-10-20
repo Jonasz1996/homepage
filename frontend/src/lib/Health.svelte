@@ -2,6 +2,7 @@
   import Backups from './Backups.svelte'
   import Cluster from './Cluster.svelte'
   import SecurityCheck from './SecurityCheck.svelte'
+  import ProefPlan from './ProefPlan.svelte'
   import { onMount, untrack } from 'svelte'
   import { api, poll, withReauth } from './api.js'
   import { rel } from './cronfmt.js'
@@ -23,6 +24,8 @@
   let pass = $state('')
   let pass2 = $state('')
   let busy = $state('')
+  let snapProef = $state(null)
+  let proefBusy = $state('')
 
   async function load() {
     try {
@@ -69,8 +72,19 @@
     busy = `${x.vmid}/${x.name}`
     try {
       await withReauth(() => api('/health/snapshots/delete', { method: 'POST', body: { service_id: x.service_id, node: x.node, type: x.type, vmid: x.vmid, name: x.name } }))
+      if (snapProef?.key === snapKey(x)) snapProef = null
       await load()
     } catch (e) { error = e.message } finally { busy = '' }
+  }
+  // Proef: wat verwijderen zou doen (bestaat ze nog, RAM, snapshots erna, rechten), zonder iets te verwijderen.
+  const snapKey = (x) => `${x.node}/${x.vmid}/${x.name}`
+  async function proefSnap(x) {
+    if (snapProef?.key === snapKey(x)) { snapProef = null; return }
+    proefBusy = snapKey(x)
+    try {
+      const plan = await api('/health/snapshots/proef', { method: 'POST', body: { service_id: x.service_id, node: x.node, type: x.type, vmid: x.vmid, name: x.name } })
+      snapProef = { key: snapKey(x), plan }
+    } catch (e) { error = e.message } finally { proefBusy = '' }
   }
 
   async function save() {
@@ -245,8 +259,15 @@
               <td>{x.snaptime ? day(x.snaptime * 1000) : '—'}</td>
               <td class="num">{x.age_days != null ? `${Math.floor(x.age_days)} d` : '—'}</td>
               <td>{x.node}</td>
-              <td><button class="mini danger" disabled={busy === `${x.vmid}/${x.name}`} onclick={() => delSnap(x)}>verwijderen</button></td>
+              <td class="acts">
+                <button class="mini" class:on={snapProef?.key === snapKey(x)} disabled={proefBusy === snapKey(x)} onclick={() => proefSnap(x)}
+                        title="toont wat verwijderen zou doen, zonder iets te verwijderen">proef</button>
+                <button class="mini danger" disabled={busy === `${x.vmid}/${x.name}`} onclick={() => delSnap(x)}>verwijderen</button>
+              </td>
             </tr>
+            {#if snapProef?.key === snapKey(x)}
+              <tr class="proefrow"><td colspan="6"><ProefPlan plan={snapProef.plan} onclose={() => (snapProef = null)} /></td></tr>
+            {/if}
           {:else}
             <tr><td colspan="6" class="hint">{data?.snapshots?.checked_at ? 'Geen snapshots. Netjes.' : 'Nog niet bekeken (heeft een Proxmox-tegel met API-token nodig).'}</td></tr>
           {/each}
@@ -417,6 +438,8 @@
   .tbl tr.old td:nth-child(4) { color: var(--mid) }
   .num { text-align: right; white-space: nowrap }
   .danger { color: var(--err) }
+  .acts { white-space: nowrap }
+  .proefrow td { padding-top: 0 }
   .form { margin-top: 18px; display: flex; flex-direction: column; gap: 8px; max-width: 720px }
   .lbl { font-size: 11.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-top: 6px }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap }

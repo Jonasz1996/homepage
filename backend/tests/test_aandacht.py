@@ -9,8 +9,8 @@ from app import attention
 from app.db import get_db
 from app.health import selfcheck as sc
 from app.main import app
-from app.models import (AppState, CronJob, Device, MaintenanceWindow, Service, ServiceState, SshHost, UpdateRun,
-                        WebhookSource)
+from app.models import (AppState, CronJob, Device, HealRule, MaintenanceWindow, Service, ServiceState, SshHost,
+                        UpdateRun, WebhookSource)
 from app.monitoring.checks import HttpClients
 from app.routers import integrations as integrations_router
 
@@ -249,6 +249,37 @@ async def test_instellingen_checklist(authed, monkeypatch):
     assert r.status_code == 200, r.text
     rows = {x["key"]: x for g in (await authed.get("/api/attention/setup")).json()["groups"] for x in g["rows"]}
     assert rows["proxmox"]["state"] == "ok", rows["proxmox"]
+
+
+async def test_checklist_proef_staat_op_half(authed):
+    """Opruimen als proef (de snapshots blijven staan en nemen plaats in) en zelfherstelregels op alleen proef (ze
+    herstarten niets): in de checklist half, met wat er te doen is."""
+    ids = await _tiles(authed, ("plex", "link", {}), ("nas", "link", {}))
+    rows = {x["key"]: x for g in (await authed.get("/api/attention/setup")).json()["groups"] for x in g["rows"]}
+    assert rows["autoupdates"]["state"] == "none" and "zelfherstel" not in rows
+
+    agen, db = await _db()
+    _state(db, "update_settings", {"auto": True, "hour": 4, "keep_days": 7, "cleanup_proef": True})
+    action = {"kind": "ssh", "host_id": 1, "op": "systemctl", "name": "x"}
+    db.add_all([HealRule(service_id=ids["nas"], action=action, dry_run=False),
+                HealRule(service_id=ids["plex"], action=action, dry_run=True)])
+    await db.commit()
+    rows = {x["key"]: x for g in (await authed.get("/api/attention/setup")).json()["groups"] for x in g["rows"]}
+    up = rows["autoupdates"]
+    assert up["state"] == "half" and up["text"] == "Aan, om 04:00, met een snapshot vooraf."
+    assert any("opruimen staat op alleen proef" in t for t in up["todo"])
+    heal = rows["zelfherstel"]
+    assert heal["state"] == "half" and heal["group"] == "ssh" and heal["optional"]
+    assert heal["text"].startswith("1 regel staat op alleen proef")
+    assert heal["fix"] == {"window": "detail", "service_id": ids["plex"]}
+
+    # Ook samen met de proef van de nachtelijke run zelf.
+    st = await db.get(AppState, "update_settings")
+    st.value = {**st.value, "proef": True}
+    await db.commit()
+    rows = {x["key"]: x for g in (await authed.get("/api/attention/setup")).json()["groups"] for x in g["rows"]}
+    assert rows["autoupdates"]["state"] == "half" and len(rows["autoupdates"]["todo"]) == 2
+    await agen.aclose()
 
 
 async def _group(c, sid: int) -> int:

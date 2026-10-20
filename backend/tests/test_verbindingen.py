@@ -202,7 +202,11 @@ async def test_config_copy_and_heal_test_without_open_transaction(authed, monkey
         async def go():
             seen.append(("herstel", session.in_transaction(), await _idle_in_transaction()))
             return "herstart"
-        return go
+
+        async def probe():
+            seen.append(("proef", session.in_transaction(), await _idle_in_transaction()))
+            return [], None
+        return healing.Prepared([], [], go, probe)
     monkeypatch.setattr(healing, "prepare", prepare)
     g = await _group(authed)
     sid = await _svc(authed, g, "", "http://a", name="A")
@@ -212,7 +216,9 @@ async def test_config_copy_and_heal_test_without_open_transaction(authed, monkey
     db.add(rule)
     await db.commit()
     assert await healing.test_rule(db, rule, HttpClients()) == "herstart"
-    assert seen == [("config", False, 0), ("herstel", False, 0)]
+    # De proef kijkt via SSH op de machine: ook dan geen transactie open.
+    assert (await healing.plan_rule(db, rule, HttpClients()))["proef"] is True
+    assert seen == [("config", False, 0), ("herstel", False, 0), ("proef", False, 0)]
     await agen.aclose()
 
 
@@ -228,6 +234,21 @@ def test_pool_sizes_leave_room():
     assert e.pool.size() + e.pool._max_overflow == s.db_pool_syslog
     e = make_engine("postgresql+asyncpg://homepage@/homepage", "worker")
     assert (e.pool.size(), e.pool._max_overflow) == (20, 20)
+
+
+async def test_databasefout_in_de_logs_zonder_de_waarden():
+    """Een databasefout komt in de logs, en die gaan mee in de diagnose: zonder de waarden (een cronregel, een header
+    of syslogtekst kan een wachtwoord bevatten)."""
+    e = make_engine("postgresql+asyncpg://u:p@localhost/x")
+    assert e.sync_engine.hide_parameters is True
+    e = make_engine(TEST_DB)
+    try:
+        async with e.connect() as c:
+            with pytest.raises(Exception) as err:
+                await c.execute(text("SELECT :pw FROM bestaat_niet"), {"pw": "geheim-in-een-cronregel"})
+    finally:
+        await e.dispose()
+    assert "bestaat_niet" in str(err.value) and "geheim-in-een-cronregel" not in str(err.value)
 
 
 @needs_pg

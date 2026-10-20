@@ -401,6 +401,47 @@ Later, deel 3 (Authentik en gsm):
   MAC-adres hebben), de checks op je tegels, meldingen op je gsm, wie het dashboard zelf bewaakt, Zabbix, Home Assistant (welke nodes nog geen sensor hebben), schijven, domeinen, de webhooks
   van Proxmox, PBS en Home Assistant, Portainer, de SSH-login, hosts zonder bevestigde host key, cron, logs,
   nachtelijke updates en de beveiliging. Optionele functies die nog niet ingesteld zijn, staan grijs
+- **proefmodus**: elke actie die een machine verandert, heeft een knop *proef* naast de echte knop. De proef toont
+  wat er zou gebeuren, zonder het te doen: op welke machine, via SSH of welke API, als wie (de SSH-gebruiker, met of
+  zonder `sudo -n`, of het token-ID van het Proxmox-actietoken), het exacte commando of de call, in welke volgorde,
+  wat er gebeurt als een stap mislukt, en wat er vooraf nagekeken is (✓, ✕ of ? als het niet na te gaan is). Geen
+  geheimen: wachtwoorden en token-geheimen staan nooit in een proef.
+  - **updates** (`apt`): naast *installeren*, *toch zonder snapshot* en *terugdraaien*. Per machine de snapshot
+    (`pct snapshot` via SSH op de node, of de Proxmox-API), het apt- of apk-commando (het volledige script staat
+    erbij), welke services daarna nagekeken worden en hoe terugdraaien gaat. In `apt` → 's nachts tonen *proef van
+    vannacht* en *wat zou er opgeruimd worden* wat de volgende nachtelijke run en het volgende opruimen zouden doen,
+    ook welke machines de nachtelijke run overslaat (fysieke machines en nodes, daar kan geen snapshot)
+  - **zelfherstel** (mini dashboard): per regel en in het formulier. Elke voorwaarde (aan, N× down, onderhoud,
+    wachttijd, limiet per uur) en de call of het commando. De proef kijkt ook: via de Proxmox-API of de VM/CT nog
+    bestaat en of een herstart een start wordt, in Portainer of de container nog bestaat, en via SSH of `sudo -n`
+    werkt en hoe de dienst ervoor staat. Omdat die proef met de bewaarde login via SSH binnengaat, staat hij van
+    buitenaf uit zoals de andere acties en komt hij in de audit-log. *nu testen (echt)* voert de actie echt uit
+  - **PBS-sync** (hw → back-ups): naast *stap 1 en 2 zelf uitvoeren via SSH*, ook als die knop nog grijs is (de proef
+    zegt dan waarom). Per PBS de `proxmox-backup-manager`-commando's met hun voorwaarden, wat er achterblijft als een
+    stap mislukt, en de commando's om het ongedaan te maken. Met SSH-hosts loopt hetzelfde script op beide PBS'en in
+    proefmodus: alleen de leescommando's (`user list`, `remote list`, `sync-job list`) gaan echt, elke wijziging wordt
+    getoond als `+ proxmox-backup-manager ...`. Die proef meldt zich als root aan en komt daarom in de audit-log
+  - **hersteltest**: naast *▶ nu testen*. Welke back-up en waarom, welk vrij ID (nagekeken voor de hele cluster), de
+    vrije ruimte, de rechten van het actietoken en elke Proxmox-call in volgorde
+  - **hw → snapshots**: naast *verwijderen*. Of de snapshot nog bestaat, met of zonder RAM-toestand, welke snapshots
+    erna komen, en of een installatie hem nog nodig heeft om terug te draaien
+
+  **Alleen proef** voor wat vanzelf loopt: de nachtelijke updates en het opruimen van hun snapshots (`apt` → 's
+  nachts), een zelfherstelregel, en de maandelijkse hersteltest. Ze lopen dan zoals altijd (zelfde uur, wachttijd en
+  limiet), maar zetten alleen op de tijdlijn wat ze zouden doen ("Proef: ..."), zonder melding of push. De laatste
+  proef staat ook in het venster zelf. Zet het uit als de proef klopt; ! → instellingen toont zolang "half".
+  Aanbevolen voor de eerste testronde op je echte nodes: eerst alles wat alleen leest, dan de proefknoppen en
+  *alleen proef*, en pas daarna de echte acties.
+- **diagnose** (! → *diagnose ↓*): één JSON-bestand om bij een foutmelding te voegen, in plaats van het probleem te
+  beschrijven. Erin: de versies (ook PostgreSQL, TimescaleDB en de databasemigratie), de processen, de
+  aandachtslijst, de instellingen-checklist, de fouten per tegel en per achtergrondtaak, webhooks, gsm's,
+  zelfherstelregels, installaties van de laatste 7 dagen, cronjobs met een fout, de laatste 50 meldingen,
+  tijdlijnregels en audit-regels, wat de proefmodus zou doen, en de laatste 200 logregels van de API, de worker en de
+  syslog-ontvanger. Elk geheim dat het dashboard bewaart, is gemaskeerd (ook url-gecodeerd en als base64), net als
+  alles wat op een token, sleutel of wachtwoord lijkt. IP-adressen, namen en gebruikersnamen staan er nog in: kijk
+  het bestand na voor je het deelt. Vraagt je 2FA-code en staat van buitenaf uit zoals configuraties downloaden.
+  De processen houden hun laatste logregels zelf bij, want de gebruiker `homepage` kan journald niet lezen. Wat vlak
+  voor een crash gebeurde, staat soms alleen in journald: `journalctl -u homepage-worker -n 200` als root
 - **effecten** zoals in aiverslag: een achtergrond van punten en 0/1 die voor de muis wijken, een ripple op elke knop,
   bliksem en vonken bij een geslaagde actie (herstarten, wekken), een vuurbal met flits en schudden bij verwijderen
   en uitloggen, en een bliksem op het belletje als er een nieuwe storing binnenkomt. Uit te zetten met `Ctrl+K` →

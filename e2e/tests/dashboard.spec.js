@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import { readFileSync } from 'node:fs'
 import { freshCode } from './totp.js'
 
 // Eén doorlopend verhaal op een lege database: account aanmaken met 2FA, uitloggen en weer inloggen,
@@ -116,6 +117,33 @@ test('aandacht: wat nu mis is en de instellingen-checklist', async () => {
   await win.getByRole('button', { name: /^instellingen/ }).click()
   await expect(win.locator('.row', { hasText: 'SSH-standaardlogin' })).toBeVisible({ timeout: 20000 })
   await win.getByRole('button', { name: 'Sluiten' }).click()
+  await expect(win).toHaveCount(0)
+})
+
+test('diagnose: één bestand onder !, zonder wachtwoord', async () => {
+  await page.locator('button.mini[title^="Aandacht"]').click()
+  const win = page.getByRole('dialog')
+  const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 40000 }),
+    win.getByRole('button', { name: 'diagnose ↓' }).click()])
+  expect(dl.suggestedFilename()).toMatch(/^homepage-diagnose-\d{8}-\d{4}\.json$/)
+  const text = readFileSync(await dl.path(), 'utf8')
+  const d = JSON.parse(text)
+  expect(d.formaat).toBe(1)
+  expect(d.versie).toBeTruthy()
+  expect(text).not.toContain(PASS)
+  expect(text).not.toContain(secret)
+  await win.getByRole('button', { name: 'Sluiten' }).click()
+  await expect(win).toHaveCount(0)
+})
+
+test('proef: wat de nachtelijke updates zouden doen', async () => {
+  await page.locator('button.mini[title^="Openstaande updates"]').click()
+  const win = page.getByRole('dialog')
+  await win.getByRole('button', { name: /^'s nachts/ }).click()
+  await win.getByRole('button', { name: 'proef van vannacht' }).click()
+  await expect(win.getByText('er is niets uitgevoerd')).toBeVisible()
+  await expect(win.getByText('Er zou niets gebeuren.')).toBeVisible()
+  await page.keyboard.press('Escape')
   await expect(win).toHaveCount(0)
 })
 
