@@ -4,6 +4,7 @@
   import IntegrationPanel from './IntegrationPanel.svelte'
   import LatencyChart from './LatencyChart.svelte'
   import Modal from './Modal.svelte'
+  import Notes from './Notes.svelte'
 
   // Mini dashboard van één service: gegevens van de integratie en de monitoring-historiek.
   let { service, groups = [], onclose, onedit, onchanged, onterminal } = $props()
@@ -85,6 +86,8 @@
       {/each}
     {/if}
   </div>
+
+  <Notes {service} {onchanged} />
 
   {#if service.type && service.type !== 'link'}
     <IntegrationPanel {service} {groups} {onchanged} />

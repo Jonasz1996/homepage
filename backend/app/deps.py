@@ -19,6 +19,15 @@ def client_ip(request: Request) -> str | None:
     return request.client.host if request.client else None
 
 
+def client_country(request: HTTPConnection) -> str | None:
+    """Landcode die nginx meegeeft (CF-IPCountry, alleen als het verzoek via NPM kwam)."""
+    cc = (request.headers.get("x-country") or "").strip().upper()
+    return cc if len(cc) == 2 and cc.isalpha() and cc not in ("XX", "T1") else None
+
+
+SEEN_EVERY = timedelta(minutes=5)
+
+
 async def csrf_guard(conn: HTTPConnection) -> None:
     """Een ander domein kan geen eigen header meesturen zonder CORS-toestemming,
     dus deze header bewijst dat het verzoek van onze eigen frontend komt.
@@ -45,10 +54,19 @@ async def optional_session(request: Request, db: AsyncSession = Depends(get_db))
         return None
     # Glijdende sessie: wie het dashboard gebruikt, blijft ingelogd.
     lifetime = timedelta(days=get_settings().session_days)
+    changed = False
     if expires - now < lifetime / 2:
         sess.expires_at = now + lifetime
-        await db.commit()
         request.state.renew_cookie = (token, lifetime)
+        changed = True
+    seen = sess.last_seen_at.replace(tzinfo=sess.last_seen_at.tzinfo or timezone.utc) if sess.last_seen_at else None
+    if seen is None or now - seen > SEEN_EVERY:
+        sess.last_seen_at = now
+        sess.ip = client_ip(request) or sess.ip
+        sess.country = client_country(request) or sess.country
+        changed = True
+    if changed:
+        await db.commit()
     return sess
 
 

@@ -9,8 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
 from ..db import get_db
-from ..deps import COOKIE, audit, client_ip, current_session, current_user, notify, optional_session
-from ..models import Session, User
+from ..deps import (COOKIE, audit, client_country, client_ip, current_session, current_user, notify, optional_session,
+                    recent_auth)
+from ..models import AuditLog, Session, User
 from ..security import (
     check_setup_token,
     decrypt,
@@ -65,8 +66,8 @@ async def _start_session(db: AsyncSession, request: Request, response: Response,
     now = datetime.now(timezone.utc)
     db.add(Session(
         id=token_id(token), user_id=user.id, mfa_ok=mfa_ok, created_at=now, auth_at=now,
-        expires_at=now + timedelta(days=s.session_days), ip=client_ip(request),
-        user_agent=(request.headers.get("user-agent") or "")[:255],
+        expires_at=now + timedelta(days=s.session_days), ip=client_ip(request), country=client_country(request),
+        last_seen_at=now, user_agent=(request.headers.get("user-agent") or "")[:255],
     ))
     response.set_cookie(
         COOKIE, token, max_age=s.session_days * 86400, httponly=True,
@@ -158,7 +159,9 @@ async def login(data: LoginIn, request: Request, response: Response, db: AsyncSe
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "2FA-code klopt niet")
     limiter.reset(*keys)
     if user.last_login_ip and user.last_login_ip != ip:
-        notify(db, "Login vanaf nieuw IP", f"{user.username} logde in vanaf {ip}.", level="warn", source="auth")
+        cc = client_country(request)
+        notify(db, "Login vanaf nieuw IP", f"{user.username} logde in vanaf {ip}{f' ({cc})' if cc else ''}.",
+               level="warn", source="auth")
     user.last_login_at = datetime.now(timezone.utc)
     user.last_login_ip = ip
     await _start_session(db, request, response, user, mfa_ok=user.totp_enabled)
@@ -203,3 +206,61 @@ async def logout(request: Request, response: Response, sess: Session | None = De
     request.state.renew_cookie = None
     response.delete_cookie(COOKIE, path="/")
     return {"ok": True}
+
+
+# --- Sessies en auditlog ----------------------------------------------------------
+
+def _session_out(s: Session, current: str) -> dict:
+    return {"id": s.id[:16], "current": s.id == current, "ip": s.ip, "country": s.country,
+            "user_agent": s.user_agent, "created_at": s.created_at, "last_seen_at": s.last_seen_at or s.created_at,
+            "expires_at": s.expires_at, "mfa_ok": s.mfa_ok}
+
+
+@router.get("/sessions")
+async def list_sessions(sess: Session = Depends(current_session), user: User = Depends(current_user),
+                        db: AsyncSession = Depends(get_db)):
+    rows = (await db.execute(select(Session).where(Session.user_id == user.id)
+                             .order_by(Session.created_at.desc()))).scalars().all()
+    out = [_session_out(s, sess.id) for s in rows]
+    return sorted(out, key=lambda x: (not x["current"], -x["last_seen_at"].timestamp()))
+
+
+@router.delete("/sessions/{short_id}")
+async def revoke_session(short_id: str, request: Request, sess: Session = Depends(current_session),
+                         user: User = Depends(recent_auth), db: AsyncSession = Depends(get_db)):
+    # Naar buiten toe tonen we alleen de eerste 16 tekens van de sessie-id (zelf al een hash).
+    if len(short_id) != 16 or sess.id.startswith(short_id):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Gebruik afmelden voor je eigen sessie")
+    target = (await db.execute(select(Session).where(Session.user_id == user.id,
+                                                     Session.id.startswith(short_id)))).scalars().first()
+    if target is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sessie niet gevonden")
+    await audit(db, request, user, "session_revoked", ip=target.ip, country=target.country)
+    await db.delete(target)
+    await db.commit()
+    return {"ok": True}
+
+
+@router.post("/sessions/revoke-others")
+async def revoke_others(request: Request, sess: Session = Depends(current_session),
+                        user: User = Depends(recent_auth), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(delete(Session).where(Session.user_id == user.id, Session.id != sess.id))
+    await audit(db, request, user, "sessions_revoked", count=result.rowcount)
+    await db.commit()
+    return {"ok": True, "count": result.rowcount}
+
+
+@router.get("/audit")
+async def audit_log(before_id: int | None = None, action: str | None = None, limit: int = 100,
+                    user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    limit = max(1, min(limit, 500))
+    stmt = select(AuditLog).order_by(AuditLog.id.desc()).limit(limit)
+    if before_id is not None:
+        stmt = stmt.where(AuditLog.id < before_id)
+    if action:
+        stmt = stmt.where(AuditLog.action.startswith(action[:64]))
+    rows = (await db.execute(stmt)).scalars().all()
+    names = {u.id: u.username for u in (await db.execute(select(User))).scalars()}
+    return {"items": [{"id": a.id, "ts": a.ts, "action": a.action, "detail": a.detail, "ip": a.ip,
+                       "user": names.get(a.user_id)} for a in rows],
+            "more": len(rows) == limit}

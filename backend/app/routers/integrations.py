@@ -22,6 +22,7 @@ router = APIRouter(prefix="/api", tags=["integrations"])
 clients = HttpClients()
 SUMMARY_TTL = 30
 DETAIL_TTL = 10
+ACTIONS_TTL = 60
 # (service_id, soort) -> (verloopt, vingerafdruk, resultaat)
 _cache: dict[tuple[int, str], tuple[float, tuple, dict]] = {}
 
@@ -110,9 +111,28 @@ async def integration_action(service_id: int, data: ActionIn, request: Request,
     await audit(db, request, user, "integration_action", service=s.name, op=data.action, params=data.params)
     notify(db, f"{s.name}: {message}", level="info", source="actie", service_id=s.id)
     await db.commit()
-    _cache.pop((s.id, "detail"), None)
-    _cache.pop((s.id, "summary"), None)
+    for kind in ("detail", "summary", "actions"):
+        _cache.pop((s.id, kind), None)
     return {"ok": True, "message": message}
+
+
+@router.get("/actions")
+async def quick_actions(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Alle acties van alle integraties, voor de zoekbalk. Uitvoeren gaat via de actie-endpoint hierboven."""
+    services = (await db.execute(select(Service).where(
+        Service.type.in_([n for n, c in REGISTRY.items() if c.actions])))).scalars().all()
+    sem = asyncio.Semaphore(10)
+
+    async def one(s: Service):
+        async with sem:
+            data = await _cached(s, "actions", ACTIONS_TTL, lambda i: _actions(i))
+            return [{**a, "service_id": s.id, "service": s.name} for a in data.get("items", [])]
+
+    return [a for chunk in await asyncio.gather(*(one(s) for s in services)) for a in chunk]
+
+
+async def _actions(i: Integration) -> dict:
+    return {"items": await i.quick_actions()}
 
 
 # --- NPM: proxy hosts als tegels importeren ------------------------------------

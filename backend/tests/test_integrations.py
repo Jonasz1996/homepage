@@ -69,6 +69,19 @@ class Fake:
             return httpx.Response(200, json={"data": [{"worker_type": "backup", "worker_id": "hdd:ct/101",
                                                        "starttime": 1, "status": "error: no space"},
                                                       {"worker_type": "gc", "status": "OK"}]})
+        if p.startswith("/api/endpoints"):
+            assert req.headers["x-api-key"] == "ptr_geheim"
+            if p == "/api/endpoints":
+                return httpx.Response(200, json=[
+                    {"Id": 2, "Name": "docker01", "Status": 1,
+                     "Snapshots": [{"RunningContainerCount": 1, "StoppedContainerCount": 1}]},
+                    {"Id": 3, "Name": "oud", "Status": 2, "Snapshots": []}])
+            if p == "/api/endpoints/2/docker/containers/json":
+                return httpx.Response(200, json=[
+                    {"Id": "a" * 64, "Names": ["/vaultwarden"], "Image": "vw:latest", "State": "running", "Status": "Up 3 days"},
+                    {"Id": "b" * 64, "Names": ["/immich"], "Image": "immich:v1", "State": "exited", "Status": "Exited (1)"}])
+            if req.method == "POST" and p.startswith("/api/endpoints/2/docker/containers/"):
+                return httpx.Response(204)
         if p == "/status.json":
             return httpx.Response(200, json={"sensors": [{"value": 21.456}], "ok": True})
         return httpx.Response(404)

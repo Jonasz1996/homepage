@@ -92,3 +92,20 @@ class Integration:
 
     async def action(self, action: str, params: dict) -> str:
         raise IntegrationError("Deze integratie heeft geen acties")
+
+    async def quick_actions(self) -> list[dict]:
+        """Acties voor de zoekbalk (Ctrl+K). Standaard: alle knoppen uit het mini dashboard."""
+        if not self.actions:
+            return []
+        out = []
+        for sec in (await self.detail()).get("sections", []):
+            for a in sec.get("actions") or []:
+                out.append({**a, "target": sec.get("title")})
+            for row in sec.get("rows") or []:
+                if not isinstance(row, dict) or not row.get("actions"):
+                    continue
+                parts = [str(c.get("v")) for c in row.get("cells", [])[:2]
+                         if isinstance(c, dict) and isinstance(c.get("v"), (str, int)) and c.get("v") != "—"]
+                for a in row["actions"]:
+                    out.append({**a, "target": " ".join(parts)})
+        return out

@@ -30,6 +30,7 @@ Fase 4, integraties (type van de service kiezen onder **bewerken → Integratie 
 | `proxmoxbackupserver` | opslag, mislukte taken, oudste back-up | datastores met verwachte "vol"-datum, laatste back-up per VM/CT, mislukte taken |
 | `adguard` | verzoeken, % geblokkeerd, latency, bescherming | top geblokkeerde domeinen en clients, bescherming aan/uit |
 | `npm` | aantal hosts, eerstvolgende vervaldatum certificaat | certificaten, proxy hosts, **import van proxy hosts als tegels** |
+| `portainer` | omgevingen, draaiende en gestopte containers | containers per omgeving met start, stop, herstart |
 | `json` / `customapi` | zelfgekozen velden uit een JSON-API | dezelfde velden plus het ruwe antwoord |
 
 Acties (VM herstarten, AdGuard uitzetten, ...) vragen je 2FA-code als je langer dan 15 minuten
@@ -85,6 +86,18 @@ Extra's, deel 1 (checks en meldingen):
 - **slimmere checks**: woord op de pagina (of juist niet), JSON-veld met verwachte waarde, DNS-check via een
   gekozen server (bv. AdGuard) met verwacht IP
 - **nieuwe hosts in NPM**: elk half uur kijkt de worker of er proxy hosts bij zijn die nog geen tegel hebben
+
+Extra's, deel 2 (beheer):
+
+- **beveiliging** (⚿ in de titelbalk): alle apparaten waar je ingelogd bent, met IP, land (van Cloudflare),
+  browser en laatst actief; één of alle andere afmelden (vraagt 2FA). Plus de auditlog met filter, en
+  je wachtwoord wijzigen (meldt andere apparaten af)
+- **notities** per service in Markdown (mini dashboard → Notities): hoe herstellen, waar de config staat, ...
+  Zoeken met `Ctrl+K` doorzoekt ook de notities
+- **snelle acties** in de zoekbalk: typ bv. `herstart vaultwarden` of `start 101` en klik, zonder het mini
+  dashboard te openen. Ook `logs`, `terminal`, `beveiliging`. Enter voert de eerste uit als er geen tegel past
+- **Portainer**-integratie (type `portainer`, geheim `key` = API-sleutel): omgevingen, draaiende en gestopte
+  containers, en containers starten, stoppen of herstarten
 
 Optimalisaties:
 

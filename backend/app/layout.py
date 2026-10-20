@@ -10,7 +10,7 @@ from .schemas import PageOut, ServiceOut
 from .security import decrypt_json
 
 SERVICE_FIELDS = ("id", "name", "description", "url", "icon", "position", "type", "check", "config", "secrets",
-                  "parent_id")
+                  "parent_id", "notes")
 
 
 async def load_pages(db: AsyncSession) -> list[Page]:

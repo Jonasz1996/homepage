@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -154,7 +155,9 @@ async def update_service(service_id: int, data: ServiceIn, request: Request,
     if data.group_id != service.group_id:
         await _get(db, Group, data.group_id)
         service.position = await _next_position(db, Service.position, Service.group_id, data.group_id)
-    for k, v in data.model_dump(exclude={"secrets"}).items():
+    # Notities worden meestal apart bewaard (zie hieronder); zonder veld blijven ze staan.
+    skip = {"secrets"} if "notes" in data.model_fields_set else {"secrets", "notes"}
+    for k, v in data.model_dump(exclude=skip).items():
         setattr(service, k, v)
     if data.secrets is not None:
         _apply_secrets(service, data.secrets)
@@ -162,6 +165,20 @@ async def update_service(service_id: int, data: ServiceIn, request: Request,
     await record_revision(db, user, f"Service '{service.name}' aangepast")
     await db.commit()
     return {"ok": True}
+
+
+class NotesIn(BaseModel):
+    notes: str | None = Field(default=None, max_length=20000)
+
+
+@router.put("/services/{service_id}/notes")
+async def set_notes(service_id: int, data: NotesIn, user: User = Depends(current_user),
+                    db: AsyncSession = Depends(get_db)):
+    service = await _get(db, Service, service_id)
+    service.notes = (data.notes or "").strip() or None
+    await record_revision(db, user, f"Notities van '{service.name}' aangepast")
+    await db.commit()
+    return {"ok": True, "notes": service.notes}
 
 
 @router.delete("/services/{service_id}")
