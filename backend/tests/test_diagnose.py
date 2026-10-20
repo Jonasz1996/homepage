@@ -368,7 +368,8 @@ async def test_noodplan_in_de_export(authed):
     db.add(AppState(key="noodplan", value={
         "v": 1, "at": "2026-10-12T06:00:00+00:00", "tried": "2026-10-13T06:00:00+00:00", "trigger": "week",
         "by": None, "seconds": 12, "masked": 1, "masked_kinds": ["token"],
-        "running": {"at": "2026-10-13T06:00:00+00:00", "by": "worker", "pid": 4242},
+        # Een pid die niet toevallig in een tijdstempel staat (4242 stond soms in de microseconden).
+        "running": {"at": "2026-10-13T06:00:00+00:00", "by": "worker", "pid": 7654321987},
         "failed": {"at": "2026-10-13T06:00:00+00:00", "error": f"ConnectError: 401 token {secret}"},
         "sources": [{"key": "pve:1", "name": "pve50", "ok": True},
                     {"key": "pbs:2", "name": "pbs-pi", "ok": False, "error": f"401 PBSAPIToken=root@pam!dash:{secret}",
@@ -385,7 +386,7 @@ async def test_noodplan_in_de_export(authed):
 
     r = await authed.get("/api/diagnose")
     assert r.status_code == 200, r.text
-    assert secret not in r.text and "NOODPLAN-DATA-MARKER" not in r.text and "4242" not in r.text
+    assert secret not in r.text and "NOODPLAN-DATA-MARKER" not in r.text and "7654321987" not in r.text
     n = r.json()["noodplan"]
     assert n["at"] == "2026-10-12T06:00:00+00:00" and n["tried"] == "2026-10-13T06:00:00+00:00"
     assert n["failed"]["at"] == "2026-10-13T06:00:00+00:00" and n["failed"]["error"].startswith("ConnectError: 401")

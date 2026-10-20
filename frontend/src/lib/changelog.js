@@ -3,6 +3,15 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 41,
+    datum: '2026-10-17',
+    titel: 'Toestellen uit Proxmox: sneller en duidelijker',
+    items: [
+      '⟳ pve in de terminal vraagt elke Proxmox nu één keer, en allemaal tegelijk. Antwoordt er een niet (bijvoorbeeld een oud adres na een nieuwe cluster), dan zie je na 8 s welk adres en wat je kunt nakijken, in plaats van een halve minuut wachten en "voeg eerst een Proxmox-tegel toe". Tegels van type proxmox zonder token staan apart op één regel.',
+    ],
+    instellen: [],
+  },
+  {
     nr: 40,
     datum: '2026-10-17',
     titel: 'Vangnetten die echt werken',

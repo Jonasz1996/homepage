@@ -1,3 +1,6 @@
+import asyncio
+import time
+
 import httpx
 
 from app.monitoring.checks import HttpClients
@@ -96,6 +99,121 @@ async def test_discover_and_import_api(authed, monkeypatch):
     assert bad.status_code == 422
     bad = await authed.post("/api/ssh/import", json=[{**pick[0], "host": "-oProxyCommand=x"}])
     assert bad.status_code == 422
+
+
+class Traag:
+    """De nep-Proxmox op pve50, plus een oude cluster die niet meer antwoordt (pas na een tijd een time-out).
+    Telt hoe vaak elk adres /cluster/resources kreeg."""
+
+    def __init__(self, wacht: float = 0.4):
+        self.pve, self.wacht, self.calls = Pve(), wacht, {}
+
+    async def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/cluster/resources"):
+            key = (request.url.host, request.headers.get("authorization"))
+            self.calls[key] = self.calls.get(key, 0) + 1
+        if request.url.host == "oud.example":
+            await asyncio.sleep(self.wacht)
+            raise httpx.ConnectTimeout("geen antwoord", request=request)
+        if request.headers.get("authorization", "").endswith("=oud-geheim"):
+            return httpx.Response(401, json={"data": None})
+        return self.pve(request)
+
+
+async def test_discover_alles_tegelijk_en_elke_proxmox_een_keer(authed):
+    """Na een nieuwe cluster wezen vijf tegels nog naar de oude: ⟳ pve wachtte 5 x 8 s en zei dan "voeg eerst een
+    Proxmox-tegel toe". Nu: elke Proxmox één keer, allemaal tegelijk, met het adres in de fout."""
+    g = await _group(authed)
+    a = {"username": "homepage@pve!dash", "password": "geheim"}
+    b = {"username": "homepage@pve!ander", "password": "geheim2"}
+    cluster = await _svc(authed, g, "proxmox", "https://pve50.jbogaert.be", name="cluster", secrets=a)
+    await _svc(authed, g, "proxmox", "https://pve50.jbogaert.be", config={"node": "pve50"}, name="pve50", secrets=a)
+    await _svc(authed, g, "proxmox", "https://oud.example", name="oud1", secrets=a)
+    await _svc(authed, g, "proxmox", "https://oud.example", config={"node": "x"}, name="oud2", secrets=a)
+    await _svc(authed, g, "proxmox", "https://oud.example", name="oud3", secrets=b)
+    await _svc(authed, g, "proxmox", "https://kali.jbogaert.be", name="Kali")
+    fake = Traag()
+    db = await _db()
+    t = time.monotonic()
+    found = await discover(db, HttpClients(httpx.MockTransport(fake)))
+    took = time.monotonic() - t
+    # Na elkaar: 3 x 0,4 s voor de oude cluster alleen.
+    assert took < 1.0, took
+    assert fake.calls == {("pve50.jbogaert.be", "PVEAPIToken=homepage@pve!dash=geheim"): 1,
+                          ("oud.example", "PVEAPIToken=homepage@pve!dash=geheim"): 1,
+                          ("oud.example", "PVEAPIToken=homepage@pve!ander=geheim2"): 1}
+    assert found["asked"] == 3 and found["answered"] == 1 and found["skipped"] == ["Kali"]
+    assert {e["kind"] for e in found["errors"]} == {"verbinding"}
+    errors = {e["service"]: e["error"] for e in found["errors"]}
+    assert set(errors) == {"oud1 (en oud2)", "oud3"}
+    assert errors["oud3"].startswith("Time-out: https://oud.example antwoordt niet binnen 8 s")
+    # Wat er wel antwoordde, staat er zoals vroeger: van de eerste tegel.
+    by = {i["name"]: i for i in found["items"]}
+    assert set(by) == {"pve50", "vaultwarden", "oud", "opnsense", "zonder-agent"}
+    assert all(i["source"].startswith(f"pve:{cluster}:") for i in found["items"])
+    await db.close()
+
+
+async def test_discover_oud_geheim_sleurt_een_werkende_tegel_niet_mee(authed):
+    """Zelfde adres en token-id, maar een oud geheim (of geen insecure) op de tegel met het laagste id: die vraagt
+    apart en krijgt zijn eigen fout; de tegel met het goede geheim vindt alles, zoals vroeger."""
+    g = await _group(authed)
+    oud = await _svc(authed, g, "proxmox", "https://pve50.jbogaert.be", name="oud",
+                     secrets={"username": "homepage@pve!dash", "password": "oud-geheim"})
+    goed = await _svc(authed, g, "proxmox", "https://pve50.jbogaert.be", name="goed",
+                      secrets={"username": "homepage@pve!dash", "password": "geheim"})
+    await _svc(authed, g, "proxmox", "https://pve50.jbogaert.be", config={"insecure": True}, name="insecure",
+               secrets={"username": "homepage@pve!dash", "password": "geheim"})
+    db = await _db()
+    found = await discover(db, HttpClients(httpx.MockTransport(Traag())))
+    assert found["asked"] == 3 and found["answered"] == 2
+    assert [(e["service"], e["error"][:9]) for e in found["errors"]] == [("oud", "Geweigerd")]
+    assert found["items"] and all(i["source"].startswith(f"pve:{goed}:") for i in found["items"])
+    assert not any(i["source"].startswith(f"pve:{oud}:") for i in found["items"])
+    await db.close()
+
+
+async def test_discover_api_zonder_token_en_node_die_niet_bestaat(authed):
+    """Een tegel aan een API zonder token: een fout bij die API (niet "koppel aan je API"). Een tegel met een node die
+    niet in de cluster staat (andere nodenamen na een nieuwe cluster): zeggen welke nodes er wel zijn."""
+    g = await _group(authed)
+    r = await authed.post("/api/apis", json={"name": "Nieuwe cluster", "category": "Proxmox en back-up",
+                                             "kind": "proxmox", "url": "https://pve50.jbogaert.be", "config": {}})
+    assert r.status_code == 201, r.text
+    tile = await _svc(authed, g, "link", "https://pve50.jbogaert.be", name="cluster")
+    assert (await authed.post(f"/api/apis/{r.json()['id']}/tiles", json={"service_ids": [tile]})).json()["changed"] == 1
+    await _svc(authed, g, "proxmox", "https://pve50.jbogaert.be", config={"node": "pve99"}, name="proxmox99",
+               secrets={"username": "homepage@pve!dash", "password": "geheim"})
+    db = await _db()
+    found = await discover(db, HttpClients(httpx.MockTransport(Traag())))
+    assert found["skipped"] == [] and found["items"] == [] and found["answered"] == 1
+    errors = {e["service"]: e for e in found["errors"]}
+    assert errors["cluster"]["kind"] == "verbinding" and "Nieuwe cluster" in errors["cluster"]["error"]
+    assert "heeft nog geen token" in errors["cluster"]["error"]
+    assert errors["proxmox99"]["kind"] == "node"
+    assert errors["proxmox99"]["error"].startswith("node pve99 staat niet in deze cluster (wel: pve50)")
+    await db.close()
+
+
+async def test_discover_node_tegels_aan_een_api(authed):
+    """Node-tegels aan één API uit API-beheer, elk met hun node: één vraag, en elke tegel houdt zijn eigen node."""
+    g = await _group(authed)
+    r = await authed.post("/api/apis", json={"name": "Cluster", "category": "Proxmox en back-up", "kind": "proxmox",
+                                             "url": "https://pve50.jbogaert.be", "config": {"insecure": True},
+                                             "secrets": {"username": "homepage@pve!dash", "password": "geheim"}})
+    assert r.status_code == 201, r.text
+    n50 = await _svc(authed, g, "link", "https://pve50.jbogaert.be", config={"node": "pve50"}, name="pve50")
+    n51 = await _svc(authed, g, "link", "https://pve51.jbogaert.be", config={"node": "pve51"}, name="pve51")
+    assert (await authed.post(f"/api/apis/{r.json()['id']}/tiles",
+                              json={"service_ids": [n50, n51]})).json()["changed"] == 2
+    fake = Traag()
+    db = await _db()
+    found = await discover(db, HttpClients(httpx.MockTransport(fake)))
+    assert sum(fake.calls.values()) == 1 and found["asked"] == 1
+    # Alles staat op pve50: het komt van de tegel pve50, niets van pve51 (die node kent de nep-cluster niet).
+    assert [(e["service"], e["kind"]) for e in found["errors"]] == [("pve51", "node")]
+    assert found["items"] and all(i["source"].startswith(f"pve:{n50}:") for i in found["items"])
+    await db.close()
 
 
 async def test_defaults_used_for_login(authed, sshd):  # noqa: F811

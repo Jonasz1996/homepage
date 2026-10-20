@@ -1,6 +1,6 @@
 """SSH-hosts automatisch ophalen uit Proxmox: alle nodes, containers en VM's met hun IP-adres.
 
-Per Proxmox-service: de nodes uit /cluster/status, containers via /lxc/{id}/interfaces (of de config als
+Per Proxmox-service (allemaal tegelijk): de nodes uit /cluster/status, containers via /lxc/{id}/interfaces (of de config als
 de container uit staat) en VM's via de QEMU guest agent. Elke gevonden machine krijgt een vaste herkomst
 ("pve:<service>:<soort>/<id>"), zodat een volgende ronde het IP bijwerkt in plaats van een dubbele host
 te maken. Hosts die zo binnenkomen gebruiken de standaard login uit de terminal, tenzij je ze aanpast.
@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .integrations import IntegrationError, build
+from .integrations.base import TIMEOUT
 from .models import AppState, Service, SshHost
 from .ssh_login import DEFAULTS_KEY
 
@@ -73,55 +74,117 @@ async def _guest_ip(integ, node: str, kind: str, vmid: int, running: bool) -> tu
         return None, text[:120]
 
 
+def _bron(services, clients) -> tuple[dict[tuple, list], list[dict], list[str]]:
+    """Wat ⟳ pve bevraagt: elke vraag (adres, token met geheim, en dezelfde client: insecure of niet) één keer, met
+    de tegels die ze stellen. Hangen vijf node-tegels aan dezelfde API, dan één vraag in plaats van vijf time-outs;
+    een tegel met een oud geheim op hetzelfde adres vraagt apart, zodat hij een werkende tegel niet meesleurt.
+    Tegels zonder token en zonder API: apart (namen). Hangt een tegel aan een API zonder token: een fout bij die API."""
+    groups: dict[tuple, list] = {}
+    errors, skipped, leeg = [], [], {}
+    for svc in services:
+        try:
+            integ = build(svc, clients)
+        except IntegrationError as e:
+            errors.append({"service": svc.name, "error": str(e), "kind": "verbinding"})
+            continue
+        user, secret = integ.secrets.get("username"), integ.secrets.get("password")
+        if not (user and secret):
+            api = svc.__dict__.get("api") if svc.api_id else None
+            if api is None:
+                skipped.append(svc.name)
+            else:
+                leeg.setdefault(api.name, []).append(svc.name)
+            continue
+        groups.setdefault((integ.base, user, secret, id(integ.client)), []).append((svc, integ))
+    for api, names in leeg.items():
+        errors.append({"service": _namen(names), "kind": "verbinding",
+                       "error": f"de API {api} in API-beheer heeft nog geen token (username en password)"})
+    return groups, errors, skipped
+
+
+def _namen(names: list[str]) -> str:
+    return names[0] + (f" (en {', '.join(names[1:])})" if len(names) > 1 else "")
+
+
+async def _vraag(integ) -> tuple[list, list]:
+    """/cluster/resources (zonder de node van een tegel: die filtert discover per tegel) en /cluster/status
+    tegelijk: een Proxmox die niet antwoordt, kost één time-out."""
+    return await asyncio.gather(integ.get("/cluster/resources"), integ.get("/cluster/status"))
+
+
+def _fout(integ, e: IntegrationError) -> str:
+    text = str(e)
+    if text == "Time-out":
+        return (f"Time-out: {integ.base} antwoordt niet binnen {TIMEOUT:g} s. Een ander adres na een nieuwe cluster, "
+                "of laat de firewall de homepage niet door naar dat adres?")
+    return text
+
+
 async def discover(db: AsyncSession, clients) -> dict:
-    """Alle machines uit alle Proxmox-services. Dubbels (dezelfde node via cluster en node-tegel) eruit."""
+    """Alle machines uit alle Proxmox-services, elke Proxmox één keer en allemaal tegelijk. Dubbels (dezelfde node
+    via cluster en node-tegel) eruit: wat de tegel met het laagste id vindt, komt van die tegel."""
     services = (await db.execute(select(Service).where(Service.type == "proxmox").order_by(Service.id))).scalars().all()
     existing = {h.source: h for h in (await db.execute(select(SshHost).where(SshHost.source.is_not(None)))).scalars()}
     by_addr = {(h.host, h.port) for h in (await db.execute(select(SshHost))).scalars()}
-    items, errors, seen = [], [], set()
-    sem = asyncio.Semaphore(8)
+    groups, errors, skipped = _bron(services, clients)
+    keys = list(groups)
+    got = await asyncio.gather(*(_vraag(groups[k][0][1]) for k in keys), return_exceptions=True)
+    answers = dict(zip(keys, got))
+    for k in keys:
+        if isinstance(answers[k], BaseException):
+            if not isinstance(answers[k], IntegrationError):
+                raise answers[k]
+            errors.append({"service": _namen([svc.name for svc, _ in groups[k]]), "kind": "verbinding",
+                           "error": _fout(groups[k][0][1], answers[k])})
 
-    for svc in services:
-        integ = build(svc, clients)
-        try:
-            res = await integ.resources()
-            status = await integ.get("/cluster/status")
-        except IntegrationError as e:
-            errors.append({"service": svc.name, "error": str(e)})
+    items, seen, todo = [], set(), []
+    sem = asyncio.Semaphore(8)
+    # Per tegel, op volgorde van id, zoals vroeger elke tegel apart: met zijn eigen node-filter.
+    for key, svc, integ in sorted(((k, svc, integ) for k in keys for svc, integ in groups[k]), key=lambda t: t[1].id):
+        if isinstance(answers[key], BaseException):
             continue
+        res, status = answers[key]
+        node_filter = integ.config.get("node")
+        if node_filter:
+            nodes = sorted({r.get("node") for r in res or [] if r.get("type") == "node" and r.get("node")})
+            if nodes and node_filter not in nodes:
+                # Bv. een nieuwe cluster met andere nodenamen: de tegel vindt dan niets, zeg waarom.
+                errors.append({"service": svc.name, "kind": "node",
+                               "error": f"node {node_filter} staat niet in deze cluster (wel: {', '.join(nodes)}). "
+                                        "Pas de node van de tegel aan onder ✎ bewerken → Integratie en API."})
+        res = [r for r in res or [] if not node_filter or r.get("node") == node_filter]
         node_ip = {s.get("name"): s.get("ip") for s in status or [] if s.get("type") == "node"}
         for r in res:
             if r.get("type") != "node":
                 continue
             node = r.get("node")
-            key = ("node", node)
-            if key in seen:
+            if ("node", node) in seen:
                 continue
-            seen.add(key)
+            seen.add(("node", node))
             ip = node_ip.get(node)
             items.append({"source": f"pve:{svc.id}:node/{node}", "kind": "node", "name": node, "node": node,
                           "host": ip, "folder": node, "status": r.get("status"),
                           "why": None if ip else "geen IP in /cluster/status"})
+        # Zelfde vmid via twee tegels (cluster en losse node): één keer, van de eerste.
+        have = {g["vmid"] for _, _, g in todo}
+        todo += [(svc, integ, g) for g in res if g.get("type") in ("lxc", "qemu") and not g.get("template")
+                 and g["vmid"] not in have]
 
-        guests = [r for r in res if r.get("type") in ("lxc", "qemu") and not r.get("template")]
+    async def one(svc, integ, g):
+        async with sem:
+            ip, why = await _guest_ip(integ, g["node"], g["type"], g["vmid"], g.get("status") == "running")
+        return {"source": f"pve:{svc.id}:{g['type']}/{g['vmid']}", "kind": g["type"], "vmid": g["vmid"],
+                "name": g.get("name") or f"{g['type']}-{g['vmid']}", "node": g["node"], "host": ip,
+                "folder": g["node"], "status": g.get("status"), "why": why}
 
-        async def one(g, svc=svc, integ=integ):
-            async with sem:
-                ip, why = await _guest_ip(integ, g["node"], g["type"], g["vmid"], g.get("status") == "running")
-            return {"source": f"pve:{svc.id}:{g['type']}/{g['vmid']}", "kind": g["type"], "vmid": g["vmid"],
-                    "name": g.get("name") or f"{g['type']}-{g['vmid']}", "node": g["node"], "host": ip,
-                    "folder": g["node"], "status": g.get("status"), "why": why}
-
-        # Zelfde vmid via twee services (cluster en losse node): één keer.
-        have = {i.get("vmid") for i in items if i.get("vmid") is not None}
-        items.extend(await asyncio.gather(*(one(g) for g in guests if g["vmid"] not in have)))
-
+    items.extend(await asyncio.gather(*(one(*t) for t in todo)))
     for i in items:
         h = existing.get(i["source"])
         i["host_id"] = h.id if h else None
         i["known"] = bool(h) or (i["host"], 22) in by_addr
     items.sort(key=lambda i: (i["folder"], i["kind"] != "node", i["name"].lower()))
-    return {"items": items, "errors": errors}
+    answered = sum(not isinstance(a, BaseException) for a in got)
+    return {"items": items, "errors": errors, "skipped": skipped, "asked": len(keys), "answered": answered}
 
 
 async def apply(db: AsyncSession, items: list[dict], add_new: bool = True) -> dict:
