@@ -1,0 +1,87 @@
+"""Lezen, bewaren en terugzetten van de volledige layout (pagina's, groepen, services)."""
+
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from .config import get_settings
+from .models import Group, Page, Revision, Service, User
+from .schemas import PageOut, ServiceOut
+from .security import decrypt_json
+
+SERVICE_FIELDS = ("id", "name", "description", "url", "icon", "position", "type", "check", "config", "secrets")
+
+
+async def load_pages(db: AsyncSession) -> list[Page]:
+    stmt = (
+        select(Page)
+        .options(selectinload(Page.groups).selectinload(Group.services))
+        .order_by(Page.position, Page.id)
+        .execution_options(populate_existing=True)
+    )
+    return list((await db.execute(stmt)).scalars())
+
+
+def service_out(s: Service) -> ServiceOut:
+    out = ServiceOut.model_validate(s)
+    out.secret_keys = sorted(decrypt_json(s.secrets)) if s.secrets else []
+    return out
+
+
+def pages_out(pages: list[Page]) -> list[dict]:
+    result = []
+    for p in pages:
+        page = PageOut.model_validate(p).model_dump()
+        for g_out, g in zip(page["groups"], p.groups):
+            g_out["services"] = [service_out(s).model_dump() for s in g.services]
+        result.append(page)
+    return result
+
+
+def snapshot(pages: list[Page]) -> dict:
+    """Volledige kopie inclusief (versleutelde) secrets, om te kunnen terugzetten."""
+    return {
+        "pages": [
+            {
+                "id": p.id, "name": p.name, "icon": p.icon, "position": p.position,
+                "groups": [
+                    {
+                        "id": g.id, "name": g.name, "icon": g.icon, "position": g.position,
+                        "collapsed": g.collapsed,
+                        "services": [{f: getattr(s, f) for f in SERVICE_FIELDS} for s in g.services],
+                    }
+                    for g in p.groups
+                ],
+            }
+            for p in pages
+        ]
+    }
+
+
+async def record_revision(db: AsyncSession, user: User | None, summary: str) -> None:
+    await db.flush()
+    db.add(Revision(user_id=user.id if user else None, summary=summary[:255],
+                    snapshot=snapshot(await load_pages(db))))
+    await db.flush()
+    keep = get_settings().revisions_keep
+    old_ids = (await db.execute(
+        select(Revision.id).order_by(Revision.id.desc()).offset(keep)
+    )).scalars().all()
+    if old_ids:
+        await db.execute(delete(Revision).where(Revision.id.in_(old_ids)))
+
+
+async def restore_snapshot(db: AsyncSession, snap: dict) -> None:
+    await db.execute(delete(Page))
+    await db.flush()
+    db.expunge_all()
+    for p in snap["pages"]:
+        page = Page(id=p["id"], name=p["name"], icon=p.get("icon"), position=p["position"])
+        db.add(page)
+        for g in p["groups"]:
+            group = Group(id=g["id"], page_id=p["id"], name=g["name"], icon=g.get("icon"),
+                          position=g["position"], collapsed=g.get("collapsed", False))
+            db.add(group)
+            for s in g["services"]:
+                db.add(Service(group_id=g["id"], **{f: s.get(f) for f in SERVICE_FIELDS}))
+    await db.flush()

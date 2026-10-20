@@ -1,0 +1,7 @@
+[Unit]
+Description=homepage: back-up van de database
+
+[Service]
+Type=oneshot
+User=postgres
+ExecStart=/bin/sh -c 'mkdir -p /var/backups/homepage && pg_dump -Fc homepage > /var/backups/homepage/homepage-$(date +%%F).dump && find /var/backups/homepage -name "homepage-*.dump" -mtime +14 -delete'

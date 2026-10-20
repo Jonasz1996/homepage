@@ -1,0 +1,4 @@
+{
+  "compilerOptions": { "moduleResolution": "bundler", "target": "ES2022", "module": "ESNext", "checkJs": false, "strict": false },
+  "include": ["src/**/*.js", "src/**/*.svelte"]
+}
