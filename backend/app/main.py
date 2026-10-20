@@ -7,7 +7,7 @@ from .config import get_settings
 from .db import get_maker
 from .deps import COOKIE, csrf_guard, secure_cookie
 from .routers import (apis, auth, capacity, configs, cron, heal, health, hooks, importexport, integrations, layout, logs, monitoring, network, notifications,
-                      netmap, oidc, planning, restoretest, search, ssh, timeline, upgrade, zabbix)
+                      netmap, oidc, planning, restoretest, search, ssh, timeline, upgrade, versie, zabbix)
 
 log = logging.getLogger("homepage.api")
 
@@ -66,6 +66,7 @@ app.include_router(restoretest.router)
 app.include_router(netmap.router)
 app.include_router(apis.router)
 app.include_router(zabbix.router)
+app.include_router(versie.router)
 
 
 @app.middleware("http")
@@ -79,6 +80,7 @@ async def renew_session_cookie(request: Request, call_next):
     return response
 
 
-@app.get("/api/health")
-async def health():
+# Zonder inloggen: draait de API? (/api/health is het gezondheidsoverzicht in hw en vraagt een login.)
+@app.get("/api/ping")
+async def ping():
     return {"ok": True}

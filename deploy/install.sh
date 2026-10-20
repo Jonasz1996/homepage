@@ -8,7 +8,7 @@ set -euo pipefail
 APP_DIR=/opt/homepage
 CONF_DIR=/etc/homepage
 # NPM_IP: het IP van Nginx Proxy Manager. Wordt bij de eerste keer bewaard in homepage.env en daarna daar gelezen.
-NPM_IP="${NPM_IP:-$(sed -n 's/^HOMEPAGE_NPM_IP=//p' "$CONF_DIR/homepage.env" 2>/dev/null | tail -1)}"
+NPM_IP="${NPM_IP:-$(sed -n 's/^HOMEPAGE_NPM_IP=//p' "$CONF_DIR/homepage.env" 2>/dev/null | tail -1 || true)}"
 NPM_IP="${NPM_IP:-192.168.0.245}"
 
 say() { printf '\n\033[1;37m==> %s\033[0m\n' "$*"; }
@@ -110,15 +110,30 @@ set -a
 . "$CONF_DIR/homepage.env"
 set +a
 say "Database bijwerken"
-if runuser -u postgres -- psql -d homepage -tAc "SELECT 1 FROM alembic_version" 2>/dev/null | grep -q 1; then
+# Welke versie draaide er tot nu toe (voor homepage-terugzetten).
+PREV_COMMIT=$(sed -n 's/^commit=//p' "$CONF_DIR/versie" 2>/dev/null || true)
+PREV_VERSIE=$(sed -n 's/^versie=//p' "$CONF_DIR/versie" 2>/dev/null || true)
+if [ -z "$PREV_COMMIT" ] && [ -n "${HOMEPAGE_PREV_COMMIT:-}" ]; then
+  PREV_COMMIT=$HOMEPAGE_PREV_COMMIT
+  PREV_VERSIE=$(git -C "$APP_DIR" describe --tags --always "$PREV_COMMIT" 2>/dev/null || true)
+fi
+NOW_COMMIT=$(git -C "$APP_DIR" rev-parse HEAD 2>/dev/null || true)
+if [ -n "${HOMEPAGE_TERUGZETTEN:-}" ]; then
+  echo "Terugzetten: de database is al teruggezet, geen nieuwe kopie."
+elif runuser -u postgres -- psql -d homepage -tAc "SELECT 1 FROM alembic_version" 2>/dev/null | grep -q 1; then
   # Bestaande installatie: eerst een kopie, zodat een mislukte migratie terug te draaien is. De laatste 3 blijven staan.
   DUMP="/var/backups/homepage/voor-update-$(date +%Y%m%d-%H%M%S).dump"
   if runuser -u postgres -- sh -c "pg_dump -Fc homepage > '$DUMP.tmp' && mv '$DUMP.tmp' '$DUMP'"; then
     echo "Kopie van de database: $DUMP"
+    # Naast de kopie: welke versie erbij hoort. Zonder andere versie (opnieuw dezelfde installeren) valt er niets terug te zetten.
+    if [ -n "$PREV_COMMIT" ] && [ "$PREV_COMMIT" != "$NOW_COMMIT" ]; then
+      printf 'commit=%s\nversie=%s\n' "$PREV_COMMIT" "${PREV_VERSIE:-${PREV_COMMIT:0:7}}" > "$DUMP.versie"
+    fi
   else
     warn "Kopie van de database mislukt; toch verder."
   fi
-  find /var/backups/homepage -name 'voor-update-*.dump' -printf '%T@ %p\n' | sort -rn | tail -n +4 | cut -d' ' -f2- | xargs -r rm -f
+  find /var/backups/homepage -name 'voor-update-*.dump' -printf '%T@ %p\n' | sort -rn | tail -n +4 | cut -d' ' -f2- \
+    | while read -r f; do rm -f "$f" "$f.versie" "$f.teruggezet"; done
 fi
 (cd "$APP_DIR/backend" && runuser -u homepage -- env HOMEPAGE_DATABASE_URL="$HOMEPAGE_DATABASE_URL" \
   "$APP_DIR/.venv/bin/alembic" upgrade head)
@@ -137,6 +152,8 @@ systemctl enable nginx
 systemctl reload nginx || systemctl restart nginx
 
 say "Services"
+# Een update terugdraaien: vorige versie plus de kopie van de database van vlak voor die update.
+install -m 755 "$APP_DIR/deploy/terugzetten.sh" /usr/local/sbin/homepage-terugzetten
 install -m 644 "$APP_DIR/deploy/homepage-api.service" "$APP_DIR/deploy/homepage-worker.service" \
   "$APP_DIR/deploy/homepage-syslog.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/homepage-backup.service" "$APP_DIR/deploy/homepage-backup.timer" /etc/systemd/system/
@@ -144,20 +161,32 @@ systemctl daemon-reload
 systemctl enable --now homepage-backup.timer
 systemctl enable homepage-api homepage-worker homepage-syslog
 systemctl restart homepage-api homepage-worker homepage-syslog
-sleep 2
-if curl -fsS http://127.0.0.1/api/health >/dev/null; then
+API_OK=""
+for _ in $(seq 20); do
+  if curl -fsS http://127.0.0.1/api/ping >/dev/null 2>&1; then API_OK=1; break; fi
+  sleep 1
+done
+if [ -n "$API_OK" ]; then
   echo "API draait."
 else
   warn "API reageert niet: journalctl -u homepage-api"
 fi
 
+# Wat er nu draait: het dashboard toont het (en wat er nieuw is), homepage-terugzetten gebruikt het.
+VERSIE=$(git -C "$APP_DIR" describe --tags --always 2>/dev/null || echo onbekend)
+KANAAL="${HOMEPAGE_KANAAL:-$(sed -n 's/^kanaal=//p' "$CONF_DIR/versie" 2>/dev/null || true)}"
+printf 'versie=%s\ncommit=%s\nkanaal=%s\ndatum=%s\n' "$VERSIE" "$NOW_COMMIT" "${KANAAL:-nieuwste}" "$(date -Iseconds)" \
+  > "$CONF_DIR/versie"
+chgrp homepage "$CONF_DIR/versie" && chmod 640 "$CONF_DIR/versie"
+
 IP=$(hostname -I | awk '{print $1}')
-say "Klaar"
+say "Klaar (versie $VERSIE, ${KANAAL:-nieuwste})"
 cat <<EOF
 Dashboard: http://$IP
 Testen kan meteen op dat adres. Voor gebruik van buitenaf: in Nginx Proxy Manager een HTTPS-host
 (bv. home.jbogaert.be) naar http://$IP:80 met "Websockets Support" aan.
 Bijwerken: hetzelfde bootstrap-commando opnieuw uitvoeren.
+Werkt iets niet meer na een update: homepage-terugzetten (vorige versie plus de database van daarvoor).
 EOF
 # Nog geen account (ook bij een tweede keer uitvoeren): de setup-code tonen.
 USERS=$(runuser -u postgres -- psql -d homepage -tAc "SELECT count(*) FROM users" 2>/dev/null || echo 0)

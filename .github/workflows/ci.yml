@@ -20,6 +20,15 @@ jobs:
         ports: ["5432:5432"]
         options: >-
           --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+      # Zoals in productie: PostgreSQL met TimescaleDB (hypertables, compressie, bewaarbeleid).
+      timescale:
+        image: timescale/timescaledb:latest-pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: homepage_test
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
     defaults:
       run:
         working-directory: backend
@@ -39,6 +48,11 @@ jobs:
         run: pytest -q
         env:
           HOMEPAGE_TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/homepage_test
+      - name: Tests (TimescaleDB, schema uit de migraties)
+        run: pytest -q
+        env:
+          HOMEPAGE_TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5433/homepage_test
+          HOMEPAGE_TEST_SCHEMA: migraties
 
   frontend:
     runs-on: ubuntu-latest
@@ -55,6 +69,62 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run build
+
+  browser:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: timescale/timescaledb:latest-pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: homepage
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      HOMEPAGE_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/homepage
+      HOMEPAGE_SECRET_KEY_FILE: /tmp/hp/secret.key
+      HOMEPAGE_SETUP_TOKEN_FILE: /tmp/hp/setup-token
+      HOMEPAGE_SETUP_TOKEN: e2e-setup-token
+      HOMEPAGE_COOKIE_SECURE: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            e2e/package-lock.json
+      - name: Backend starten
+        run: |
+          mkdir -p /tmp/hp
+          echo "$HOMEPAGE_SETUP_TOKEN" > /tmp/hp/setup-token
+          pip install -q ./backend
+          python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" > /tmp/hp/secret.key
+          cd backend && alembic upgrade head
+          nohup uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/hp/api.log 2>&1 &
+          for _ in $(seq 30); do curl -fs -o /dev/null http://127.0.0.1:8000/api/ping && break; sleep 1; done
+      - run: npm ci
+        working-directory: frontend
+      - name: Browsertests (Playwright)
+        working-directory: e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npx playwright test
+      - name: Log van de API
+        if: failure()
+        run: cat /tmp/hp/api.log
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: e2e/playwright-report
+          retention-days: 7
 
   install-script:
     runs-on: ubuntu-latest
