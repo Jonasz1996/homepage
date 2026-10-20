@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import { api, withReauth } from './api.js'
   import Modal from './Modal.svelte'
+  import { storm } from './fx.js'
 
   // Internet: publiek IP, WAN-gateways (OPNsense), Cloudflare-tunnels en Wake-on-LAN.
   let { onclose, onchanged } = $props()
@@ -26,6 +27,7 @@
     try {
       const r = await withReauth(() => api(`/services/${w.service_id}/wol`, { method: 'POST' }))
       msg = `✓ ${r.message}`
+      storm()
     } catch (e) { msg = `✕ ${e.message}` }
   }
 

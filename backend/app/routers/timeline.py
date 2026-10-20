@@ -23,6 +23,7 @@ AUDIT_TITLES = {
     "maintenance": lambda d: f"Onderhoud {d.get('service') or d.get('group') or ''}: "
                              + (f"{d.get('minutes')} min" if d.get("minutes") else "gestopt"),
     "syslog_rollout": lambda d: f"rsyslog uitgerold op {d.get('host')}",
+    "oidc_settings_changed": lambda d: "Authentik-instellingen gewijzigd",
     "password_changed": lambda d: "Wachtwoord gewijzigd",
     "service_secrets_changed": lambda d: f"Geheimen van {d.get('service')} gewijzigd",
     "ssh_host_added": lambda d: f"SSH-host {d.get('name')} toegevoegd",

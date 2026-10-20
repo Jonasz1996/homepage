@@ -25,6 +25,13 @@
     position: fixed; inset: 0; z-index: 65; display: flex; align-items: flex-start; justify-content: center;
     padding: 6vh 14px; background: rgba(0, 0, 0, .6); overflow: auto;
   }
-  .box { width: 100%; max-width: 640px }
+  .box { width: 100%; max-width: 640px; transition: transform .15s ease-out }
   .box.wide { max-width: 860px }
+  /* Op de gsm schermvullend, met ruimte voor de notch en de navigatiebalk. */
+  @media (max-width: 600px) {
+    .ov { padding: env(safe-area-inset-top) 0 0; align-items: stretch }
+    .box, .box.wide { max-width: none; min-height: 100% }
+    .box :global(.card) { border-radius: 0; min-height: 100%; padding-bottom: env(safe-area-inset-bottom) }
+    .box :global(.body) { padding-left: 14px; padding-right: 14px }
+  }
 </style>

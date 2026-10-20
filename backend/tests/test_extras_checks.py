@@ -260,3 +260,10 @@ async def test_watch_npm_notifies_new_hosts_once(authed):
     assert [n.title for n in notes] == ["2 nieuwe hosts in NPM"]
     assert "jellyfin.jbogaert.be, plex.jbogaert.be" in notes[0].body
     assert (await db.get(AppState, "npm_seen:1")).value["hosts"][0] == "adguard.jbogaert.be"
+
+
+def test_network_errors_in_plain_language():
+    from app.monitoring.checks import _short
+    assert _short(OSError("[Errno -2] Name or service not known")).startswith("DNS: naam onbekend (")
+    assert _short(OSError("[Errno 111] Connection refused")).startswith("Verbinding geweigerd")
+    assert _short(ValueError("iets anders")) == "iets anders"

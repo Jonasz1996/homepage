@@ -231,5 +231,21 @@ async def run_check(check: dict, url: str | None, clients: HttpClients | None = 
     return Outcome(False, error=f"Onbekend check-type {kind!r}")
 
 
+# Veelvoorkomende netwerkfouten in gewone taal (de originele tekst staat erachter).
+_FRIENDLY = (
+    ("Name or service not known", "DNS: naam onbekend"),
+    ("Temporary failure in name resolution", "DNS: geen antwoord"),
+    ("nodename nor servname", "DNS: naam onbekend"),
+    ("Connection refused", "Verbinding geweigerd"),
+    ("No route to host", "Geen route naar host"),
+    ("Network is unreachable", "Netwerk onbereikbaar"),
+    ("CERTIFICATE_VERIFY_FAILED", "Certificaat niet vertrouwd"),
+)
+
+
 def _short(e: Exception) -> str:
-    return (str(e) or type(e).__name__)[:300]
+    text = str(e) or type(e).__name__
+    for needle, label in _FRIENDLY:
+        if needle in text:
+            return f"{label} ({text})"[:300]
+    return text[:300]

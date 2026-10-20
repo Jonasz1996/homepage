@@ -1,4 +1,5 @@
 <script>
+  import { boom } from './fx.js'
   import { untrack } from 'svelte'
   import { api } from './api.js'
   import { iconIsMono, iconUrl } from './icons.js'
@@ -98,6 +99,7 @@
   async function del() {
     if (!confirm(`'${service.name}' verwijderen?`)) return
     await api(`/services/${service.id}`, { method: 'DELETE' })
+    boom()
     onsaved()
     onclose()
   }
