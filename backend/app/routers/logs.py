@@ -71,10 +71,11 @@ async def search(host: list[str] | None = Query(default=None), app: str | None =
 async def hosts(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     since = datetime.now(timezone.utc) - timedelta(hours=24)
     stmt = (select(LogEntry.host, func.count(), func.max(LogEntry.ts), func.min(LogEntry.severity),
-                   func.sum(case((LogEntry.severity <= 3, 1), else_=0)))
+                   func.sum(case((LogEntry.severity <= 3, 1), else_=0)),
+                   func.max(case((LogEntry.app == "docker", 1), else_=0)))
             .where(LogEntry.ts >= since).group_by(LogEntry.host).order_by(LogEntry.host))
-    return [{"host": h, "count": n, "last": _aware(last), "worst": worst, "errors": int(errs or 0)}
-            for h, n, last, worst, errs in (await db.execute(stmt)).all()]
+    return [{"host": h, "count": n, "last": _aware(last), "worst": worst, "errors": int(errs or 0), "docker": bool(dock)}
+            for h, n, last, worst, errs, dock in (await db.execute(stmt)).all()]
 
 
 @router.get("/histogram")

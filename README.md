@@ -249,6 +249,15 @@ Later, deel 3 (Authentik en gsm):
   back-up). Tijdens het venster geen meldingen en telt de uptime het niet mee; het begin komt op de tijdlijn
 - **incidentnotities**: bij een storing op de tijdlijn of in het mini dashboard noteer je de oorzaak en de oplossing.
   Gaat dezelfde service later weer down, dan toont het mini dashboard die notities meteen bovenaan
+- **overal zoeken** met `Ctrl+K`: naast tegels en acties ook notities, cronjobs, SSH-hosts, apparaten,
+  configuratiebestanden (in de inhoud, met wachtwoorden gemaskeerd; eigen bestanden alleen op naam) en de logregels
+  van de laatste 24 uur, gegroepeerd per soort. Een klik opent het juiste venster (de cronjob, de terminal, het
+  apparaat, de diff, de logs met die zoekterm). Typ een IP of MAC en je ziet welk apparaat, welke SSH-host, welke
+  NPM-hosts ernaar doorsturen, welke services en welke cronjobs van die machine erbij horen
+- **containerlogs uit Portainer** in de logviewer: elke 30 s de nieuwe regels van elke draaiende container, als
+  machine met de containernaam (▣) en app `docker`. Zoeken, filters, live meekijken en meldingsregels werken zoals
+  bij syslog; de ernst komt uit de regel zelf (ERROR, WARN, ...). Uit te zetten per Portainer-tegel met de
+  instelling `logs` = `false`
 - **net → apparaten**: elke 5 minuten de ARP- en DHCP-tabel van OPNsense (ISC en Kea), met IP, MAC, fabrikant,
   hostnaam en interface. Wat er bij de eerste keer al is, geldt als gekend; een nieuw MAC-adres daarna geeft een
   melding. Geef apparaten een naam of zet ze op "ken ik". Met **volgen** wordt een apparaat elke 6 uur gescand op
