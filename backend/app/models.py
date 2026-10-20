@@ -424,3 +424,46 @@ class HealRule(Base):
     last_at: Mapped[datetime | None]
     last_result: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class ConfigVersion(Base):
+    """Een versie van een configuratie (OPNsense config.xml, NPM-hosts, .conf van een VM/CT, een bestand via SSH).
+
+    Alleen bewaard als ze verschilt van de vorige. De inhoud is versleuteld (er staan wachtwoorden en sleutels in).
+    """
+
+    __tablename__ = "config_versions"
+    __table_args__ = (Index("ix_config_versions_item_ts", "item", "ts"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # "opnsense:3", "npm:5", "pve:1:105", "file:3:/etc/nginx/nginx.conf"
+    item: Mapped[str] = mapped_column(String(300))
+    name: Mapped[str] = mapped_column(String(300))
+    # opnsense | npm | pve | file
+    kind: Mapped[str] = mapped_column(String(12))
+    ts: Mapped[datetime] = mapped_column(default=utcnow)
+    sha: Mapped[str] = mapped_column(String(64))
+    size: Mapped[int] = mapped_column(Integer)
+    added: Mapped[int] = mapped_column(Integer, default=0)
+    removed: Mapped[int] = mapped_column(Integer, default=0)
+    content: Mapped[str] = mapped_column(Text)
+
+
+class Device(Base):
+    """Een apparaat op het netwerk, uit de ARP- en DHCP-tabel van OPNsense."""
+
+    __tablename__ = "devices"
+
+    mac: Mapped[str] = mapped_column(String(17), primary_key=True)
+    name: Mapped[str | None] = mapped_column(String(80))
+    vendor: Mapped[str | None] = mapped_column(String(120))
+    hostname: Mapped[str | None] = mapped_column(String(120))
+    ip: Mapped[str | None] = mapped_column(String(45))
+    intf: Mapped[str | None] = mapped_column(String(60))
+    note: Mapped[str | None] = mapped_column(String(300))
+    known: Mapped[bool] = mapped_column(Boolean, default=False)
+    scan: Mapped[bool] = mapped_column(Boolean, default=False)
+    ports: Mapped[list | None] = mapped_column(Json)
+    ports_at: Mapped[datetime | None]
+    first_seen: Mapped[datetime] = mapped_column(default=utcnow)
+    last_seen: Mapped[datetime] = mapped_column(default=utcnow)

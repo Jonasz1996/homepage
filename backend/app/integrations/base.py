@@ -105,6 +105,21 @@ class Integration:
         return [self.secrets[k] for k in keys]
 
     async def request(self, method: str, path: str, **kw) -> Any:
+        r = await self._send(method, path, **kw)
+        if not r.content:
+            return None
+        try:
+            return r.json()
+        except ValueError as e:
+            raise IntegrationError(f"Geen API-antwoord op {path.split('?')[0]}: {self.base} gaf een webpagina{_page_hint(r)}. "
+                                   "Klopt de url? Een NPM-standaardpagina of loginpagina komt niet door: "
+                                   "gebruik rechtstreeks het adres van de API (bv. https://192.168.0.50:8006, insecure true).") from e
+
+    async def text(self, method: str, path: str, **kw) -> str:
+        """Zoals request, maar voor een bestand (bv. config.xml) in plaats van JSON."""
+        return (await self._send(method, path, **kw)).text
+
+    async def _send(self, method: str, path: str, **kw) -> httpx.Response:
         try:
             r = await self.client.request(method, self.base + path, timeout=TIMEOUT, **kw)
         except httpx.TimeoutException as e:
@@ -122,14 +137,7 @@ class Integration:
                                    "Een login (Authentik) ervoor laat geen API-token door.")
         if r.status_code >= 400:
             raise IntegrationError(f"HTTP {r.status_code} op {path.split('?')[0]}")
-        if not r.content:
-            return None
-        try:
-            return r.json()
-        except ValueError as e:
-            raise IntegrationError(f"Geen API-antwoord op {path.split('?')[0]}: {self.base} gaf een webpagina{_page_hint(r)}. "
-                                   "Klopt de url? Een NPM-standaardpagina of loginpagina komt niet door: "
-                                   "gebruik rechtstreeks het adres van de API (bv. https://192.168.0.50:8006, insecure true).") from e
+        return r
 
     async def summary(self) -> list[dict]:
         raise NotImplementedError

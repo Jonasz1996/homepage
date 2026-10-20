@@ -24,7 +24,7 @@ from .network import NETWORK_EVERY, PUBLIC_IP_EVERY, sample_power, watch_gateway
 from .report import weekly_notification
 from .updates import UPDATES_EVERY, run_updates
 from .upgrade import auto_updates, cleanup_snapshots
-from . import healing
+from . import configs, devices, healing
 from .watchers import watch_npm, watch_pbs
 
 log = logging.getLogger("homepage.worker")
@@ -46,6 +46,7 @@ class Worker:
         self.http = HttpClients()
         self.started = datetime.now(timezone.utc).replace(microsecond=0)
         self.auto_task: asyncio.Task | None = None
+        self.config_busy = False
 
     async def detect_timescale(self) -> None:
         async with self.maker() as db:
@@ -177,6 +178,27 @@ class Worker:
                 await run_selfcheck(db, cfg["offsite"])
             await db.commit()
 
+    async def lan(self) -> None:
+        """Elke 5 minuten: apparaten uit OPNsense, en de poortscans die aan de beurt zijn."""
+        async with self.maker() as db:
+            await devices.refresh(db, self.http)
+            await db.commit()
+            await devices.scan_due(db)
+            await db.commit()
+
+    async def config_copy(self) -> None:
+        """Elke nacht op het ingestelde uur: kopie van de configuratie, met een melding als er iets veranderde."""
+        if self.config_busy:
+            return
+        self.config_busy = True
+        try:
+            async with self.maker() as db:
+                if await configs.due(db):
+                    await configs.run_configs(db, self.http)
+                    await db.commit()
+        finally:
+            self.config_busy = False
+
     async def beat(self) -> None:
         async with self.maker() as db:
             await heartbeat(db, self.started)
@@ -207,6 +229,7 @@ class Worker:
                   "domains": (DOMAINS_EVERY, start - DOMAINS_EVERY + 360),
                   "selfcheck": (SELFCHECK_EVERY, start - SELFCHECK_EVERY + 90)}
         last_beat = 0.0
+        last_lan = start - devices.DEVICES_EVERY + 45
         while True:
             try:
                 for sid, check, url in await self.due_services():
@@ -236,9 +259,13 @@ class Worker:
                     if time.monotonic() - last > every:
                         health[what] = (every, time.monotonic())
                         self.spawn(self.health(what))
+                if time.monotonic() - last_lan > devices.DEVICES_EVERY:
+                    last_lan = time.monotonic()
+                    self.spawn(self.lan())
                 if time.monotonic() - last_beat > HEARTBEAT_EVERY:
                     last_beat = time.monotonic()
                     self.spawn(self.beat())
+                    self.spawn(self.config_copy())
                     if not (self.auto_task and not self.auto_task.done()):
                         self.auto_task = asyncio.create_task(self.auto_updates())
                         self.tasks.add(self.auto_task)

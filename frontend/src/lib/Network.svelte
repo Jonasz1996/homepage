@@ -1,11 +1,13 @@
 <script>
-  import { onMount } from 'svelte'
+  import { onMount, untrack } from 'svelte'
   import { api, withReauth } from './api.js'
   import Modal from './Modal.svelte'
   import { storm } from './fx.js'
+  import Devices from './Devices.svelte'
 
-  // Internet: publiek IP, WAN-gateways (OPNsense), Cloudflare-tunnels en Wake-on-LAN.
-  let { onclose, onchanged } = $props()
+  // Internet: publiek IP, WAN-gateways (OPNsense), Cloudflare-tunnels en Wake-on-LAN; en de apparaten op het LAN.
+  let { onclose, onchanged, initialTab } = $props()
+  let tab = $state(untrack(() => initialTab) || 'internet')
 
   let data = $state(null)
   let error = $state('')
@@ -45,6 +47,13 @@
 </script>
 
 <Modal title="ip -br addr && cloudflared tunnel list" {onclose} wide>
+  <div class="tabs">
+    <button class="mini" class:on={tab === 'internet'} onclick={() => (tab = 'internet')}>internet</button>
+    <button class="mini" class:on={tab === 'apparaten'} onclick={() => (tab = 'apparaten')}>apparaten</button>
+  </div>
+  {#if tab === 'apparaten'}
+    <Devices />
+  {:else}
   {#if error}<p class="err">{error}</p>{/if}
   {#if data}
     <div class="top">
@@ -114,9 +123,11 @@
   {:else}
     <p class="hint">laden…</p>
   {/if}
+  {/if}
 </Modal>
 
 <style>
+  .tabs { display: flex; gap: 6px; margin-bottom: 12px }
   .top { display: flex; align-items: center; gap: 12px }
   .ip { flex: 1 }
   .ip b { display: block; font-size: 22px; font-weight: 500; color: var(--text-h); letter-spacing: .02em }
