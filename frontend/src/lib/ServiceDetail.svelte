@@ -6,6 +6,7 @@
   import LatencyChart from './LatencyChart.svelte'
   import Modal from './Modal.svelte'
   import Notes from './Notes.svelte'
+  import HealRules from './HealRules.svelte'
 
   // Mini dashboard van één service: gegevens van de integratie en de monitoring-historiek.
   let { service, groups = [], onclose, onedit, onchanged, onterminal } = $props()
@@ -174,6 +175,8 @@
           </tbody>
         </table>
       {/if}
+
+      {#if service.check?.type}<HealRules {service} />{/if}
 
       <span class="lbl">Laatste checks</span>
       <table class="tbl">

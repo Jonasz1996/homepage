@@ -375,3 +375,52 @@ class Reading(Base):
     sensor: Mapped[str] = mapped_column(String(80), primary_key=True)
     ts: Mapped[datetime] = mapped_column(primary_key=True, default=utcnow, index=True)
     value: Mapped[float] = mapped_column(Float)
+
+
+class UpdateRun(Base):
+    """Updates installeren op één machine of container: snapshot, apt, check van de services, eventueel terug."""
+
+    __tablename__ = "update_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # Zelfde sleutel als in het updates-overzicht: "ssh:3", "ssh:3:ct:105", "pve:1:pve50"
+    target: Mapped[str] = mapped_column(String(80), index=True)
+    target_name: Mapped[str] = mapped_column(String(120))
+    # manueel | auto
+    trigger: Mapped[str] = mapped_column(String(12), default="manueel")
+    security_only: Mapped[bool] = mapped_column(Boolean, default=False)
+    # wacht | snapshot | installeren | controleren | ok | fout | services_down | teruggedraaid | terugdraaien_mislukt
+    status: Mapped[str] = mapped_column(String(24), default="wacht")
+    # {"kind": "pct"|"api", "name": ..., "node": ..., "vmid": ..., "type": ..., "service_id": ..., "host_id": ...}
+    snapshot: Mapped[dict | None] = mapped_column(Json)
+    exit_code: Mapped[int | None] = mapped_column(Integer)
+    reboot_needed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # [{"service_id": 1, "name": "Plex", "ok": true, "error": null}]
+    checks: Mapped[list | None] = mapped_column(Json)
+    output: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(default=utcnow, index=True)
+    started_at: Mapped[datetime | None]
+    finished_at: Mapped[datetime | None]
+    rolled_back_at: Mapped[datetime | None]
+
+
+class HealRule(Base):
+    """Zelfherstel: als een service zoveel checks na elkaar down is, voer een actie uit (met een limiet)."""
+
+    __tablename__ = "heal_rules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    service_id: Mapped[int] = mapped_column(ForeignKey("services.id", ondelete="CASCADE"), index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    after: Mapped[int] = mapped_column(Integer, default=3)
+    max_per_hour: Mapped[int] = mapped_column(Integer, default=2)
+    # {"kind": "integration", "service_id": 4, "action": "reboot", "params": {...}, "label": "..."}
+    # {"kind": "ssh", "host_id": 3, "op": "systemctl"|"docker", "name": "plex"}
+    action: Mapped[dict] = mapped_column(Json)
+    # Tijdstippen (ISO) waarop de regel afging, het laatste uur.
+    fired: Mapped[list] = mapped_column(Json, default=list)
+    last_at: Mapped[datetime | None]
+    last_result: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)

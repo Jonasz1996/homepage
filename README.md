@@ -132,6 +132,20 @@ Later, deel 1 (tijdlijn, weekrapport en updates):
   (`pveum role add HomepageApt -privs Sys.Modify && pveum aclmod /nodes -user homepage@pve -role HomepageApt`); het
   PBS-token van hierboven mag het al. Zonder die rechten staat er een duidelijke melding bij die machine en werkt de
   rest gewoon
+- **updates installeren** (in `apt`): vink machines en containers aan en klik *installeren*. Eerst een snapshot
+  (containers op een node met `pct snapshot` via SSH; een SSH-host die zelf een VM/CT is via de Proxmox-API, daarvoor
+  heeft het token `VM.Snapshot` en `VM.Snapshot.Rollback` nodig), dan `apt-get upgrade` (op Proxmox en PBS
+  `dist-upgrade`), met de uitvoer live. Daarna worden de services met dezelfde naam of hetzelfde IP nagekeken. Faalt
+  apt of is een service down, dan krijg je een melding en zet *terugdraaien* de machine terug naar de snapshot.
+  Fysieke nodes kunnen geen snapshot: dat moet je bewust kiezen (*toch installeren zonder snapshot*). Optioneel
+  *alleen beveiligingsupdates*. Onder *'s nachts*: elke nacht om een gekozen uur de beveiligingsupdates, alleen waar
+  een snapshot kan; gaat het mis, dan draait de homepage zelf terug. Eigen snapshots (`hp-upd-…`) van geslaagde
+  installaties verdwijnen na 7 dagen (instelbaar)
+- **zelfherstel** (in het mini dashboard van een service): "als Plex 3 checks na elkaar down is, herstart CT 105".
+  Acties: de knoppen van de integraties (Proxmox herstart of start een VM/CT, Portainer herstart een container) of
+  via SSH `systemctl restart` / `docker restart`. Hoogstens 2 keer per uur (instelbaar), minstens 10 minuten
+  ertussen, niet als iets waar de service van afhangt plat ligt. Elke poging komt in het meldingencentrum; bij de
+  limiet pauzeert de regel met een melding. *Nu testen* voert de actie één keer uit
 
 Later, deel 2 (internet, Wake-on-LAN en stroom):
 
