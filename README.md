@@ -929,27 +929,39 @@ De firewall van de container in Proxmox is een extra laag: laat dan poort 80 toe
 push-monitors, webhooks of `/api/healthz` rechtstreeks aanroepen (Zabbix, Proxmox, PBS, Home Assistant, scripts),
 en poort 443 voor wie https gebruikt (hieronder). Laat daarnaast poort 514 (udp en tcp) toe vanaf je LAN voor de logs.
 
-**HTTPS op de container zelf.** install.sh maakt met openssl een eigen certificaat dat 9999 dagen geldig is (tot
-2054), en nginx luistert daarmee ook op poort 443, met dezelfde regels als op poort 80. Het geldt voor de naam van
+**HTTPS op de container zelf.** install.sh maakt met openssl een eigen certificaat dat 9999 dagen geldig is (ruim
+27 jaar), en nginx luistert daarmee ook op poort 443, met dezelfde regels als op poort 80. Het geldt voor de naam van
 de container, `localhost`, 127.0.0.1, ::1 en elk IPv4-adres van de container (geen IPv6: dat voorvoegsel kan
-veranderen). Een eigen CA ondertekent het, en install.sh wist de sleutel van die CA meteen daarna: niemand kan er nog
-een ander certificaat mee maken, ook niet wie later in de container raakt. Alles staat in `/etc/ssl/homepage`
-(`homepage.crt`, `homepage.key` alleen voor root, `homepage-ca.crt`).
+veranderen). Een eigen CA ondertekent het. Die CA mag alleen voor die adressen en die namen tekenen
+(nameConstraints; bij een naam ook voor namen eronder, zoals `iets.<naam van de container>`), en haar sleutel staat
+in het geheugen (`/dev/shm`; zonder dat even naast de rest) en is weg zodra het certificaat ondertekend is: niemand
+kan er een certificaat voor een andere site mee maken, ook niet wie later in de container raakt. Alles staat in
+`/etc/ssl/homepage` (`homepage.crt`, `homepage.key` alleen voor root, `homepage-ca.crt`).
 
 - In NPM mag de proxy host van het dashboard ook naar `https://<IP van de container>:443` wijzen (schema https):
-  dan is ook het stuk tussen NPM en de container versleuteld. NPM controleert het certificaat niet
+  dan is ook het stuk tussen NPM en de container versleuteld. NPM controleert het certificaat niet. Laat in de
+  firewall van de container dan ook 443 vanaf NPM toe. Ga je met `homepage-terugzetten` (of `KANAAL=stabiel`) naar
+  een versie van voor 20 oktober 2026, zet NPM dan eerst terug op http en poort 80: die versie luistert niet op 443
 - Geen waarschuwing in je browser of in Zabbix op `https://<IP>`: importeer `homepage-ca.crt` daar als vertrouwde
   basis-CA (Windows: dubbelklik → Certificaat installeren → Vertrouwde basiscertificeringsinstanties; Android:
-  zoek in Instellingen naar "CA-certificaat"; Firefox heeft een eigen lijst). Download het via NPM op
-  `https://<naam van het dashboard>/homepage-ca.crt` of kopieer het uit de container. De vingerafdruk staat op het
-  einde van install.sh en in `homepage-diagnose`: vergelijk ze voor je importeert
-- iPhone, iPad en Mac aanvaarden geen servercertificaat dat langer dan 825 dagen geldig is, ook niet met een
-  vertrouwde CA: daar blijft de waarschuwing. Via NPM (Let's Encrypt) speelt dat niet
+  zoek in Instellingen naar "CA-certificaat"; Firefox heeft een eigen lijst). Download het thuis (LAN of VPN) via NPM
+  op `https://<naam van het dashboard>/homepage-ca.crt`, als die naam thuis rechtstreeks naar NPM gaat (bv. via de
+  DNS op je LAN). Van buitenaf en via Cloudflare geeft die link 404, want in de CA staan de naam en de adressen van
+  de container. Of kopieer het uit de container (op de Proxmox-host:
+  `pct pull <CTID> /etc/ssl/homepage/homepage-ca.crt homepage-ca.crt`). De vingerafdruk staat op het
+  einde van install.sh en in `homepage-diagnose`: vergelijk ze voor je importeert (Windows toont de SHA-1, de rest
+  meestal de SHA-256; install.sh geeft ze allebei)
+- iPhone en iPad (elke browser) en Safari op een Mac aanvaarden geen servercertificaat dat langer dan 825 dagen
+  geldig is, ook niet met een vertrouwde CA: daar blijft de waarschuwing. Chrome en Firefox op een Mac controleren
+  zelf en zouden het met de geïmporteerde CA wel aanvaarden (niet nagekeken op een Mac). Via NPM (Let's Encrypt)
+  speelt dat niet
 - Rechtstreeks vanaf het LAN geldt hetzelfde als op poort 80: alleen met `HOMEPAGE_LAN_OPEN=1`
 - Een nieuw certificaat maakt install.sh alleen als een van die namen of adressen ontbreekt (bv. een nieuw IP), het
-  binnen 30 dagen verloopt, of een bestand ontbreekt of niet past. Het komt met een nieuwe CA: importeer die dan
-  opnieuw en verwijder de vorige ("homepage CA" met een oudere datum). Lukt het niet, dan blijft het vorige, of
-  luistert nginx zonder certificaat alleen op poort 80, met een waarschuwing
+  binnen 30 dagen verloopt, of een bestand ontbreekt of niet past. Het komt met een nieuwe CA, en install.sh zegt
+  dat meteen, met de vingerafdruk van de vorige: verwijder die waar je ze importeerde en importeer de nieuwe (in de
+  naam staan de datum en het uur). Lukt het niet, dan blijft het vorige, of luistert nginx zonder certificaat alleen
+  op poort 80, met een waarschuwing. Ook als in de container al een ander programma op poort 443 luistert, blijft
+  nginx op poort 80 en zegt install.sh het; het certificaat staat dan klaar
 
 **Cloudflare.** De headers van Cloudflare (`CF-Connecting-IP` met het echte IP, `CF-IPCountry` met het land,
 `Cf-Access-Jwt-Assertion` van Cloudflare Access) gelooft nginx alleen als het verzoek van NPM komt én NPM het zelf

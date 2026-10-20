@@ -114,7 +114,8 @@ def test_diagnose_zonder_geheimen(tmp_path):
     for s in SECRETS:
         assert s not in text, s
     # Wat er in moet staan.
-    for kop in ("Versies", "Diensten", "API", "Certificaat (https op poort 443)", "Schijf en geheugen", "PostgreSQL", "Back-ups", "Configuratie",
+    for kop in ("Versies", "Diensten", "API", "Certificaat (https op poort 443)", "Schijf en geheugen", "PostgreSQL",
+                "Back-ups", "Configuratie",
                 "Laatste install-log", "journald: homepage-api", "journald: homepage-worker", "journald: homepage-syslog",
                 "journald: postgresql", "journald: nginx"):
         assert f"===== {kop}" in text, kop
@@ -122,6 +123,7 @@ def test_diagnose_zonder_geheimen(tmp_path):
     # Het certificaat: namen, tot wanneer, en of https antwoordt (met de CA). De sleutel zelf nooit.
     blok = text.split("===== Certificaat (https op poort 443) =====\n")[1].split("\n===== ")[0]
     assert "IP Address:127.0.0.1" in blok and "notAfter=" in blok and "sha256 Fingerprint=" in blok
+    assert "sha1 Fingerprint=" in blok
     assert "--cacert" in blok and "/api/ping" in blok and "PRIVATE KEY" not in blok
     assert "Started homepage worker" in text and "timescaledb=2.17.2" in text and "homepage-2026-10-17.dump" in text
     # homepage.env: de waarde van wat op een geheim lijkt nooit, de rest wel (met een wachtwoord in de url gemaskeerd).

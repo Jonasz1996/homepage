@@ -175,10 +175,12 @@ verslag() {
   doe nginx -t
 
   kop "Certificaat (https op poort 443)"
+  ! command -v ss >/dev/null || doe ss -Hltnp 'sport = :443'
   if [ -r "$TLS/homepage.crt" ]; then
     doe ls -l "$TLS"
     doe openssl x509 -in "$TLS/homepage.crt" -noout -subject -issuer -startdate -enddate -ext subjectAltName
     doe openssl x509 -in "$TLS/homepage-ca.crt" -noout -subject -enddate -fingerprint -sha256
+    doe openssl x509 -in "$TLS/homepage-ca.crt" -noout -fingerprint -sha1
     doe openssl verify -CAfile "$TLS/homepage-ca.crt" -purpose sslserver "$TLS/homepage.crt"
     doe curl -sS -m 5 -o /dev/null -w 'HTTP %{http_code}\n' --cacert "$TLS/homepage-ca.crt" "$HTTPS/api/ping"
   else

@@ -4,15 +4,15 @@
 export const CHANGELOG = [
   {
     nr: 44,
-    datum: '2026-10-19',
+    datum: '2026-10-20',
     titel: 'Eigen certificaat voor https, 9999 dagen geldig',
     items: [
-      'De installer maakt met openssl een eigen certificaat dat 9999 dagen geldig is (tot 2054), en nginx in de container luistert daarmee ook op https (poort 443), met dezelfde regels als op http. Het geldt voor de naam van de container, localhost en de IPv4-adressen van de container.',
-      'Een eigen CA ondertekent het, en de sleutel van die CA is meteen weer gewist: niemand kan er nog een ander certificaat mee maken. Importeer homepage-ca.crt als vertrouwde basis-CA en je browser of Zabbix waarschuwt niet meer op https://<IP>. Je downloadt het via NPM op /homepage-ca.crt; de vingerafdruk staat op het einde van de installer en in homepage-diagnose. iPhone en Mac aanvaarden geen certificaat dat zo lang geldig is.',
-      'Een nieuw certificaat komt er alleen als het IP of de naam van de container verandert, met een nieuwe CA die je dan opnieuw importeert. homepage-diagnose toont voor welke namen het geldt, tot wanneer, en of https antwoordt.',
+      'De installer maakt met openssl een eigen certificaat dat 9999 dagen geldig is (ruim 27 jaar), en nginx in de container luistert daarmee ook op https (poort 443), met dezelfde regels als op http. Het geldt voor de naam van de container, localhost en de IPv4-adressen van de container.',
+      'Een eigen CA ondertekent het. Die CA mag alleen voor de container tekenen (zijn adressen, en zijn naam met de namen eronder), en haar sleutel is meteen weer weg: niemand kan er een certificaat voor een andere site mee maken. Importeer homepage-ca.crt als vertrouwde basis-CA en je browser of Zabbix waarschuwt niet meer op https://<IP>. Je downloadt het thuis via NPM op /homepage-ca.crt (niet via Cloudflare); de vingerafdruk staat op het einde van de installer en in homepage-diagnose (ook de SHA-1 die Windows toont). iPhone en iPad, en Safari op een Mac, aanvaarden geen certificaat dat zo lang geldig is.',
+      'Een nieuw certificaat komt er alleen als het IP of de naam van de container verandert, met een nieuwe CA die je dan opnieuw importeert (de installer zegt het meteen). homepage-diagnose toont voor welke namen het geldt, tot wanneer, en of https antwoordt.',
     ],
     instellen: [
-      'Niets nodig. Wil je ook het stuk tussen NPM en de container versleutelen: zet in NPM bij de host van het dashboard het schema op https en de poort op 443.',
+      'Niets nodig. Wil je ook het stuk tussen NPM en de container versleutelen: zet in NPM bij de host van het dashboard het schema op https en de poort op 443, en laat 443 vanaf NPM toe als de container een firewall heeft. Ga je later terug naar een versie van voor 20 oktober 2026 (homepage-terugzetten), zet NPM dan eerst terug op http en poort 80.',
     ],
   },
   {
