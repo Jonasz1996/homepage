@@ -3,6 +3,18 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 47,
+    datum: '2026-11-16',
+    titel: 'VaultX op het dashboard',
+    items: [
+      'Nieuwe integratie vaultx: je wachtwoordkluis VaultX op een tegel (kluisitems, toestellen, sessies, logins van de laatste 24 uur, apps uit de catalogus). Het mini dashboard toont de kluis per soort, toestellen per soort, gebruikers, de appcatalogus met NPM-koppelingen, notities en links. Enkel tellingen: VaultX geeft nooit wachtwoorden of namen door.',
+      'De check van de VaultX-tegel wordt rood als de database van VaultX weg is, de API-sleutel verlopen of ingetrokken is, of een NPM-sync in VaultX mislukt; je krijgt dan een melding zoals bij elke check.',
+    ],
+    instellen: [
+      'In VaultX: klik rechtsboven op je naam → API-sleutels voor je dashboard → Sleutel aanmaken (vxk_…, best als beheerder voor de cijfers van heel VaultX). Hier: api → + API → VaultX, adres http://<IP van VaultX> (op IP; poort 80 op de Debian-container, 8080 met Docker), token = de vxk_-sleutel. Maak een tegel van soort vaultx met die API en zet de check op api. Laat in OPNsense de container (192.168.10.156) toe naar VaultX op die poort.',
+    ],
+  },
+  {
     nr: 46,
     datum: '2026-11-16',
     titel: 'ClusterForge op het dashboard',
