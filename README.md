@@ -628,6 +628,20 @@ Later, deel 3 (Authentik en gsm):
   (Gebruikers → API-tokens, voor een gebruiker die alle hosts mag lezen, bv. een eigen gebruiker in een groep met
   leesrechten op alle hostgroepen) en als adres de webinterface (`https://zabbix.jbogaert.be`, zonder
   `/api_jsonrpc.php`). Gebruikt alleen lezen: host.get, trigger.get, item.get en trend.get
+- **clusterforge** (een tegel of API van soort `clusterforge`): de HA-clusters uit ClusterForge, via zijn
+  alleen-lezen dashboard-API (`/api/dashboard/v1`). Adres: rechtstreeks op IP, bv. `http://192.168.113.153:8080`
+  (zonder `/api`); geheim `token`: een API-token `cfa_…` uit ClusterForge (**Instellingen → Dashboard-API (homepage) →
+  Token maken**, als beheerder; niets aangevinkt = alle clusters, ook nieuwe). Eén tegel toont:
+  - zonder instelling `cluster`: alle clusters (gezond/totaal, nodes, incidenten, updates en het SOC-niveau). Het mini
+    dashboard heeft een tabel met per cluster status, health score, nodes, VIP → node, database, incidenten, updates,
+    herstarts, CrowdSec en firewall, de lijst "wat er mis is", het beveiligingsoverzicht, en **tegels per cluster**:
+    in één keer een eigen tegel voor elk cluster (zelfde API en sleutels, hangt af van de ClusterForge-tegel)
+  - met `cluster` = slug, naam of id: één cluster; de check (soort **api**) wordt rood zolang het cluster niet
+    gezond is of een open incident heeft, met de reden erbij, dus je krijgt een melding zoals bij elke andere check
+  - met `soc` = true: het beveiligingsoverzicht (niveau, score, aanvallen, bans, geblokkeerd verkeer, mislukte
+    logins); alleen met een token voor alle clusters. Rood vanaf "verhoogd"
+  - `link` (optioneel): het adres waarmee je ClusterForge in de browser opent (bv. `https://clusterforge.jbogaert.be`);
+    de namen in het mini dashboard linken dan daarheen in plaats van naar het IP
 - **van buitenaf** (⚿ → van buitenaf): komt een bezoek via Cloudflare (NPM kreeg het met een `CF-Connecting-IP` van
   Cloudflare of een tunnel), met een vervalste header van Cloudflare of vanaf een publiek IP, dan staan de terminal
   (ook cronjobs starten of bewaken, rsyslog uitrollen, sleutels vastzetten), updates installeren, acties (aan/uit,

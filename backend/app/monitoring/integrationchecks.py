@@ -252,6 +252,8 @@ HEALTH: dict[str, str | Callable[[Any], Awaitable[Any]]] = {
     "opnsense": "/routes/gateway/status",
     "cloudflared": lambda i: i.tunnels(),
     "zabbix": lambda i: i.rpc("host.get", {"countOutput": True}),
+    # Rood zolang het cluster (of het SOC, of een cluster in het overzicht) niet in orde is, met de reden erbij.
+    "clusterforge": lambda i: i.health(),
 }
 
 

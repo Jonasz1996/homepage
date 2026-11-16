@@ -63,8 +63,11 @@ def field(label: str, value: Any, level: str | None = None) -> dict:
     return {"label": label, "value": value, "level": level}
 
 
-def cell(value: Any, level: str | None = None) -> dict:
-    return {"v": value, "level": level}
+def cell(value: Any, level: str | None = None, href: str | None = None) -> dict:
+    out = {"v": value, "level": level}
+    if href:
+        out["href"] = href  # het mini dashboard toont de waarde als link
+    return out
 
 
 def pct(part: float | None, total: float | None) -> float | None:

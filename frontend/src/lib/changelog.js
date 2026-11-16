@@ -3,6 +3,19 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 46,
+    datum: '2026-11-16',
+    titel: 'ClusterForge op het dashboard',
+    items: [
+      'Nieuwe integratie clusterforge: je HA-clusters uit ClusterForge op een tegel (clusters gezond, nodes, incidenten, updates, SOC-niveau). Het mini dashboard toont per cluster status, health score, nodes, welke node het VIP heeft, databases, incidenten, updates, herstarts, CrowdSec en firewall, plus wat er mis is en het beveiligingsoverzicht. Klik op een naam en ClusterForge opent op dat cluster.',
+      'Tegels per cluster: in het mini dashboard van de ClusterForge-tegel maak je in één keer een tegel voor elk cluster. Hun check wordt rood zolang het cluster niet in orde is (met de reden), dus je krijgt een melding zoals bij elke check. Valt ClusterForge zelf uit, dan blijft het één melding.',
+      'Een tegel met soc = true toont het beveiligingsoverzicht van ClusterForge (niveau, score, aanvallen, bans) en wordt rood vanaf "verhoogd".',
+    ],
+    instellen: [
+      'In ClusterForge: Instellingen → Dashboard-API (homepage) → Token maken (niets aanvinken = alle clusters). Hier: api → + API → ClusterForge, adres http://<IP van ClusterForge>:8080 (op IP, zonder /api), token = het cfa_-token. Maak een tegel van soort clusterforge met die API en open zijn mini dashboard voor de tegels per cluster. Laat in OPNsense de container (192.168.10.156) toe naar ClusterForge op poort 8080.',
+    ],
+  },
+  {
     nr: 45,
     datum: '2026-10-20',
     titel: 'Bestanden naast de terminal, zoals WinSCP',
