@@ -115,7 +115,8 @@ jobs:
       - run: npm run build
 
   browser:
-    runs-on: ubuntu-latest
+    # Vast op 24.04: ubuntu-latest is nu 26.04, en daar installeert Playwright nog geen Chromium.
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: timescale/timescaledb:latest-pg17
