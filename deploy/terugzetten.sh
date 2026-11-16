@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2329  # functies die alleen via trap of vanuit een trap lopen (bij_fout, onderbroken, ...)
 # Draait de laatste update van homepage terug: de vorige versie van de code, met de database zoals ze vlak
 # voor die update was (de kopie die install.sh voor elke update maakt). Als root in de container:
 #   homepage-terugzetten           toont wat er gebeurt en vraagt bevestiging

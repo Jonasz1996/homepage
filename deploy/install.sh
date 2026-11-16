@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2329  # functies die alleen via trap of vanuit een trap lopen (bij_fout, onderbroken, ...)
 # Installeert of werkt homepage bij in een Debian 12/13 LXC-container.
 # Meestal via deploy/bootstrap.sh (haalt eerst de code op). Rechtstreeks, als root:
 #   bash /opt/homepage/deploy/install.sh
