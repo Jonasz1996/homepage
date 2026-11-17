@@ -739,7 +739,7 @@ fi
 # database niet veranderd en zet bij_fout alles terug.
 UITSTEL=1
 wissel
-if ! (cd "$APP_DIR/backend" && runuser -u homepage -- env HOMEPAGE_DATABASE_URL="${HOMEPAGE_DATABASE_URL:-postgresql+asyncpg://homepage@/homepage}" \
+if ! (cd "$APP_DIR/backend" && runuser -u homepage -- env HOMEPAGE_DATABASE_URL="$HOMEPAGE_DATABASE_URL" \
   "$APP_DIR/.venv/bin/alembic" upgrade head); then
   afbreken "Database bijwerken mislukt."
 fi
