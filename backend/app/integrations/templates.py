@@ -58,6 +58,9 @@ TEMPLATES: dict[str, dict] = {
                      "match": ["clusterforge"],
                      "hint": "Adres: rechtstreeks op IP, bv. http://192.168.113.153:8080 (zonder /api). Token: in "
                              "ClusterForge bij Instellingen → Dashboard-API (homepage) → Token maken (cfa_…)."},
+    "vaultx": {"label": "VaultX", "category": "Overig", "kind": "vaultx", "match": ["vaultx"],
+               "hint": "Adres: rechtstreeks op IP, bv. http://192.168.0.50 (Debian-container, poort 80) of :8080 met Docker, "
+                       "zonder /api. Sleutel: in VaultX je account → API-sleutels voor je dashboard → Sleutel aanmaken (vxk_…)."},
     "cloudflared": {"label": "Cloudflare Tunnel", "category": "Netwerk", "kind": "cloudflared", "match": ["cloudflare", "cloudflared"],
                     "url": "https://api.cloudflare.com/client/v4",
                     "hint": "Instelling account: je account-id. Token met Account → Cloudflare Tunnel → Read; voor Netwerk › "
