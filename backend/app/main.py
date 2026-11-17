@@ -16,6 +16,7 @@ from .routers import (apis, attention, auth, backups, bestanden, buitencheck, ca
                       netmap, nieuweservice, noodplan, npmroutes, oidc, outside, overzicht, planning, restoretest, search, securitycheck, ssh, timeline, upgrade, versie,
                       webpush, zabbix)
 from .routers import push
+from .routers import clusterforge as clusterforge_router
 
 log = logging.getLogger("homepage.api")
 
@@ -105,6 +106,7 @@ app.include_router(overzicht.router)
 app.include_router(nieuweservice.router)
 app.include_router(buitencheck.router)
 app.include_router(exposure.router)
+app.include_router(clusterforge_router.router)
 
 
 @app.middleware("http")

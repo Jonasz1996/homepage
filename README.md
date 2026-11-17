@@ -642,6 +642,18 @@ Later, deel 3 (Authentik en gsm):
     logins); alleen met een token voor alle clusters. Rood vanaf "verhoogd"
   - `link` (optioneel): het adres waarmee je ClusterForge in de browser opent (bv. `https://clusterforge.jbogaert.be`);
     de namen in het mini dashboard linken dan daarheen in plaats van naar het IP
+  - met `node` = id of hostname: één node (status, online, IP, rol, updates, herstart); de check wordt rood als de
+    node offline of down is, nooit in onderhoud. Nodes komen van `/api/dashboard/v1/nodes` (nieuwere ClusterForge)
+  - **dashboard laten beheren door ClusterForge** (mini dashboard van de overzichtstegel → aanzetten met deze
+    tegel): elke 5 minuten zet de homepage per cluster een groep op een eigen pagina "ClusterForge" (of een pagina
+    die je kiest), met een tegel voor het cluster en een tegel per node, nodes zonder cluster in "Losse nodes". Nieuw
+    in ClusterForge komt erbij, hernoemd of naar een ander cluster wordt bijgewerkt, weg in ClusterForge gaat weg.
+    Alleen tegels met `cf_beheer` in de instellingen zijn van ClusterForge: je eigen tegels (ook in die groepen)
+    blijven altijd, en van een beheerde tegel neemt ClusterForge alleen naam, link, omschrijving en groep (icoon,
+    plaats, check en notities blijven van jou). Tegels die je al met "tegels per cluster" maakte worden overgenomen.
+    Lukt het ophalen niet, dan verandert er niets; zou één ronde meer dan de helft van de beheerde tegels weghalen,
+    dan wacht de worker en meldt hij het (**nu synchroniseren** doet het dan wel). Elke ronde met wijzigingen is een
+    revisie, dus terug te zetten. Kent ClusterForge `/nodes` nog niet, dan komen er alleen groepen en clustertegels
 - **vaultx** (een tegel of API van soort `vaultx`): je wachtwoordkluis VaultX, via zijn lees-API voor dashboards
   (`GET /api/v1/stats`). Adres: rechtstreeks op IP, bv. `http://192.168.0.50` (Debian-container, nginx op poort 80) of
   `http://<IP>:8080` met Docker, zonder `/api`; `insecure` = true als je https met het zelfondertekende certificaat van
