@@ -252,6 +252,7 @@ HEALTH: dict[str, str | Callable[[Any], Awaitable[Any]]] = {
     "opnsense": "/routes/gateway/status",
     "cloudflared": lambda i: i.tunnels(),
     "zabbix": lambda i: i.rpc("host.get", {"countOutput": True}),
+    "clusterforge": lambda i: i.get("/"),
 }
 
 
