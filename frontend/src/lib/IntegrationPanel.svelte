@@ -6,6 +6,8 @@
   import { bytes, value } from './format.js'
   import NpmImport from './NpmImport.svelte'
   import NpmRoutes from './NpmRoutes.svelte'
+  import ClusterForgeImport from './ClusterForgeImport.svelte'
+  import ClusterForgeBeheer from './ClusterForgeBeheer.svelte'
 
   // Gegevens en acties van de integratie in het mini dashboard.
   let { service, groups = [], onchanged } = $props()
@@ -107,6 +109,7 @@
         <div class="sec">
           <div class="sh">
             <span class="st">{sec.title}</span>
+            {#if sec.href}<a class="open" href={sec.href} target="_blank" rel="noopener">openen ↗</a>{/if}
             {#if sec.filter && sec.rows.length > 8}
               <input class="filter" placeholder="filter" bind:value={filters[i]} />
             {/if}
@@ -138,7 +141,7 @@
                 <tbody>
                   {#each visible(sec, i) as r}
                     <tr>
-                      {#each rowCells(r) as c}<td class="lv-{c.level || 'none'}">{value(c.v)}</td>{/each}
+                      {#each rowCells(r) as c}<td class="lv-{c.level || 'none'}">{#if c.href}<a href={c.href} target="_blank" rel="noopener">{value(c.v)}</a>{:else}{value(c.v)}{/if}</td>{/each}
                       {#if rowActions(r).length}
                         <td class="acts">
                           {#each rowActions(r) as a}
@@ -159,6 +162,10 @@
             <NpmImport {service} {groups} {onchanged} />
           {:else if sec.kind === 'npm-routes'}
             <NpmRoutes />
+          {:else if sec.kind === 'clusterforge-beheer'}
+            <ClusterForgeBeheer {service} {onchanged} />
+          {:else if sec.kind === 'clusterforge-tiles'}
+            <ClusterForgeImport {service} {groups} {onchanged} />
           {/if}
         </div>
       {/each}
@@ -197,6 +204,8 @@
   .tbl td.lv-err { color: var(--err) }
   .tbl td.lv-muted { color: var(--dim) }
   .acts { text-align: right }
+  .tbl td a { color: inherit; text-decoration: underline dotted }
+  .open { font-size: 11.5px; color: var(--muted) }
   .acts .mini { padding: 2px 7px; font-size: 11px }
   pre { max-height: 300px; overflow: auto; font-size: 11.5px; background: rgba(0, 0, 0, .35); padding: 10px; border-radius: 8px; color: var(--text) }
   .reauth { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 10px; border: 1px solid var(--mid); border-radius: 10px; font-size: 12.5px }

@@ -30,6 +30,7 @@ from .upgrade import auto_updates, cleanup_snapshots, mark_interrupted
 from . import (buitencheck, cluster, configs, containerlogs, coverage, devices, exposure, healing, noodplan, planned,
                restoretest, rollup, routes, zabbix)
 from .watchers import watch_npm, watch_pbs
+from .. import clusterforge_sync
 
 log = logging.getLogger("homepage.worker")
 
@@ -354,6 +355,7 @@ class Worker:
         last_cluster = start - cluster.CLUSTER_EVERY + 20
         last_docker = start - containerlogs.EVERY + 15
         last_zabbix = start - zabbix.EVERY + 10
+        last_cf = start - clusterforge_sync.EVERY + 40
         # Meteen bij de start: daarna gaan de checks rechtstreeks (zonder DNS) naar wat NPM erachter heeft.
         last_routes = start - routes.REFRESH_EVERY + 5
         # Wat publiek is (Netwerk › publiek): elk uur, de eerste keer 2,5 minuten na de start.
@@ -407,6 +409,10 @@ class Worker:
                 if time.monotonic() - last_zabbix > zabbix.EVERY:
                     last_zabbix = time.monotonic()
                     self.job("zabbix", lambda: self.step("zabbix", lambda db: zabbix.run_zabbix(db, self.http)))
+                if time.monotonic() - last_cf > clusterforge_sync.EVERY:
+                    last_cf = time.monotonic()
+                    self.job("clusterforge", lambda: self.step(
+                        "ClusterForge-beheer", lambda db: clusterforge_sync.run(db, self.http)))
                 if time.monotonic() - last_routes > routes.REFRESH_EVERY:
                     last_routes = time.monotonic()
                     self.job("routes", lambda: self.step("routes via NPM", lambda db: routes.refresh(db, self.http)))

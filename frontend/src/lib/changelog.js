@@ -3,6 +3,32 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 48,
+    datum: '2026-11-17',
+    titel: 'ClusterForge beheert je dashboard',
+    items: [
+      'ClusterForge kan nu zelf een deel van het dashboard bijhouden: per cluster een groep, met een tegel voor het cluster en een tegel per node (status, online, IP, rol, updates, herstart). Nodes zonder cluster komen in "Losse nodes". Elke 5 minuten: wat nieuw is in ClusterForge komt erbij, wat hernoemd of verhuisd is wordt bijgewerkt, wat weg is gaat weg.',
+      'De check van een nodetegel wordt rood als de node offline of down is (niet in onderhoud), die van een clustertegel zolang het cluster niet in orde is. Valt ClusterForge zelf uit, dan blijft het één melding.',
+      'Je eigen tegels blijven altijd staan, ook in die groepen, en van een beheerde tegel neemt ClusterForge alleen naam, link, omschrijving en groep: je icoon, plaats en check blijven. Verdwijnt meer dan de helft in één keer, dan wacht het en krijg je een melding. Elke ronde is een revisie die je kan terugzetten.',
+    ],
+    instellen: [
+      'Open het mini dashboard van je ClusterForge-tegel (het overzicht, zonder cluster) en kies bij "dashboard laten beheren door ClusterForge" een pagina en aanzetten met deze tegel. Voor de tegels per node moet ClusterForge /api/dashboard/v1/nodes kennen: werk ClusterForge bij als het mini dashboard zegt dat die er nog niet is.',
+    ],
+  },
+  {
+    nr: 46,
+    datum: '2026-11-16',
+    titel: 'ClusterForge op het dashboard',
+    items: [
+      'Nieuwe integratie clusterforge: je HA-clusters uit ClusterForge op een tegel (clusters gezond, nodes, incidenten, updates, SOC-niveau). Het mini dashboard toont per cluster status, health score, nodes, welke node het VIP heeft, databases, incidenten, updates, herstarts, CrowdSec en firewall, plus wat er mis is en het beveiligingsoverzicht. Klik op een naam en ClusterForge opent op dat cluster.',
+      'Tegels per cluster: in het mini dashboard van de ClusterForge-tegel maak je in één keer een tegel voor elk cluster. Hun check wordt rood zolang het cluster niet in orde is (met de reden), dus je krijgt een melding zoals bij elke check. Valt ClusterForge zelf uit, dan blijft het één melding.',
+      'Een tegel met soc = true toont het beveiligingsoverzicht van ClusterForge (niveau, score, aanvallen, bans) en wordt rood vanaf "verhoogd".',
+    ],
+    instellen: [
+      'In ClusterForge: Instellingen → Dashboard-API (homepage) → Token maken (niets aanvinken = alle clusters). Hier: api → + API → ClusterForge, adres http://<IP van ClusterForge>:8080 (op IP, zonder /api), token = het cfa_-token. Maak een tegel van soort clusterforge met die API en open zijn mini dashboard voor de tegels per cluster. Laat in OPNsense de container (192.168.10.156) toe naar ClusterForge op poort 8080.',
+    ],
+  },
+  {
     nr: 45,
     datum: '2026-10-20',
     titel: 'Bestanden naast de terminal, zoals WinSCP',

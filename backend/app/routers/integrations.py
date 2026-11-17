@@ -1,4 +1,4 @@
-"""API voor integraties: velden op de tegels, het mini dashboard, acties en de NPM-import."""
+"""API voor integraties: velden op de tegels, het mini dashboard, acties, de NPM-import en tegels per ClusterForge-cluster."""
 
 import asyncio
 import time
@@ -13,6 +13,7 @@ from .. import outside
 from ..db import get_db
 from ..deps import audit, current_user, notify, recent_auth
 from ..integrations import REGISTRY, Integration, IntegrationError, build, calls
+from ..integrations.clusterforge import ClusterForge
 from ..integrations.rest import RestApi
 from ..integrations.npm import NginxProxyManager, host_url
 from ..layout import record_revision
@@ -245,6 +246,86 @@ async def npm_import(service_id: int, data: NpmImportIn, request: Request,
     if added:
         await record_revision(db, user, f"{added} services geïmporteerd uit NPM")
         await audit(db, request, user, "npm_import", added=added)
+    await db.commit()
+    return {"added": added}
+
+
+# --- ClusterForge: een tegel per cluster ---------------------------------------------
+
+async def _clusterforge(db: AsyncSession, service_id: int) -> tuple[Service, ClusterForge]:
+    s = await _service(db, service_id)
+    if s.type != "clusterforge":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Dit is geen ClusterForge-tegel")
+    integ = _integration(s)
+    if not isinstance(integ, ClusterForge):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Dit is geen ClusterForge-tegel")
+    return s, integ
+
+
+def _cf_keys(services) -> set[str]:
+    """Clusters die al een eigen tegel hebben (slug, naam of id, zonder hoofdletters)."""
+    return {str((x.config or {}).get("cluster") or "").strip().lower() for x in services
+            if x.type == "clusterforge" and (x.config or {}).get("cluster")}
+
+
+@router.get("/services/{service_id}/clusterforge/clusters")
+async def clusterforge_clusters(service_id: int, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    _, integ = await _clusterforge(db, service_id)
+    known = _cf_keys((await db.execute(select(Service).where(Service.type == "clusterforge"))).scalars())
+    try:
+        rows = await integ.clusters()
+    except IntegrationError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e)) from e
+    out = []
+    for c in rows:
+        keys = {str(c.get(k) or "").lower() for k in ("slug", "name", "id")} - {""}
+        out.append({"slug": c.get("slug"), "name": c.get("name"), "status": c.get("status"),
+                    "status_label": c.get("status_label"), "ok": bool(c.get("ok")), "url": integ.link(c.get("url")),
+                    "exists": bool(keys & known)})
+    return sorted(out, key=lambda x: str(x["name"] or "").lower())
+
+
+class ClusterForgeImportIn(BaseModel):
+    group_id: int
+    clusters: list[str] = Field(max_length=200)
+    monitor: bool = True
+
+
+@router.post("/services/{service_id}/clusterforge/import")
+async def clusterforge_import(service_id: int, data: ClusterForgeImportIn, request: Request,
+                              user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Een tegel per gekozen cluster, met dezelfde API (of dezelfde url en sleutels) als de ClusterForge-tegel.
+    De check van zo'n tegel wordt rood zolang het cluster niet in orde is; hij hangt af van de ClusterForge-tegel,
+    zodat een storing van ClusterForge zelf één melding blijft."""
+    parent, integ = await _clusterforge(db, service_id)
+    if await db.get(Group, data.group_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Groep niet gevonden")
+    try:
+        rows = {str(c.get("slug")): c for c in await integ.clusters()}
+    except IntegrationError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e)) from e
+    known = _cf_keys((await db.execute(select(Service).where(Service.type == "clusterforge"))).scalars())
+    pos = (await db.execute(select(func.coalesce(func.max(Service.position), -1))
+                            .where(Service.group_id == data.group_id))).scalar_one() + 1
+    # Instellingen van de ClusterForge-tegel zelf (url, link, insecure), zonder de keuze van cluster of SOC.
+    # De url van de API altijd in de instellingen: de url van de nieuwe tegel zelf is de link naar het cluster.
+    base = {**{k: v for k, v in (parent.config or {}).items() if k not in ("cluster", "soc")}, "url": integ.base}
+    added = 0
+    for slug in data.clusters:
+        c = rows.get(str(slug))
+        if c is None or str(slug).lower() in known:
+            continue
+        known.add(str(slug).lower())
+        db.add(Service(group_id=data.group_id, name=str(c.get("name") or slug)[:80], url=(integ.link(c.get("url")) or "")[:500] or None,
+                       icon="mdi-server-network", position=pos, type="clusterforge",
+                       config={**({} if parent.api_id else base), "cluster": str(slug)},
+                       secrets=None if parent.api_id else parent.secrets, api_id=parent.api_id, parent_id=parent.id,
+                       check={"type": "api", "interval": 60} if data.monitor else {}))
+        pos += 1
+        added += 1
+    if added:
+        await record_revision(db, user, f"{added} ClusterForge-clusters als tegel toegevoegd")
+        await audit(db, request, user, "clusterforge_import", added=added)
     await db.commit()
     return {"added": added}
 
