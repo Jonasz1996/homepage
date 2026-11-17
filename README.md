@@ -1093,6 +1093,11 @@ Het noodplan gebruikt de tegels en API's die er al zijn: geen nieuwe rechten. Na
 
 ## Bijwerken
 
+Draait de homepage als cluster in ClusterForge (template `homepage`), dan nooit `bootstrap.sh`, `install.sh` of
+`homepage-terugzetten` op een node: die stoppen meteen en veranderen niets. Bijwerken gaat in ClusterForge: het
+homepage-cluster → kaart **Specificatie** → **Wijzigen…** → **Versie van de homepage** (een branch, tag of commit) →
+**Toepassen**. ClusterForge bouwt dan elke node en zet de database één keer bij (`homepage-ctl.sh`).
+
 Hetzelfde bootstrap-commando opnieuw, of:
 
 ```bash
