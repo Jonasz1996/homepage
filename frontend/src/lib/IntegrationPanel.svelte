@@ -7,6 +7,7 @@
   import NpmImport from './NpmImport.svelte'
   import NpmRoutes from './NpmRoutes.svelte'
   import ClusterForgeImport from './ClusterForgeImport.svelte'
+  import ClusterForgeBeheer from './ClusterForgeBeheer.svelte'
 
   // Gegevens en acties van de integratie in het mini dashboard.
   let { service, groups = [], onchanged } = $props()
@@ -161,6 +162,8 @@
             <NpmImport {service} {groups} {onchanged} />
           {:else if sec.kind === 'npm-routes'}
             <NpmRoutes />
+          {:else if sec.kind === 'clusterforge-beheer'}
+            <ClusterForgeBeheer {service} {onchanged} />
           {:else if sec.kind === 'clusterforge-tiles'}
             <ClusterForgeImport {service} {groups} {onchanged} />
           {/if}

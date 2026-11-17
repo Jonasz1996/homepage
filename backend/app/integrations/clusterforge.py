@@ -7,7 +7,10 @@ Token maken). Ze kan alleen lezen; ClusterForge rekent de cijfers hoogstens elke
 Eén tegel kan drie dingen tonen:
 - zonder instelling `cluster`: alle clusters die het token mag zien (overzicht + tabel), met "tegels per cluster";
 - met `cluster` (slug, naam of id): één cluster; de check van de tegel wordt rood zolang het niet in orde is;
-- met `soc` = true: het beveiligingsoverzicht (alleen met een token voor alle clusters).
+- met `soc` = true: het beveiligingsoverzicht (alleen met een token voor alle clusters);
+- met `node` (id of hostname): één node uit /nodes; de check wordt rood als de node offline of down is.
+Tegels per node en een groep per cluster maakt en onderhoudt app/clusterforge_sync.py (ClusterForge beheert dan dat
+deel van het dashboard).
 """
 
 from typing import Any
@@ -43,6 +46,19 @@ def updates_text(c: dict) -> str:
     return f"{n} ({sec} beveiliging)" if sec else str(n)
 
 
+def node_ok(n: dict) -> bool:
+    """In orde: online en niet down. Een node in onderhoud is nooit rood."""
+    if n.get("maintenance") or n.get("lifecycle") == "maintenance":
+        return True
+    return bool(n.get("online")) and n.get("status") not in ("down", "split_brain")
+
+
+def node_level(n: dict) -> str | None:
+    if not node_ok(n):
+        return "err"
+    return STATUS_LEVEL.get(str(n.get("status") or ""))
+
+
 def score_text(c: dict) -> str:
     if c.get("score") is None:
         return "—"
@@ -56,6 +72,7 @@ class ClusterForge(Integration):
         "url": "http://<IP van ClusterForge>:8080 (rechtstreeks op IP, zonder /api)",
         "cluster": "optioneel: slug, naam of id van één cluster; leeg = alle clusters",
         "soc": "true voor het beveiligingsoverzicht (SOC) in plaats van de clusters",
+        "node": "optioneel: id of hostname van één node (zet de beheerde sync zelf)",
         "link": "optioneel: adres waarmee je ClusterForge in de browser opent (bv. https://clusterforge.jbogaert.be); "
                 "standaard het adres van de API",
         "insecure": "true bij https met een zelfondertekend certificaat",
@@ -85,6 +102,10 @@ class ClusterForge(Integration):
     @property
     def cluster_key(self) -> str:
         return str(self.config.get("cluster") or "").strip()
+
+    @property
+    def node_key(self) -> str:
+        return str(self.config.get("node") or "").strip()
 
     @property
     def soc_mode(self) -> bool:
@@ -126,6 +147,30 @@ class ClusterForge(Integration):
         except IntegrationError:  # ook Forbidden: een token voor enkele clusters
             return None
 
+    async def nodes(self) -> list[dict] | None:
+        """Alle nodes die het token mag zien, of None als deze ClusterForge /nodes nog niet kent (HTTP 404)."""
+        try:
+            data = await self.get("/nodes")
+        except IntegrationError as e:
+            if "HTTP 404" in str(e):
+                return None
+            raise
+        if isinstance(data, dict):  # ook goed als ClusterForge ze later in {"items": [...]} zet
+            data = data.get("items") or data.get("nodes")
+        if not isinstance(data, list):
+            raise IntegrationError("Geen lijst van nodes van ClusterForge")
+        return [n for n in data if isinstance(n, dict) and n.get("id")]
+
+    async def node(self, key: str | None = None) -> dict:
+        key = (key or self.node_key).lower()
+        rows = await self.nodes()
+        if rows is None:
+            raise IntegrationError("Deze ClusterForge geeft nog geen nodes (/api/dashboard/v1/nodes): werk ClusterForge bij")
+        for n in rows:
+            if key in (str(n.get("id")).lower(), str(n.get("hostname") or "").lower()):
+                return n
+        raise IntegrationError(f"Node {key} niet gevonden in ClusterForge (of niet zichtbaar met dit token)")
+
     async def clusters(self) -> list[dict]:
         """Alle clusters die het token mag zien, voor "tegels per cluster"."""
         return (await self.overview()).get("clusters") or []
@@ -133,7 +178,14 @@ class ClusterForge(Integration):
     # --- check van de tegel --------------------------------------------------------
 
     async def health(self) -> dict:
-        """Voor de api-check: een fout (dus rood) zolang het cluster of het SOC niet in orde is."""
+        """Voor de api-check: een fout (dus rood) zolang het cluster, de node of het SOC niet in orde is."""
+        if self.node_key:
+            n = await self.node()
+            if not node_ok(n):
+                why = n.get("status_reason") or ("offline" if not n.get("online") else "")
+                raise IntegrationError(f"{n.get('hostname')}: {n.get('status_label') or n.get('status')}"
+                                       f"{' · ' + why if why else ''}"[:200])
+            return n
         if self.soc_mode:
             s = await self.soc()
             if not s.get("ok"):
@@ -167,6 +219,19 @@ class ClusterForge(Integration):
         ]
 
     @staticmethod
+    def node_fields(n: dict) -> list[dict]:
+        online = n.get("online")
+        return [
+            field("status", n.get("status_label") or n.get("status"), node_level(n)),
+            field("online", "onderhoud" if n.get("maintenance") else "ja" if online else "nee",
+                  None if n.get("maintenance") else "ok" if online else "err"),
+            field("IP", n.get("primary_ip") or "—"),
+            field("rol", n.get("role") or "—"),
+            field("updates", updates_text(n), "warn" if n.get("updates_security") else None),
+            field("herstart", "nodig" if n.get("reboot_required") else "nee", "warn" if n.get("reboot_required") else None),
+        ]
+
+    @staticmethod
     def soc_fields(s: dict) -> list[dict]:
         unprot = int(s.get("nodes_unprotected") or 0)
         return [
@@ -193,6 +258,8 @@ class ClusterForge(Integration):
         ]
 
     async def summary(self) -> list[dict]:
+        if self.node_key:
+            return self.node_fields(await self.node())
         if self.soc_mode:
             return self.soc_fields(await self.soc())
         if self.cluster_key:
@@ -237,6 +304,19 @@ class ClusterForge(Integration):
         return {"kind": "kv", "title": "beveiliging (SOC)", "items": items, "href": self.link(s.get("url"))}
 
     async def detail(self) -> dict:
+        if self.node_key:
+            n = await self.node()
+            px = n.get("proxmox") or {}
+            items = self.node_fields(n) + [
+                field("cluster", n.get("cluster_name") or "geen"),
+                field("levensfase", n.get("lifecycle") or "—"),
+                field("Proxmox", f"{px.get('type') or ''} {px.get('vmid') or ''} op {px.get('host')}".strip() if px else "—"),
+                field("tags", ", ".join(n.get("tags") or []) or "—"),
+            ]
+            if n.get("status_reason"):
+                items.append(field("reden", n.get("status_reason")))
+            return {"sections": [{"kind": "kv", "title": n.get("hostname") or "node", "items": items,
+                                  "href": self.link(n.get("url"))}]}
         if self.soc_mode:
             return {"sections": [self._soc_section(await self.soc())]}
         if self.cluster_key:
@@ -272,5 +352,6 @@ class ClusterForge(Integration):
         s = await self.soc_or_none()
         if s is not None:
             sections.append(self._soc_section(s))
+        sections.append({"kind": "clusterforge-beheer", "title": "dashboard laten beheren door ClusterForge"})
         sections.append({"kind": "clusterforge-tiles", "title": "tegels per cluster"})
         return {"sections": sections}

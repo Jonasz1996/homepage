@@ -3,6 +3,19 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 48,
+    datum: '2026-11-17',
+    titel: 'ClusterForge beheert je dashboard',
+    items: [
+      'ClusterForge kan nu zelf een deel van het dashboard bijhouden: per cluster een groep, met een tegel voor het cluster en een tegel per node (status, online, IP, rol, updates, herstart). Nodes zonder cluster komen in "Losse nodes". Elke 5 minuten: wat nieuw is in ClusterForge komt erbij, wat hernoemd of verhuisd is wordt bijgewerkt, wat weg is gaat weg.',
+      'De check van een nodetegel wordt rood als de node offline of down is (niet in onderhoud), die van een clustertegel zolang het cluster niet in orde is. Valt ClusterForge zelf uit, dan blijft het één melding.',
+      'Je eigen tegels blijven altijd staan, ook in die groepen, en van een beheerde tegel neemt ClusterForge alleen naam, link, omschrijving en groep: je icoon, plaats en check blijven. Verdwijnt meer dan de helft in één keer, dan wacht het en krijg je een melding. Elke ronde is een revisie die je kan terugzetten.',
+    ],
+    instellen: [
+      'Open het mini dashboard van je ClusterForge-tegel (het overzicht, zonder cluster) en kies bij "dashboard laten beheren door ClusterForge" een pagina en aanzetten met deze tegel. Voor de tegels per node moet ClusterForge /api/dashboard/v1/nodes kennen: werk ClusterForge bij als het mini dashboard zegt dat die er nog niet is.',
+    ],
+  },
+  {
     nr: 46,
     datum: '2026-11-16',
     titel: 'ClusterForge op het dashboard',
