@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2329  # functies die alleen via trap of vanuit een trap lopen (bij_fout, onderbroken, ...)
 # Installeert of werkt homepage bij in een Debian 12/13 LXC-container.
 # Meestal via deploy/bootstrap.sh (haalt eerst de code op). Rechtstreeks, als root:
 #   bash /opt/homepage/deploy/install.sh
@@ -533,6 +534,16 @@ diensten_nakijken() {
 }
 
 [ "$(id -u)" -eq 0 ] || { echo "Voer uit als root."; exit 1; }
+# Een node van een homepage-cluster van ClusterForge (template homepage: cf-homepage-api, /etc/cf-homepage): daar
+# bouwt en migreert ClusterForge zelf (homepage-ctl.sh), op alle nodes samen. install.sh zou hier de code onder de
+# draaiende homepage vervangen en een database bijwerken die niet de zijne is. Dus niets doen en zeggen hoe het wel moet.
+if [ -e /etc/systemd/system/cf-homepage-api.service ] || [ -d /etc/cf-homepage ] || [ -d /opt/cf-homepage ]; then
+  printf '\n\033[1;33m!! %s\033[0m\n' "Deze container is een node van een homepage-cluster in ClusterForge. Er is niets veranderd."
+  echo "Bijwerken gaat in ClusterForge: je homepage-cluster → kaart Specificatie → Wijzigen… → Versie van de homepage"
+  echo "(een branch, tag of commit, bv. main) → Toepassen. ClusterForge bouwt dan elke node en zet de database bij."
+  echo "Stand op deze node: /usr/local/lib/clusterforge/homepage-ctl.sh status."
+  exit 1
+fi
 [ -d "$APP_DIR/backend" ] || { echo "Verwacht de repository in $APP_DIR."; exit 1; }
 # Alles wat het script schrijft, komt ook in $LOG_DIR/install-<datum>.log: een mislukte update is zo achteraf na te
 # lezen (homepage-diagnose neemt het nieuwste mee). De 10 nieuwste blijven. Alleen de uitvoer gaat via tee: vragen

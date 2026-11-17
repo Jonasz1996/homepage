@@ -1,146 +1,233 @@
-"""ClusterForge (homepage-API v2): de tegels komen vanzelf, met de stats uit ClusterForge."""
+"""ClusterForge: tegel (overzicht, één cluster, SOC), mini dashboard, check en tegels per cluster, tegen een
+nagebootste dashboard-API met de velden zoals ClusterForge ze geeft (internal/httpapi/dashboard.go)."""
 
 import httpx
+import pytest
 from sqlalchemy import select
 
-from app.integrations import IntegrationError
-from app.models import ApiConnection, AppState, Group, Page, Service
-from app.monitoring import clusterforge
+from app.models import Service
+from app.monitoring import integrationchecks as ic
 from app.monitoring.checks import HttpClients
 from app.routers import integrations as router
-from app.security import encrypt_json
 
-from .test_capacity import _db
+from .test_integrations import _group, _svc
+from .test_meldingen_onderhoud import _db
 
-CF = "http://cf.lan:8080"
-
-
-def layout(*tiles, version="v1"):
-    groups = {}
-    for g, t in tiles:
-        groups.setdefault(g, []).append(t)
-    return {"version": version, "managed_by": "clusterforge", "groups": [{"name": g, "tiles": ts} for g, ts in groups.items()]}
+TOKEN = "cfa_abcdefghijklmnop0123456789"
+SCOPED = "cfa_alleendbcluster0000000000"
+BASE = "http://192.168.113.153:8080"
 
 
-def tile(key, app, name, icon="plex.png", href="https://plex.jbogaert.be"):
-    return {"key": key, "app": app, "name": name, "icon": icon, "href": href, "description": "plex1", "api": "", "gone": False}
+def _cluster(slug, name, status="healthy", **kw):
+    c = {"id": f"00000000-0000-0000-0000-{abs(hash(slug)) % 10**12:012d}", "slug": slug, "name": name,
+         "environment": "prod", "type": "database", "url": f"{BASE}/clusters/detail?id={slug}",
+         "status": status, "status_label": {"healthy": "Gezond", "degraded": "Verminderd", "down": "Down"}[status],
+         "status_reason": "", "ok": status == "healthy", "score": 92, "grade": "A", "nodes_online": 3, "nodes_total": 3,
+         "nodes": "3/3", "nodes_down": [], "vip": "192.168.113.10", "vip_owner": "db1",
+         "vips": [{"address": "192.168.113.10", "owner": "db1"}], "db": "ok", "db_label": "MariaDB 3/3",
+         "db_running": 3, "db_total": 3, "incidents_open": 0, "incidents_worst": "", "updates": 4, "updates_security": 0,
+         "reboot_required": 0, "nodes_with_updates": 2, "crowdsec": "3/3 actief", "crowdsec_running": 3,
+         "crowdsec_managed": 3, "crowdsec_bans": 7, "crowdsec_alerts_24h": 2, "firewall": "3/3 actief",
+         "firewall_active": 3, "firewall_managed": 3, "firewall_blocked_24h": 120, "problems": []}
+    c.update(kw)
+    return c
 
 
-class Fake:
+class FakeCF:
     def __init__(self):
-        self.layout = layout(("Media", tile("plex@plex1", "plex", "Plex")),
-                             ("Infrastructuur", tile("homepage@hp", "homepage", "Homepage", "homepage.png", "https://homepage.jbogaert.be")))
-        self.calls = []
+        self.requests: list[httpx.Request] = []
+        self.clusters = [
+            _cluster("databasecluster", "Databasecluster"),
+            _cluster("homepage", "Homepage", "degraded", ok=False, status_reason="node3 reageert niet", nodes="2/3",
+                     nodes_online=2, nodes_down=["hp3"], db="degraded", db_label="PostgreSQL 2/3", incidents_open=1,
+                     incidents_worst="high", updates_security=2, reboot_required=1, vip_owner="",
+                     vips=[{"address": "192.168.10.150", "owner": ""}], vip="192.168.10.150",
+                     problems=["node3 reageert niet", "offline: hp3", "1 open incident(en)"]),
+        ]
+        self.soc = {"ok": True, "level": "waakzaam", "level_label": "Waakzaam", "reason": "2 aanvallen", "score": 81,
+                    "attacks_24h": 2, "active_bans": 7, "blocked_24h": 120, "login_failures_24h": 3,
+                    "protected": "5/6", "nodes_unprotected": 1, "attention": 1, "url": f"{BASE}/soc"}
 
-    def __call__(self, request: httpx.Request) -> httpx.Response:
-        self.calls.append(request)
-        assert request.headers["Authorization"] == "Bearer cfa_test"
-        if request.url.path == "/api/dashboard/v2/homepage/layout":
-            etag = '"' + self.layout["version"] + '"'
-            if request.headers.get("If-None-Match") == etag:
-                return httpx.Response(304)
-            return httpx.Response(200, json=self.layout, headers={"ETag": etag})
-        if request.url.path == "/api/dashboard/v2/apps/plex":
+    def __call__(self, req: httpx.Request) -> httpx.Response:
+        self.requests.append(req)
+        assert req.method == "GET" and req.url.host == "192.168.113.153"
+        tok = (req.headers.get("authorization") or "").removeprefix("Bearer ")
+        if tok not in (TOKEN, SCOPED):
+            return httpx.Response(401, json={"code": "unauthenticated", "message": "onbekend, ingetrokken of verlopen API-token"})
+        cl = self.clusters if tok == TOKEN else self.clusters[:1]
+        p = req.url.path.removeprefix("/api/dashboard/v1")
+        if p == "/":
             return httpx.Response(200, json={
-                "slug": "plex", "status": "warn", "status_label": "Let op",
-                "fields": [{"key": "status", "label": "Status", "value": "Let op", "level": "warn"},
-                           {"key": "cluster_health", "label": "Clusterscore", "value": 93.6, "format": "percent"},
-                           {"key": "reboot_required", "label": "Herstart nodig", "value": False}],
-                "sections": [{"type": "kv", "title": "Overzicht", "items": [{"label": "Actief op", "value": "plex1"}]},
-                             {"type": "table", "title": "Waar het draait", "items": [{"node": "plex1", "status": "online"}]}],
-                "clusterforge_url": CF + "/homepage-apps?app=plex"})
-        return httpx.Response(404)
+                "generated_at": "2026-11-16T21:00:00Z", "clusters_total": len(cl),
+                "clusters_healthy": sum(c["status"] == "healthy" for c in cl),
+                "clusters_degraded": sum(c["status"] == "degraded" for c in cl),
+                "clusters_down": sum(c["status"] == "down" for c in cl),
+                "nodes_online": sum(c["nodes_online"] for c in cl), "nodes_total": sum(c["nodes_total"] for c in cl),
+                "nodes": f"{sum(c['nodes_online'] for c in cl)}/{sum(c['nodes_total'] for c in cl)}",
+                "incidents_open": sum(c["incidents_open"] for c in cl), "updates": sum(c["updates"] for c in cl),
+                "updates_security": sum(c["updates_security"] for c in cl), "crowdsec_bans": 7, "crowdsec_alerts_24h": 2,
+                "clusters": cl})
+        if p == "/soc":
+            if tok == SCOPED:
+                return httpx.Response(403, json={"code": "forbidden", "message": "maak er een token voor alle clusters voor"})
+            return httpx.Response(200, json=self.soc)
+        if p.startswith("/clusters/"):
+            key = p.removeprefix("/clusters/").lower()
+            for c in cl:
+                if key in (c["slug"], c["name"].lower(), c["id"]):
+                    return httpx.Response(200, json=c)
+            return httpx.Response(404, json={"code": "not_found", "message": "cluster niet gevonden (of niet zichtbaar met dit token)"})
+        return httpx.Response(404, json={"code": "not_found", "message": "onbekend endpoint"})
 
 
-async def _setup(sync=True):
-    agen, db = await _db()
-    page = Page(name="Home")
-    db.add(page)
-    await db.flush()
-    mine = Group(page_id=page.id, name="Media", position=0)
-    db.add(mine)
-    await db.flush()
-    db.add(Service(group_id=mine.id, name="Eigen tegel", type="link", url="https://x"))
-    cfg = {} if sync else {"sync": False}
-    conn = ApiConnection(name="ClusterForge", kind="clusterforge", url=CF, config=cfg, secrets=encrypt_json({"token": "cfa_test"}))
-    db.add(conn)
-    await db.commit()
-    return agen, db, conn
-
-
-async def _services(db):
-    db.expire_all()
-    return {s.name: s for s in (await db.execute(select(Service))).scalars().all()}
-
-
-async def test_sync_maakt_wijzigt_en_verwijdert(client):
-    agen, db, conn = await _setup()
-    fake = Fake()
+@pytest.fixture
+def cf(monkeypatch):
+    fake = FakeCF()
     http = HttpClients(httpx.MockTransport(fake))
-    await clusterforge.run_sync(db, http)
-    await db.commit()
-    s = await _services(db)
-    assert set(s) == {"Eigen tegel", "Plex", "Homepage"}
-    plex = s["Plex"]
-    assert plex.type == "clusterforge" and plex.api_id == conn.id and plex.config["app"] == "plex"
-    assert plex.check == {"type": "api", "path": "/api/dashboard/v2/apps/plex?strict=1", "interval": 60}
-    assert plex.group_id == s["Eigen tegel"].group_id  # bestaande groep Media hergebruikt
-    groups = {g.name for g in (await db.execute(select(Group))).scalars().all()}
-    assert groups == {"Media", "Infrastructuur"}
-
-    # Niets veranderd: 304, geen wijzigingen.
-    n = len(fake.calls)
-    await clusterforge.run_sync(db, http)
-    await db.commit()
-    assert fake.calls[n].headers.get("If-None-Match") == '"v1"'
-
-    # In ClusterForge hernoemd, homepage verborgen: tegel bijgewerkt en verwijderd; de eigen tegel blijft.
-    fake.layout = layout(("Media", tile("plex@plex1", "plex", "Plex films")), version="v2")
-    await clusterforge.run_sync(db, http)
-    await db.commit()
-    s = await _services(db)
-    assert set(s) == {"Eigen tegel", "Plex films"}
-    await agen.aclose()
+    monkeypatch.setattr(router, "clients", http)
+    router._cache.clear()
+    return fake, http
 
 
-async def test_sync_uit_en_fout(client):
-    agen, db, conn = await _setup(sync=False)
-    await clusterforge.run_sync(db, HttpClients(httpx.MockTransport(Fake())))
-    await db.commit()
-    assert set(await _services(db)) == {"Eigen tegel"}
-    conn.config = {}
-    await db.commit()
-    await clusterforge.run_sync(db, HttpClients(httpx.MockTransport(lambda r: httpx.Response(401))))
-    await db.commit()
-    st = (await db.execute(select(AppState).where(AppState.key == "clusterforge"))).scalar_one()
-    assert "401" in st.value[str(conn.id)]["error"]
-    await agen.aclose()
+async def _api(authed, token=TOKEN, config=None) -> int:
+    r = await authed.post("/api/apis", json={"name": "ClusterForge", "category": "Monitoring", "kind": "clusterforge",
+                                             "url": BASE, "config": config or {}, "secrets": {"token": token}})
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
 
 
-async def test_tegel_toont_velden_en_detail(authed, monkeypatch):
-    agen, db, conn = await _setup()
-    await clusterforge.run_sync(db, HttpClients(httpx.MockTransport(Fake())))
-    await db.commit()
-    plex = (await _services(db))["Plex"]
-    await agen.aclose()
-    monkeypatch.setattr(router, "clients", HttpClients(httpx.MockTransport(Fake())))
-    r = await authed.get("/api/widgets")
-    assert r.status_code == 200, r.text
-    summary = r.json()[str(plex.id)]["fields"]
-    assert summary[0] == {"label": "Status", "value": "Let op", "level": "warn"}
-    assert summary[1]["value"] == "94%" and summary[2]["value"] == "nee"
-    r = await authed.get(f"/api/services/{plex.id}/integration")
-    assert r.status_code == 200, r.text
-    kinds = [s["kind"] for s in r.json()["sections"]]
-    assert kinds == ["kv", "table", "kv"]
+async def _tile(authed, g, api, name="ClusterForge", config=None) -> int:
+    sid = await _svc(authed, g, "link", "https://clusterforge.jbogaert.be", name=name, config=config)
+    assert (await authed.post(f"/api/apis/{api}/tiles", json={"service_ids": [sid]})).json()["changed"] == 1
+    return sid
 
 
-async def test_zonder_app():
-    from app.integrations.clusterforge import ClusterForge
+def _fields(w):
+    return {f["label"]: f for f in w["fields"]}
 
-    c = ClusterForge(CF, {}, {"token": "cfa_test"}, httpx.AsyncClient(transport=httpx.MockTransport(Fake())))
-    try:
-        await c.tile()
-        raise AssertionError("tile zonder app")
-    except IntegrationError:
-        pass
+
+async def test_overview_tile_and_mini_dashboard(authed, cf):
+    fake, _ = cf
+    g = await _group(authed)
+    sid = await _tile(authed, g, await _api(authed, config={"link": "https://clusterforge.jbogaert.be"}))
+
+    f = _fields((await authed.get("/api/widgets")).json()[str(sid)])
+    assert f["clusters"]["value"] == "1/2 gezond" and f["clusters"]["level"] == "warn"
+    assert f["nodes"]["value"] == "5/6" and f["nodes"]["level"] == "err"
+    assert f["incidenten"]["value"] == 1 and f["incidenten"]["level"] == "err"
+    assert f["updates"]["value"] == "8 (2 beveiliging)" and f["SOC"]["value"] == "Waakzaam"
+    # Op IP, met het token als Bearer, op het pad van de dashboard-API.
+    assert all(r.url.path.startswith("/api/dashboard/v1") for r in fake.requests)
+    assert fake.requests[0].headers["authorization"] == f"Bearer {TOKEN}"
+
+    d = (await authed.get(f"/api/services/{sid}/integration")).json()
+    secs = {s["title"]: s for s in d["sections"]}
+    rows = secs["clusters"]["rows"]
+    assert [r["cells"][0]["v"] for r in rows] == ["Homepage", "Databasecluster"]  # wat niet in orde is eerst
+    hp = rows[0]["cells"]
+    assert hp[0]["href"] == "https://clusterforge.jbogaert.be/clusters/detail?id=homepage"  # link i.p.v. het IP
+    assert hp[1] == {"v": "Verminderd", "level": "warn"}
+    assert hp[4]["v"] == "192.168.10.150 → geen node" and hp[4]["level"] == "err"
+    assert rows[1]["cells"][4]["v"] == "192.168.113.10 → db1"
+    assert [r[1]["v"] for r in secs["wat er mis is"]["rows"]][:2] == ["node3 reageert niet", "offline: hp3"]
+    assert secs["beveiliging (SOC)"]["href"] == "https://clusterforge.jbogaert.be/soc"
+    assert secs["tegels per cluster"]["kind"] == "clusterforge-tiles"
+    assert TOKEN not in str(d)
+
+
+async def test_cluster_tile_check_turns_red_with_reason(authed, cf):
+    fake, http = cf
+    g = await _group(authed)
+    api = await _api(authed)
+    ok = await _tile(authed, g, api, "DB", config={"cluster": "Databasecluster"})  # naam werkt ook
+    bad = await _tile(authed, g, api, "HP", config={"cluster": "homepage"})
+
+    w = (await authed.get("/api/widgets")).json()
+    assert _fields(w[str(ok)])["status"] == {"label": "status", "value": "Gezond", "level": "ok"}
+    f = _fields(w[str(bad)])
+    assert f["status"]["level"] == "warn" and f["nodes"]["level"] == "err" and f["VIP"]["value"] == "geen node"
+
+    agen, db = await _db()
+    out = await ic.check_api(db, await db.get(Service, ok), {"type": "api"}, http)
+    assert out.ok and out.status_code == 200
+    out = await ic.check_api(db, await db.get(Service, bad), {"type": "api"}, http)
+    assert not out.ok and "Homepage: Verminderd" in out.error and "node3 reageert niet" in out.error
+
+    fake.clusters[1].update(status="healthy", status_label="Gezond", ok=True, problems=[])
+    assert (await ic.check_api(db, await db.get(Service, bad), {"type": "api"}, http)).ok
+
+    gone = await _tile(authed, g, api, "weg", config={"cluster": "bestaatniet"})
+    out = await ic.check_api(db, await db.get(Service, gone), {"type": "api"}, http)
+    assert not out.ok and "cluster niet gevonden" in out.error
+    await db.close()
+
+    d = (await authed.get(f"/api/services/{bad}/integration")).json()
+    assert d["sections"][0]["title"] == "Homepage" and d["sections"][0]["href"].startswith(BASE)
+
+
+async def test_soc_tile_and_scoped_token(authed, cf):
+    fake, http = cf
+    g = await _group(authed)
+    soc = await _tile(authed, g, await _api(authed), "SOC", config={"soc": "true"})
+    f = _fields((await authed.get("/api/widgets")).json()[str(soc)])
+    assert f["niveau"]["value"] == "Waakzaam" and f["beschermd"]["level"] == "warn"
+
+    agen, db = await _db()
+    assert (await ic.check_api(db, await db.get(Service, soc), {"type": "api"}, http)).ok
+    fake.soc.update(ok=False, level="verhoogd", level_label="Verhoogd", reason="brute force op db1")
+    out = await ic.check_api(db, await db.get(Service, soc), {"type": "api"}, http)
+    assert not out.ok and "SOC Verhoogd: brute force op db1" in out.error
+
+    # Een token voor enkele clusters ziet geen SOC: het overzicht werkt gewoon, zonder SOC.
+    g2 = await _group(authed)
+    scoped = await _tile(authed, g2, await _api(authed, SCOPED), "CF beperkt")
+    f = _fields((await authed.get("/api/widgets")).json()[str(scoped)])
+    assert f["clusters"]["value"] == "1/1 gezond" and "SOC" not in f
+    assert (await ic.check_api(db, await db.get(Service, scoped), {"type": "api"}, http)).ok
+    await db.close()
+
+
+async def test_wrong_token_says_so(authed, cf):
+    g = await _group(authed)
+    sid = await _tile(authed, g, await _api(authed, "cfa_fout"))
+    w = (await authed.get("/api/widgets")).json()[str(sid)]
+    assert "401" in w["error"] and "cfa_fout" not in str(w)
+
+
+async def test_tiles_per_cluster(authed, cf):
+    g = await _group(authed)
+    api = await _api(authed)
+    sid = await _tile(authed, g, api)
+    lst = (await authed.get(f"/api/services/{sid}/clusterforge/clusters")).json()
+    assert [(c["slug"], c["exists"], c["ok"]) for c in lst] == [("databasecluster", False, True), ("homepage", False, False)]
+
+    r = await authed.post(f"/api/services/{sid}/clusterforge/import",
+                          json={"group_id": g, "clusters": ["databasecluster", "homepage", "onbekend"]})
+    assert r.json() == {"added": 2}
+    agen, db = await _db()
+    tiles = (await db.execute(select(Service).where(Service.parent_id == sid).order_by(Service.name))).scalars().all()
+    assert [(t.name, t.type, t.api_id, t.config, t.check) for t in tiles] == [
+        ("Databasecluster", "clusterforge", api, {"cluster": "databasecluster"}, {"type": "api", "interval": 60}),
+        ("Homepage", "clusterforge", api, {"cluster": "homepage"}, {"type": "api", "interval": 60})]
+    assert tiles[0].url == f"{BASE}/clusters/detail?id=databasecluster"
+    await db.close()
+    # Nog eens: niets dubbel.
+    assert all(c["exists"] for c in (await authed.get(f"/api/services/{sid}/clusterforge/clusters")).json())
+    r = await authed.post(f"/api/services/{sid}/clusterforge/import", json={"group_id": g, "clusters": ["homepage"]})
+    assert r.json() == {"added": 0}
+
+    # Een tegel met eigen sleutels (zonder API-beheer) geeft zijn url en sleutels door.
+    own = await _svc(authed, g, "clusterforge", BASE, config={"insecure": False}, secrets={"token": TOKEN}, name="CF eigen")
+    g2 = await _group(authed)
+    await authed.delete(f"/api/services/{tiles[0].id}")
+    r = await authed.post(f"/api/services/{own}/clusterforge/import", json={"group_id": g2, "clusters": ["databasecluster"]})
+    assert r.json() == {"added": 1}
+    w = (await authed.get("/api/widgets")).json()
+    agen, db = await _db()
+    new = (await db.execute(select(Service).where(Service.parent_id == own))).scalar_one()
+    assert new.api_id is None and new.config == {"insecure": False, "url": BASE, "cluster": "databasecluster"}
+    await db.close()
+    assert _fields(w[str(new.id)])["status"]["value"] == "Gezond"
+
+    link = await _svc(authed, g, "link", "https://x.jbogaert.be", name="gewoon")
+    assert (await authed.get(f"/api/services/{link}/clusterforge/clusters")).status_code == 400

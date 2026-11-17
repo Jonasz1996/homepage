@@ -22,6 +22,16 @@ CONF_DIR=/etc/homepage
 LATEST_BRANCH=nieuwste
 
 [ "$(id -u)" -eq 0 ] || { echo "Voer uit als root."; exit 1; }
+# Een node van een homepage-cluster van ClusterForge (template homepage: cf-homepage-api, /etc/cf-homepage): daar
+# bouwt en migreert ClusterForge zelf (homepage-ctl.sh), op alle nodes samen. Deze installer zou hier de code onder de
+# draaiende homepage vervangen en een database bijwerken die niet de zijne is. Dus niets doen en zeggen hoe het wel moet.
+if [ -e /etc/systemd/system/cf-homepage-api.service ] || [ -d /etc/cf-homepage ] || [ -d /opt/cf-homepage ]; then
+  printf '\n\033[1;33m!! %s\033[0m\n' "Deze container is een node van een homepage-cluster in ClusterForge. Er is niets veranderd."
+  echo "Bijwerken gaat in ClusterForge: je homepage-cluster → kaart Specificatie → Wijzigen… → Versie van de homepage"
+  echo "(een branch, tag of commit, bv. main) → Toepassen. ClusterForge bouwt dan elke node en zet de database bij."
+  echo "Stand op deze node: /usr/local/lib/clusterforge/homepage-ctl.sh status."
+  exit 1
+fi
 
 printf '\n\033[1;37m==> git installeren\033[0m\n'
 export DEBIAN_FRONTEND=noninteractive

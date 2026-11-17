@@ -3,7 +3,7 @@
 Elke minuut vraagt de worker bij elke API van soort clusterforge (API-beheer) de indeling op
 (/api/dashboard/v2/homepage/layout, met ETag: als er niets veranderde kost dat niets). Elke app wordt een tegel
 van type clusterforge in de groep met dezelfde naam (zo nodig nieuw, op de eerste pagina), met de check "api"
-op /apps/<slug>?strict=1: rood zodra ClusterForge de app niet gezond vindt.
+op /apps/<slug>?strict=1 (via ClusterForge.health): rood zodra ClusterForge de app niet gezond vindt.
 
 Tegels die ClusterForge maakte staan herkenbaar in config.managed_by = "clusterforge" en config.cf_key. Alleen die
 worden bijgewerkt en verwijderd; tegels die je zelf maakte blijft de sync uit de buurt. Wat je in ClusterForge
@@ -93,7 +93,8 @@ async def apply(db: AsyncSession, conn: ApiConnection, layout: dict) -> dict:
             "group_id": group.id,
         }
         config = {"managed_by": MANAGED, "cf_key": key, "app": slug}
-        check = {"type": "api", "path": f"/api/dashboard/v2/apps/{slug}?strict=1", "interval": 60}
+        # De api-check van de tegel vraagt /apps/<slug>?strict=1 (ClusterForge.health): rood als de app niet gezond is.
+        check = {"type": "api", "interval": 60}
         svc = by_key.get(key)
         if svc is None:
             db.add(Service(type="clusterforge", api_id=conn.id, position=1000 + pos, config=config, check=check, **values))
@@ -109,7 +110,7 @@ async def apply(db: AsyncSession, conn: ApiConnection, layout: dict) -> dict:
             svc.config = cfg
             changed = True
         # De check alleen zetten als hij nog de onze is (zelf aangepast = blijven).
-        if (svc.check or {}).get("type") in (None, "api") and (svc.check or {}).get("path") != check["path"]:
+        if not svc.check or ((svc.check or {}).get("type") == "api" and (svc.check or {}).get("path")):
             svc.check = check
             changed = True
         if changed:

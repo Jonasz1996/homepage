@@ -638,6 +638,32 @@ Later, deel 3 (Authentik en gsm):
   (Gebruikers → API-tokens, voor een gebruiker die alle hosts mag lezen, bv. een eigen gebruiker in een groep met
   leesrechten op alle hostgroepen) en als adres de webinterface (`https://zabbix.jbogaert.be`, zonder
   `/api_jsonrpc.php`). Gebruikt alleen lezen: host.get, trigger.get, item.get en trend.get
+- **clusterforge** (een tegel of API van soort `clusterforge`): de HA-clusters uit ClusterForge, via zijn
+  alleen-lezen dashboard-API (`/api/dashboard/v1`). Adres: rechtstreeks op IP, bv. `http://192.168.113.153:8080`
+  (zonder `/api`); geheim `token`: een API-token `cfa_…` uit ClusterForge (**Instellingen → Dashboard-API (homepage) →
+  Token maken**, als beheerder; niets aangevinkt = alle clusters, ook nieuwe). Eén tegel toont:
+  - zonder instelling `cluster`: alle clusters (gezond/totaal, nodes, incidenten, updates en het SOC-niveau). Het mini
+    dashboard heeft een tabel met per cluster status, health score, nodes, VIP → node, database, incidenten, updates,
+    herstarts, CrowdSec en firewall, de lijst "wat er mis is", het beveiligingsoverzicht, en **tegels per cluster**:
+    in één keer een eigen tegel voor elk cluster (zelfde API en sleutels, hangt af van de ClusterForge-tegel)
+  - met `cluster` = slug, naam of id: één cluster; de check (soort **api**) wordt rood zolang het cluster niet
+    gezond is of een open incident heeft, met de reden erbij, dus je krijgt een melding zoals bij elke andere check
+  - met `soc` = true: het beveiligingsoverzicht (niveau, score, aanvallen, bans, geblokkeerd verkeer, mislukte
+    logins); alleen met een token voor alle clusters. Rood vanaf "verhoogd"
+  - `link` (optioneel): het adres waarmee je ClusterForge in de browser opent (bv. `https://clusterforge.jbogaert.be`);
+    de namen in het mini dashboard linken dan daarheen in plaats van naar het IP
+  - met `node` = id of hostname: één node (status, online, IP, rol, updates, herstart); de check wordt rood als de
+    node offline of down is, nooit in onderhoud. Nodes komen van `/api/dashboard/v1/nodes` (nieuwere ClusterForge)
+  - **dashboard laten beheren door ClusterForge** (mini dashboard van de overzichtstegel → aanzetten met deze
+    tegel): elke 5 minuten zet de homepage per cluster een groep op een eigen pagina "ClusterForge" (of een pagina
+    die je kiest), met een tegel voor het cluster en een tegel per node, nodes zonder cluster in "Losse nodes". Nieuw
+    in ClusterForge komt erbij, hernoemd of naar een ander cluster wordt bijgewerkt, weg in ClusterForge gaat weg.
+    Alleen tegels met `cf_beheer` in de instellingen zijn van ClusterForge: je eigen tegels (ook in die groepen)
+    blijven altijd, en van een beheerde tegel neemt ClusterForge alleen naam, link, omschrijving en groep (icoon,
+    plaats, check en notities blijven van jou). Tegels die je al met "tegels per cluster" maakte worden overgenomen.
+    Lukt het ophalen niet, dan verandert er niets; zou één ronde meer dan de helft van de beheerde tegels weghalen,
+    dan wacht de worker en meldt hij het (**nu synchroniseren** doet het dan wel). Elke ronde met wijzigingen is een
+    revisie, dus terug te zetten. Kent ClusterForge `/nodes` nog niet, dan komen er alleen groepen en clustertegels
 - **van buitenaf** (⚿ → van buitenaf): komt een bezoek via Cloudflare (NPM kreeg het met een `CF-Connecting-IP` van
   Cloudflare of een tunnel), met een vervalste header van Cloudflare of vanaf een publiek IP, dan staan de terminal
   (ook cronjobs starten of bewaken, rsyslog uitrollen, sleutels vastzetten), updates installeren, acties (aan/uit,
@@ -1065,6 +1091,11 @@ Het noodplan gebruikt de tegels en API's die er al zijn: geen nieuwe rechten. Na
    vanuit het venster: download het als html en druk het af vanuit je browser
 
 ## Bijwerken
+
+Draait de homepage als cluster in ClusterForge (template `homepage`), dan nooit `bootstrap.sh`, `install.sh` of
+`homepage-terugzetten` op een node: die stoppen meteen en veranderen niets. Bijwerken gaat in ClusterForge: het
+homepage-cluster → kaart **Specificatie** → **Wijzigen…** → **Versie van de homepage** (een branch, tag of commit) →
+**Toepassen**. ClusterForge bouwt dan elke node en zet de database één keer bij (`homepage-ctl.sh`).
 
 Hetzelfde bootstrap-commando opnieuw, of:
 

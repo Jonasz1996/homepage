@@ -7,7 +7,7 @@ on:
 
 jobs:
   backend:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     # Elke Python-versie met de PostgreSQL van de Debian-versie die ze meebrengt, zoals install.sh ze installeert:
     # Debian 12 heeft Python 3.11 en PostgreSQL 15, Debian 13 Python 3.13 en PostgreSQL 17. Telkens gewoon
     # PostgreSQL, en PostgreSQL met de nieuwste TimescaleDB voor die versie. SQLite (geen server, alleen voor de
@@ -97,7 +97,7 @@ jobs:
           HOMEPAGE_TEST_PG_CLIENT: verplicht
 
   frontend:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: frontend
@@ -115,6 +115,7 @@ jobs:
       - run: npm run build
 
   browser:
+    # Vast op 24.04: ubuntu-latest is nu 26.04, en daar installeert Playwright nog geen Chromium.
     runs-on: ubuntu-24.04
     services:
       postgres:
@@ -171,7 +172,7 @@ jobs:
           retention-days: 7
 
   install-script:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: shellcheck deploy/*.sh

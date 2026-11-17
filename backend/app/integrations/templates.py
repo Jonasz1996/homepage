@@ -54,6 +54,10 @@ TEMPLATES: dict[str, dict] = {
                       "match": ["homeassistant", "hass", "ha"]},
     "zabbix": {"label": "Zabbix", "category": "Monitoring", "kind": "zabbix", "match": ["zabbix"],
                "hint": "Adres: de webinterface, bv. https://zabbix.jbogaert.be. Token: Gebruikers → API-tokens."},
+    "clusterforge": {"label": "ClusterForge", "category": "Monitoring", "kind": "clusterforge",
+                     "match": ["clusterforge"],
+                     "hint": "Adres: rechtstreeks op IP, bv. http://192.168.113.153:8080 (zonder /api). Token: in "
+                             "ClusterForge bij Instellingen → Dashboard-API (homepage) → Token maken (cfa_…)."},
     "cloudflared": {"label": "Cloudflare Tunnel", "category": "Netwerk", "kind": "cloudflared", "match": ["cloudflare", "cloudflared"],
                     "url": "https://api.cloudflare.com/client/v4",
                     "hint": "Instelling account: je account-id. Token met Account → Cloudflare Tunnel → Read; voor Netwerk › "
