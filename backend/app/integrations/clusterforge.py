@@ -19,6 +19,9 @@ from urllib.parse import quote, urlsplit
 from .base import Integration, IntegrationError, cell, field
 
 PREFIX = "/api/dashboard/v1"
+# Homepage-API v2: één tegel per app die ClusterForge zelf herkent (monitoring/clusterforge.py maakt die tegels).
+V2 = "/api/dashboard/v2"
+APP_LEVEL = {"ok": None, "warn": "warn", "down": "err"}
 
 STATUS_LEVEL = {"healthy": "ok", "degraded": "warn", "down": "err", "split_brain": "err"}
 DB_LEVEL = {"ok": "ok", "degraded": "warn", "down": "err"}
@@ -59,6 +62,20 @@ def node_level(n: dict) -> str | None:
     return STATUS_LEVEL.get(str(n.get("status") or ""))
 
 
+def app_value(value: Any, kind: str | None) -> Any:
+    if value is None or value == "":
+        return "—"
+    if kind == "percent" and isinstance(value, (int, float)):
+        return f"{value:.0f}%"
+    if kind == "bytes" and isinstance(value, (int, float)):
+        return {"bytes": value}
+    if isinstance(value, bool):
+        return "ja" if value else "nee"
+    if isinstance(value, float):
+        return round(value, 2)
+    return value
+
+
 def score_text(c: dict) -> str:
     if c.get("score") is None:
         return "—"
@@ -73,6 +90,8 @@ class ClusterForge(Integration):
         "cluster": "optioneel: slug, naam of id van één cluster; leeg = alle clusters",
         "soc": "true voor het beveiligingsoverzicht (SOC) in plaats van de clusters",
         "node": "optioneel: id of hostname van één node (zet de beheerde sync zelf)",
+        "app": "optioneel: één app uit ClusterForge (slug, bv. plex; zet de app-sync zelf)",
+        "sync": "op een API van soort ClusterForge: false om geen app-tegels te laten beheren (standaard aan)",
         "link": "optioneel: adres waarmee je ClusterForge in de browser opent (bv. https://clusterforge.jbogaert.be); "
                 "standaard het adres van de API",
         "insecure": "true bij https met een zelfondertekend certificaat",
@@ -102,6 +121,38 @@ class ClusterForge(Integration):
     @property
     def cluster_key(self) -> str:
         return str(self.config.get("cluster") or "").strip()
+
+    @property
+    def app_key(self) -> str:
+        return str(self.config.get("app") or "").strip()
+
+    async def app(self, strict: bool = False) -> dict:
+        data = await self.request("GET", f"{V2}/apps/{quote(self.app_key, safe='')}" + ("?strict=1" if strict else ""),
+                                  headers=self.headers())
+        if not isinstance(data, dict):
+            raise IntegrationError("Onverwacht antwoord van ClusterForge")
+        return data
+
+    @staticmethod
+    def app_fields(t: dict) -> list[dict]:
+        out = [field(str(f.get("label"))[:30], app_value(f.get("value"), f.get("format")),
+                     APP_LEVEL.get(f.get("level") or "ok")) for f in t.get("fields") or []]
+        return out[:8] or [field("status", t.get("status_label"), APP_LEVEL.get(t.get("status")))]
+
+    def app_detail(self, t: dict) -> dict:
+        sections = []
+        for s in t.get("sections") or []:
+            items = s.get("items") or []
+            if s.get("type") == "table" and items:
+                cols = list(items[0].keys())
+                sections.append({"kind": "table", "title": s.get("title") or "", "columns": cols,
+                                 "rows": [[cell(app_value(r.get(c), None)) for c in cols] for r in items]})
+            else:
+                sections.append({"kind": "kv", "title": s.get("title") or "",
+                                 "items": [field(str(i.get("label")), app_value(i.get("value"), None)) for i in items]})
+        if t.get("clusterforge_url"):
+            sections.append({"kind": "kv", "title": "ClusterForge", "items": [field("beheer", self.link(t["clusterforge_url"]))]})
+        return {"sections": sections or [{"kind": "kv", "title": t.get("name") or "app", "items": self.app_fields(t)}]}
 
     @property
     def node_key(self) -> str:
@@ -179,6 +230,8 @@ class ClusterForge(Integration):
 
     async def health(self) -> dict:
         """Voor de api-check: een fout (dus rood) zolang het cluster, de node of het SOC niet in orde is."""
+        if self.app_key:
+            return await self.app(strict=True)  # ClusterForge geeft zelf een fout als de app niet gezond is
         if self.node_key:
             n = await self.node()
             if not node_ok(n):
@@ -258,6 +311,8 @@ class ClusterForge(Integration):
         ]
 
     async def summary(self) -> list[dict]:
+        if self.app_key:
+            return self.app_fields(await self.app())
         if self.node_key:
             return self.node_fields(await self.node())
         if self.soc_mode:
@@ -304,6 +359,8 @@ class ClusterForge(Integration):
         return {"kind": "kv", "title": "beveiliging (SOC)", "items": items, "href": self.link(s.get("url"))}
 
     async def detail(self) -> dict:
+        if self.app_key:
+            return self.app_detail(await self.app())
         if self.node_key:
             n = await self.node()
             px = n.get("proxmox") or {}
