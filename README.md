@@ -618,6 +618,16 @@ Later, deel 3 (Authentik en gsm):
   - alles behalve GET is altijd een knop (actie) in het mini dashboard en in `Ctrl+K`, en vraagt een recente 2FA.
     Het adres, de soort of de aanmelding van een API met sleutels wijzigen vraagt ook een recente 2FA, tenzij je de
     sleutels opnieuw ingeeft. Een pad blijft altijd op het adres van de API
+- **clusterforge** (een API van soort `clusterforge`, homepage-API v2): ClusterForge herkent zelf de apps op alle
+  nodes (container, dienst, cluster) en de homepage maakt er vanzelf tegels van. Eén keer in **API-beheer** een API
+  van soort *ClusterForge* maken met het adres van ClusterForge (`http://192.168.113.153:8080`) en een API-token
+  (ClusterForge → Instellingen → Dashboard-API). Elke minuut haalt de worker de indeling op
+  (`/api/dashboard/v2/homepage/layout`, met ETag) en maakt, wijzigt en verwijdert de tegels met
+  `managed_by: clusterforge` in de groepen zoals ClusterForge ze indeelt; je eigen tegels blijven onaangeroerd. Elke
+  tegel toont de velden die ClusterForge kiest (status, nodes, versie, Zabbix, CrowdSec, ...), het mini dashboard
+  waar de app draait, en de check vraagt `/apps/<app>?strict=1` (rood zodra ClusterForge de app niet gezond vindt).
+  Bijsturen (verbergen, hernoemen, groep, icoon, velden) doe je in ClusterForge → Homepage-apps. `"sync": false` in
+  de API zet het automatisch aanmaken uit; een tegel van type clusterforge met `app` werkt dan nog altijd
 - **zabbix** (een tegel of API van soort `zabbix`): elke minuut haalt de homepage de hosts en open problemen uit
   Zabbix (5.4 en nieuwer). Elke tegel krijgt een stip "zbx": groen, of rood als een host onbereikbaar is of een
   probleem van ernst "gemiddeld" of hoger heeft (de muis erop toont welke). In het mini dashboard staan per host CPU,
