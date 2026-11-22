@@ -96,6 +96,8 @@ class Integration:
     actions: ClassVar[set[str]] = set()
     # Eigen calls uit API-beheer: pad van de API achter het adres (bv. /api2/json bij Proxmox).
     call_prefix: ClassVar[str] = ""
+    # True: bij HTTP 401 de reden van de API zelf tonen (_error_detail), bv. "sleutel verlopen".
+    explain_401: ClassVar[bool] = False
 
     def __init__(self, url: str | None, config: dict, secrets: dict, client: httpx.AsyncClient):
         self.config = config or {}
@@ -157,6 +159,8 @@ class Integration:
         except httpx.HTTPError as e:
             raise IntegrationError(f"Niet bereikbaar ({self.base}): {_net_reason(e)}") from e
         if r.status_code == 401:
+            if self.explain_401 and (why := self._error_detail(r)):
+                raise IntegrationError(why)
             raise IntegrationError("Geweigerd (HTTP 401): API-token ontbreekt of is fout")
         if r.status_code == 403:
             raise Forbidden("Geweigerd (HTTP 403): het token heeft te weinig rechten")

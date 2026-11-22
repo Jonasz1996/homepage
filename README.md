@@ -664,6 +664,17 @@ Later, deel 3 (Authentik en gsm):
     Lukt het ophalen niet, dan verandert er niets; zou één ronde meer dan de helft van de beheerde tegels weghalen,
     dan wacht de worker en meldt hij het (**nu synchroniseren** doet het dan wel). Elke ronde met wijzigingen is een
     revisie, dus terug te zetten. Kent ClusterForge `/nodes` nog niet, dan komen er alleen groepen en clustertegels
+- **vaultx** (een tegel of API van soort `vaultx`): je wachtwoordkluis VaultX, via zijn lees-API voor dashboards
+  (`GET /api/v1/stats`). Adres: rechtstreeks op IP, bv. `http://192.168.0.50` (Debian-container, nginx op poort 80) of
+  `http://<IP>:8080` met Docker, zonder `/api`; `insecure` = true als je https met het zelfondertekende certificaat van
+  VaultX gebruikt. Geheim `token`: een API-sleutel `vxk_…` (VaultX: klik rechtsboven op je naam → **API-sleutels voor je
+  dashboard → Sleutel aanmaken**). Met een sleutel van een beheerder zie je heel VaultX, anders enkel je eigen account.
+  De API geeft alleen tellingen, nooit wachtwoorden, namen of inhoud, en de sleutel kan niets wijzigen: er zijn dus
+  geen acties. De tegel toont kluisitems, toestellen, sessies, logins van de laatste 24 uur (oranje bij mislukte) en
+  de apps uit de catalogus (oranje bij onbeschermd of offline); het mini dashboard ook de kluis per soort, toestellen
+  per soort, gebruikers, appcatalogus, NPM-koppelingen, notities en links. De check (soort **api**) wordt rood als de
+  database van VaultX weg is, de sleutel verlopen of ingetrokken is, of een NPM-sync in VaultX mislukt.
+  `link` (optioneel): het adres waarmee je VaultX in de browser opent (bv. `https://vaultx.jbogaert.be`)
 - **van buitenaf** (⚿ → van buitenaf): komt een bezoek via Cloudflare (NPM kreeg het met een `CF-Connecting-IP` van
   Cloudflare of een tunnel), met een vervalste header van Cloudflare of vanaf een publiek IP, dan staan de terminal
   (ook cronjobs starten of bewaken, rsyslog uitrollen, sleutels vastzetten), updates installeren, acties (aan/uit,
