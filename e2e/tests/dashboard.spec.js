@@ -74,11 +74,16 @@ test('uitloggen en inloggen met wachtwoord en 2FA-code', async () => {
   await menu('Instellingen', 'Uitloggen')
   await expect(page.locator('#u')).toBeVisible()
   await page.fill('#u', USER)
+  // Kan niet inloggen?: het commando met de naam, zonder iets aan de server te vragen.
+  await page.getByRole('button', { name: 'Wachtwoord vergeten of kan niet inloggen?' }).click()
+  await expect(page.locator('.help code')).toContainText(`herstel ${USER}`)
+  await page.fill('#hn', 'bestaat-niet')
+  await expect(page.locator('.help code')).toContainText('herstel bestaat-niet')
   await page.fill('#p', 'fout-wachtwoord-123')
-  await page.getByRole('button', { name: 'Inloggen' }).click()
+  await page.getByRole('button', { name: 'Inloggen', exact: true }).click()
   await expect(page.locator('#c')).toHaveCount(0)
   await page.fill('#p', PASS)
-  await page.getByRole('button', { name: 'Inloggen' }).click()
+  await page.getByRole('button', { name: 'Inloggen', exact: true }).click()
   await expect(page.locator('#c')).toBeVisible()
   const { code, at } = await freshCode(secret, usedStep)
   usedStep = at
