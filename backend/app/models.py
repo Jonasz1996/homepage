@@ -37,6 +37,9 @@ class User(Base):
     oidc_issuer: Mapped[str | None] = mapped_column(String(300))
     oidc_sub: Mapped[str | None] = mapped_column(String(255), unique=True)
     oidc_name: Mapped[str | None] = mapped_column(String(64))
+    # Tijdelijk wachtwoord (homepage-beheer herstel): geldig tot dit moment, en na het inloggen moet eerst een nieuw
+    # wachtwoord gekozen worden (en 2FA opnieuw ingesteld). None = een gewoon wachtwoord.
+    password_temp_until: Mapped[datetime | None]
 
 
 class Session(Base):

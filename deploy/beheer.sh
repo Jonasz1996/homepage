@@ -2,6 +2,8 @@
 # Beheer van het dashboard vanaf de commandoregel, als root in de container (backend/app/beheer.py). Voor als je niet
 # meer binnen raakt of alles wil wissen zonder browser:
 #   homepage-beheer gebruikers
+#   homepage-beheer herstel [naam]       kan niet inloggen: 2FA uit, tijdelijk wachtwoord (1 u), daarna zelf een
+#                                        nieuw wachtwoord kiezen en 2FA opnieuw instellen
 #   homepage-beheer 2fa-reset [naam]     2FA-app kwijt: 2FA uit, alle sessies weg, daarna opnieuw instellen
 #   homepage-beheer wachtwoord [naam]    wachtwoord vergeten
 #   homepage-beheer fabrieksreset        alles wissen, terug naar de eerste start (vraagt WIS ALLES)

@@ -282,3 +282,69 @@ async def test_cli_fabrieksreset(authed, monkeypatch, capsys):
         assert (await db.execute(select(func.count()).select_from(model))).scalar_one() == 0
     await agen.aclose()
     assert (await authed.get("/api/auth/state")).json()["setup_required"] is True
+
+
+async def test_cli_herstel_tijdelijk_wachtwoord(authed, monkeypatch, capsys):
+    """homepage-beheer herstel: 2FA uit, sessies weg, tijdelijk wachtwoord dat na 1 uur vervalt; daarmee inloggen,
+    eerst een eigen wachtwoord kiezen, dan 2FA opnieuw."""
+    import re
+    from datetime import datetime, timedelta, timezone
+
+    from app import beheer
+    from .conftest import PASSWORD
+    monkeypatch.setattr(beheer, "get_maker", lambda: _Maker())
+    assert await beheer.herstel("JONAS") == 0
+    out = capsys.readouterr().out
+    pw = re.search(r"Tijdelijk wachtwoord: (\S+)", out).group(1)
+    assert len(pw) == 19
+    agen, db = await _db()
+    u = (await db.execute(select(User))).scalar_one()
+    assert u.totp_enabled is False and u.totp_secret is None
+    left = u.password_temp_until.replace(tzinfo=u.password_temp_until.tzinfo or timezone.utc) - datetime.now(timezone.utc)
+    assert timedelta(minutes=55) < left <= timedelta(hours=1)
+    assert (await db.execute(select(func.count()).select_from(Session))).scalar_one() == 0
+    assert (await db.execute(select(AuditLog).where(AuditLog.action == "herstel"))).scalars().first() is not None
+    await agen.aclose()
+
+    authed.cookies.clear()
+    st = (await authed.get("/api/auth/state")).json()
+    assert st["mfa_ok"] is False and st["herstel_commando"].endswith(("homepage-beheer", "beheer.sh"))
+    r = await authed.post("/api/auth/login", json={"username": "jonas", "password": PASSWORD})
+    assert r.status_code == 401
+    r = await authed.post("/api/auth/login", json={"username": "jonas", "password": pw})
+    assert r.status_code == 200 and r.json()["nieuw_wachtwoord"] is True and r.json()["mfa_ok"] is False
+    assert (await authed.get("/api/auth/state")).json()["user"]["nieuw_wachtwoord"] is True
+    # Eerst een eigen wachtwoord: 2FA instellen of het dashboard openen kan nog niet.
+    assert (await authed.get("/api/auth/totp/enroll")).status_code == 409
+    assert (await authed.get("/api/layout")).status_code == 401
+    r = await authed.post("/api/auth/password/nieuw", json={"new": pw})
+    assert r.status_code == 400
+    r = await authed.post("/api/auth/password/nieuw", json={"new": "mijn-nieuw-wachtwoord"})
+    assert r.status_code == 200, r.text
+    st = (await authed.get("/api/auth/state")).json()
+    assert st["user"]["nieuw_wachtwoord"] is False and st["user"]["totp_enabled"] is False
+    secret = (await authed.get("/api/auth/totp/enroll")).json()["secret"]
+    r = await authed.post("/api/auth/totp/enable", json={"code": pyotp.TOTP(secret).now()})
+    assert r.status_code == 200, r.text
+    assert (await authed.get("/api/layout")).status_code == 200
+    # Nog eens: dan geldt het tijdelijke wachtwoord niet meer.
+    assert (await authed.post("/api/auth/password/nieuw", json={"new": "nog-een-wachtwoord"})).status_code == 409
+
+
+async def test_cli_herstel_verlopen(authed, monkeypatch, capsys):
+    import re
+    from datetime import datetime, timedelta, timezone
+
+    from app import beheer
+    monkeypatch.setattr(beheer, "get_maker", lambda: _Maker())
+    assert await beheer.herstel(None) == 0
+    pw = re.search(r"Tijdelijk wachtwoord: (\S+)", capsys.readouterr().out).group(1)
+    agen, db = await _db()
+    u = (await db.execute(select(User))).scalar_one()
+    u.password_temp_until = datetime.now(timezone.utc) - timedelta(minutes=1)
+    await db.commit()
+    await agen.aclose()
+    authed.cookies.clear()
+    r = await authed.post("/api/auth/login", json={"username": "jonas", "password": pw})
+    assert r.status_code == 401 and "verlopen" in r.json()["detail"]
+    assert (await authed.get("/api/auth/state")).json()["mfa_ok"] is False

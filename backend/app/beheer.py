@@ -4,6 +4,9 @@ al lezen en wijzigen.
 
 Gebruik (als root, via deploy/beheer.sh = homepage-beheer, dat de juiste gebruiker en instellingen kiest):
   homepage-beheer gebruikers
+  homepage-beheer herstel [naam]        kan niet meer inloggen: 2FA uit, alle sessies weg en een tijdelijk wachtwoord
+                                        (1 uur geldig). Daarmee inloggen, een eigen wachtwoord kiezen en 2FA opnieuw
+                                        instellen
   homepage-beheer 2fa-reset [naam]      2FA uit en alle sessies weg: daarna inloggen met je wachtwoord en 2FA opnieuw
                                         instellen (QR-code)
   homepage-beheer wachtwoord [naam]     een nieuw wachtwoord (minstens 12 tekens), alle sessies weg
@@ -13,7 +16,9 @@ Gebruik (als root, via deploy/beheer.sh = homepage-beheer, dat de juiste gebruik
 import argparse
 import asyncio
 import getpass
+import secrets
 import sys
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, select
 
@@ -36,6 +41,9 @@ async def _user(db, naam: str | None) -> User:
     for u in users:
         if u.username == naam:
             return u
+    for u in users:  # inloggen kijkt ook niet naar hoofdletters
+        if u.username.lower() == naam.lower():
+            return u
     raise SystemExit(f"Geen account {naam!r}. Bestaande: {', '.join(u.username for u in users)}")
 
 
@@ -46,7 +54,8 @@ def _audit(db, user: User | None, action: str, **detail) -> None:
 async def gebruikers() -> int:
     async with get_maker()() as db:
         for u in (await db.execute(select(User).order_by(User.id))).scalars():
-            print(f"{u.username}\t2FA {'aan' if u.totp_enabled else 'uit'}\tlaatst ingelogd {u.last_login_at or '-'}")
+            extra = "\ttijdelijk wachtwoord" if u.password_temp_until else ""
+            print(f"{u.username}\t2FA {'aan' if u.totp_enabled else 'uit'}\tlaatst ingelogd {u.last_login_at or '-'}{extra}")
     return 0
 
 
@@ -81,10 +90,55 @@ async def wachtwoord(naam: str | None) -> int:
         if getpass.getpass("Nog eens: ") != pw:
             raise SystemExit("Niet gelijk, er is niets veranderd.")
         user.password_hash = await hash_password_async(pw)
+        user.password_temp_until = None
         n = (await db.execute(delete(Session).where(Session.user_id == user.id))).rowcount
         _audit(db, user, "wachtwoord", cli=True)
         await db.commit()
     print(f"Nieuw wachtwoord voor {user.username}; {n} sessies zijn afgemeld (bekende toestellen ook).")
+    return 0
+
+
+# Zonder tekens die je verwart (0/O, 1/l/I): het wordt voorgelezen of overgetypt.
+TEKENS = "abcdefghjkmnpqrstuvwxyz23456789"
+
+
+def tijdelijk_wachtwoord() -> str:
+    """Vier groepjes van vier, bv. k7mq-x2fa-9tbe-hw4r: 19 tekens, ruim 78 bits."""
+    return "-".join("".join(secrets.choice(TEKENS) for _ in range(4)) for _ in range(4))
+
+
+async def herstel(naam: str | None, uren: int = 1) -> int:
+    """Accountherstel: 2FA uit, alle sessies en gsm's afgemeld, en een tijdelijk wachtwoord dat maar `uren` geldig is.
+    Wie ermee inlogt, moet eerst een eigen wachtwoord kiezen en dan 2FA opnieuw instellen."""
+    from .deps import notify
+    from .monitoring import webpush
+    from .security import hash_password_async
+
+    if not 1 <= uren <= 168:
+        raise SystemExit("--uren moet tussen 1 en 168 liggen.")
+    pw = tijdelijk_wachtwoord()
+    async with get_maker()() as db:
+        user = await _user(db, naam)
+        user.password_hash = await hash_password_async(pw)
+        user.password_temp_until = datetime.now(timezone.utc) + timedelta(hours=uren)
+        user.totp_enabled = False
+        user.totp_secret = None
+        user.totp_last_step = None
+        n = (await db.execute(delete(Session).where(Session.user_id == user.id))).rowcount
+        await webpush.forget_renew(db, user.id)
+        _audit(db, user, "herstel", uren=uren)
+        notify(db, "Account hersteld vanaf de commandoregel",
+               f"{user.username} kreeg in de container (homepage-beheer herstel) een tijdelijk wachtwoord, 2FA staat "
+               f"uit en {n} sessies zijn afgemeld. Was jij dit niet, voer het commando dan zelf opnieuw uit.",
+               level="warn", source="auth")
+        await db.commit()
+    print(f"Account {user.username} is hersteld: 2FA staat uit en {n} sessies zijn afgemeld.")
+    print()
+    print(f"  Tijdelijk wachtwoord: {pw}")
+    print(f"  Geldig tot: {user.password_temp_until.astimezone():%d/%m/%Y %H:%M}")
+    print()
+    print("Geef dit door aan de gebruiker. Die logt ermee in op de inlogpagina, kiest een eigen wachtwoord en scant")
+    print("daarna een nieuwe QR-code met de authenticator-app (2FA). Het oude wachtwoord werkt niet meer.")
     return 0
 
 
@@ -115,6 +169,9 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="homepage-beheer", description="Beheer van het dashboard in de container.")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("gebruikers", help="de accounts en of 2FA aan staat")
+    s = sub.add_parser("herstel", help="kan niet inloggen: 2FA uit en een tijdelijk wachtwoord")
+    s.add_argument("naam", nargs="?")
+    s.add_argument("--uren", type=int, default=1, help="hoe lang het tijdelijke wachtwoord geldt, in uren (standaard 1)")
     s = sub.add_parser("2fa-reset", help="2FA uit en alle sessies weg (2FA-app kwijt)")
     s.add_argument("naam", nargs="?")
     s = sub.add_parser("wachtwoord", help="een nieuw wachtwoord instellen")
@@ -124,6 +181,8 @@ def main(argv: list[str] | None = None) -> int:
     a = p.parse_args(argv)
     if a.cmd == "gebruikers":
         return asyncio.run(gebruikers())
+    if a.cmd == "herstel":
+        return asyncio.run(herstel(a.naam, a.uren))
     if a.cmd == "2fa-reset":
         return asyncio.run(tfa_reset(a.naam))
     if a.cmd == "wachtwoord":
