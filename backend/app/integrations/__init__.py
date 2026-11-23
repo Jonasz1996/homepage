@@ -4,6 +4,7 @@ from .adguard import AdGuard
 from .clusterforge import ClusterForge
 from .cloudflare import CloudflareDns, CloudflareTunnel
 from .homeassistant import HomeAssistant
+from .ics import IcsAgenda
 from .base import Integration, IntegrationError
 from .calls import call_dict
 from .jsonapi import CustomApi, JsonApi
@@ -18,7 +19,7 @@ from .zabbix import Zabbix
 
 REGISTRY: dict[str, type[Integration]] = {
     cls.name: cls for cls in (Proxmox, ProxmoxBackupServer, AdGuard, NginxProxyManager, Portainer, OPNsense,
-                                CloudflareTunnel, CloudflareDns, HomeAssistant, Zabbix, ClusterForge, VaultX, RestApi, JsonApi, CustomApi)
+                                CloudflareTunnel, CloudflareDns, HomeAssistant, Zabbix, ClusterForge, VaultX, IcsAgenda, RestApi, JsonApi, CustomApi)
 }
 
 # Instellingen die van de API komen en die een tegel niet mag overschrijven (anders gaan de sleutels elders heen).

@@ -62,6 +62,9 @@ TEMPLATES: dict[str, dict] = {
     "vaultx": {"label": "VaultX", "category": "Overig", "kind": "vaultx", "match": ["vaultx"],
                "hint": "Adres: rechtstreeks op IP, bv. http://192.168.0.50 (Debian-container, poort 80) of :8080 met Docker, "
                        "zonder /api. Sleutel: in VaultX je account → API-sleutels voor je dashboard → Sleutel aanmaken (vxk_…)."},
+    "agenda": {"label": "Agenda (ICS)", "category": "Overig", "kind": "ics", "match": ["agenda", "calendar", "kalender", "ics"],
+               "hint": "Adres: de ICS-feed, bv. https://agenda.jbogaert.be/ics (webcal:// mag ook). Een sleutel in de url "
+                       "(?token=...) blijft staan. Config: days (dagen vooruit, 14), refresh (minuten, 15), tz."},
     "cloudflared": {"label": "Cloudflare Tunnel", "category": "Netwerk", "kind": "cloudflared", "match": ["cloudflare", "cloudflared"],
                     "url": "https://api.cloudflare.com/client/v4",
                     "hint": "Instelling account: je account-id. Token met Account → Cloudflare Tunnel → Read; voor Netwerk › "

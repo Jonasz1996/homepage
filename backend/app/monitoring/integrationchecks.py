@@ -256,6 +256,8 @@ HEALTH: dict[str, str | Callable[[Any], Awaitable[Any]]] = {
     "clusterforge": lambda i: i.health(),
     # Rood als de database van VaultX weg is, de sleutel niet meer werkt of een NPM-sync van VaultX mislukt.
     "vaultx": lambda i: i.health(),
+    # Rood als de feed niet te halen is of geen ICS is.
+    "ics": lambda i: i.health(),
 }
 
 
