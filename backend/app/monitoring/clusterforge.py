@@ -204,10 +204,17 @@ def prepare(layout: dict) -> list[dict]:
         j = best.get(addr)
         if j is None or (_npm_like(raw[j][2]) and not _npm_like(t)):
             best[addr] = i
+    # Dubbels van dezelfde app (bv. de Docker-container op http://IP:poort én dezelfde app op zijn naam via NPM): de
+    # tegel op een naam wint. Niet voor Proxmox/PBS, waar elke node zijn eigen tegel is.
+    named = {str(t["app"]).lower() for _, _, t in raw if _host(t.get("href")) and not _is_ip(_host(t.get("href")))}
     out: list[dict] = []
     for i, (gname, pos, t) in enumerate(raw):
         addr = address(t.get("href"))
         if addr and best[addr] != i:
+            continue
+        host = _host(t.get("href"))
+        if host and _is_ip(host) and str(t["app"]).lower() in named and not is_proxmox(str(t["app"]), t.get("icon")) \
+                and "backup" not in str(t["app"]).lower() and "pbs" not in str(t["app"]).lower():
             continue
         slug = str(t["app"])
         href = (str(t.get("href") or "")[:500]) or None
@@ -426,4 +433,4 @@ async def run_sync(db: AsyncSession, http: HttpClients) -> None:
 
 
 # Versie van de regels hierboven: verandert ze, dan past de volgende ronde de indeling opnieuw toe (ook bij 304).
-RULES = 2
+RULES = 3

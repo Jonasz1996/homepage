@@ -142,3 +142,36 @@ async def koppelen(data: KoppelIn, request: Request, user: User = Depends(curren
         await record_revision(db, user, f"ClusterForge gekoppeld: {stats['added']} tegels nieuw")
     await db.commit()
     return {**stats, "tiles": tiles, "api_id": conn.id}
+
+
+@router.post("/ordenen")
+async def ordenen(request: Request, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Alle tegels uit ClusterForge nu opnieuw ordenen volgens de regels van monitoring/clusterforge.py (naam, dubbels,
+    groep, check, Proxmox), zonder op de volgende ronde van de worker te wachten. Eigen tegels blijven zoals ze zijn."""
+    from ..integrations import IntegrationError
+    from ..layout import record_revision
+    from ..models import ApiConnection
+    from ..monitoring import clusterforge as cfapps
+
+    conns = (await db.execute(select(ApiConnection).where(ApiConnection.kind == "clusterforge"))).scalars().all()
+    if not conns:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nog geen ClusterForge-API: koppel eerst ClusterForge")
+    pve = await cfapps.proxmox_nodes(db, integ_router.clients)
+    total = {"added": 0, "updated": 0, "removed": 0}
+    errors = []
+    for conn in conns:
+        try:
+            layout, _ = await cfapps.fetch_layout(conn, integ_router.clients, None)
+        except (IntegrationError, ValueError) as e:
+            errors.append(f"{conn.name}: {e}")
+            continue
+        for k, v in (await cfapps.apply(db, conn, layout or {}, pve)).items():
+            total[k] += v
+    if errors and len(errors) == len(conns):
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "; ".join(errors)[:300])
+    await audit(db, request, user, "clusterforge_ordenen", **total)
+    if any(total.values()):
+        await record_revision(db, user, f"ClusterForge-tegels opnieuw geordend: {total['updated']} bijgewerkt, "
+                                        f"{total['removed']} dubbels weg")
+    await db.commit()
+    return {**total, "errors": errors}

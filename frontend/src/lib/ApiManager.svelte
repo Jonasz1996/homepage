@@ -51,6 +51,19 @@
       await load(); onchanged?.()
     } catch (e) { error = e.message } finally { busy = false }
   }
+  let hasCf = $derived((data?.apis || []).some((a) => a.kind === 'clusterforge'))
+  let ordenMsg = $state('')
+  async function ordenen() {
+    busy = true; error = ''; ordenMsg = ''
+    try {
+      const r = await api('/clusterforge/ordenen', { method: 'POST' })
+      ordenMsg = r.updated || r.removed || r.added
+        ? `Geordend: ${r.updated} bijgewerkt, ${r.removed} dubbels weg${r.added ? `, ${r.added} nieuw` : ''}.`
+        : 'Alles stond al goed.'
+      if (r.errors?.length) error = r.errors.join('; ')
+      await load(); onchanged?.()
+    } catch (e) { error = e.message } finally { busy = false }
+  }
   const kb = (n) => n > 1e6 ? `${(n / 1e6).toFixed(0)} MB` : `${Math.max(1, Math.round(n / 1e3))} kB`
   const when = (s) => new Date(s).toLocaleString('nl-BE', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
 
@@ -255,7 +268,10 @@
         <button class="mini ok" onclick={startNew}>+ API</button>
         <button class="mini" class:hot={sugCount} onclick={openSuggest} title="Tegels herkennen en in één keer een API geven">⚡ tegels herkennen{#if sugCount}<b class="n">{sugCount}</b>{/if}</button>
         <button class="mini" onclick={openHerstel} title="Na een fabrieksreset: je API's met hun sleutels terug uit een back-up">↺ uit back-up</button>
+        {#if hasCf}<button class="mini" onclick={ordenen} disabled={busy}
+          title="De tegels uit ClusterForge nu opnieuw ordenen: namen, dubbels, groepen, checks en Proxmox per node. Je eigen tegels blijven.">⟳ ClusterForge-tegels ordenen</button>{/if}
       </div>
+      {#if ordenMsg}<p class="okm">{ordenMsg}</p>{/if}
       <input class="srch" bind:value={q} placeholder="zoek API of tegel" aria-label="Zoek API" />
       {#if data}
         <p class="stat">Startpagina: {data.tiles.length} tegels in {data.groups} groep{data.groups === 1 ? '' : 'en'} ·

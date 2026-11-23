@@ -3,6 +3,16 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 51,
+    datum: '2026-11-23',
+    titel: 'ClusterForge-tegels opnieuw ordenen, minder Docker-dubbels',
+    items: [
+      'API-beheer → ⟳ ClusterForge-tegels ordenen: past de regels (naam, dubbels, groep, check, Proxmox per node) meteen toe op alle tegels uit ClusterForge, ook de bestaande. De worker doet dat ook vanzelf na een update; met de knop hoef je niet te wachten en zie je wat er veranderde.',
+      'Dezelfde app als Docker-container op http://IP:poort én op zijn naam via NPM: alleen de tegel op de naam blijft. Proxmox- en PBS-nodes houden elk hun tegel.',
+    ],
+    instellen: [],
+  },
+  {
     nr: 50,
     datum: '2026-11-23',
     titel: 'Na een fabrieksreset: sneller terug, met eerlijkere tegels',
