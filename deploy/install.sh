@@ -756,6 +756,8 @@ install -m 755 "$APP_DIR/deploy/herstelfouten.sh" /usr/local/sbin/homepage-herst
 install -m 755 "$APP_DIR/deploy/dumpinfo.sh" /usr/local/sbin/homepage-dumpinfo
 # Alles in één tekstbestand bij een probleem, ook als het dashboard zelf niet start.
 install -m 755 "$APP_DIR/deploy/diagnose.sh" /usr/local/sbin/homepage-diagnose
+# Binnen raken als het niet meer lukt (2FA-app kwijt, wachtwoord vergeten) of alles wissen, vanaf de commandoregel.
+install -m 755 "$APP_DIR/deploy/beheer.sh" /usr/local/sbin/homepage-beheer
 
 # Vanaf hier draait de nieuwe versie. Wat er nu draait: het dashboard toont het (en wat er nieuw is), een volgende
 # update en homepage-terugzetten gebruiken het.

@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, SmallInteger, String, Text, text
+from sqlalchemy import (JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, SmallInteger,
+                        String, Text, text)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql.expression import false as sa_false
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -694,3 +695,19 @@ class PushQueue(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     next_at: Mapped[datetime] = mapped_column(default=utcnow, index=True)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class Achtergrond(Base):
+    """De achtergrondafbeelding van het dashboard (Instellingen → Weergave). Eén rij; de instellingen erbij (effecten,
+    dimmen, vervagen) staan in app_state 'achtergrond'. In de database, zodat ze mee in de back-up zit en een
+    fabrieksreset ze wist (de API mag zelf geen bestanden schrijven)."""
+
+    __tablename__ = "achtergrond"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mime: Mapped[str] = mapped_column(String(40))
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+    # sha256 van data: zit in de URL, zodat de browser het beeld lang mag bewaren.
+    sha: Mapped[str] = mapped_column(String(64))
+    bron: Mapped[str | None] = mapped_column(String(500))
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow)

@@ -759,6 +759,26 @@ Later, deel 3 (Authentik en gsm):
   bliksem en vonken bij een geslaagde actie (herstarten, wekken), een vuurbal met flits en schudden bij verwijderen
   en uitloggen, en een bliksem op het belletje als er een nieuwe storing binnenkomt. Uit te zetten met `Ctrl+K` →
   "effecten"; staat ook uit als je systeem "minder beweging" vraagt
+- **eigen achtergrond** (Instellingen → Weergave): een afbeelding uploaden (PNG, JPEG, WebP, GIF of AVIF; groter dan
+  1,5 MB verkleint de browser ze eerst, nginx neemt hoogstens 4 MB) of één keer laten ophalen van een adres (tot 12 MB,
+  ook op je LAN; van buitenaf hoort dat bij *acties*). Ze staat in de database (tabel `achtergrond`), dus mee in de
+  back-up. Met *effecten erboven* komen de radiale gloed, de scanlijnen en de punten van aiverslag over de foto;
+  zonder alleen de foto. Dimmen (0-90%) en vervagen (0-20 px) houden de tegels leesbaar. Geldt voor elk toestel
+- **fabrieksreset** (Instellingen → Fabrieksreset, `/?open=reset`): wist alles in de database (tegels, pagina's,
+  API's en geheimen, SSH-hosts en -sleutels, cronjobs, webhooks, gsm's, alle geschiedenis, instellingen, de
+  achtergrond, het account en alle sessies) en begint opnieuw bij de eerste start: account met 2FA, dan een leeg
+  dashboard met de eerste stappen. Aanmelden staat daarna weer op de standaard (*overal zonder*). Vooraf: een volledige
+  back-up downloaden (pg_dump zoals de dagelijkse, zonder logregels; terugzetten zoals in het noodplan, sectie 8) of
+  alleen de tegels als YAML. Bevestigen met de zin `WIS ALLES`; alleen thuis, ook met een echte login nooit van
+  buitenaf, en met aanmelden aan ook een verse 2FA. Blijft staan: `/etc/homepage` (secret.key, setup-code), de
+  dagelijkse back-ups en de kopie buiten de container, en alles op je machines zelf (rsyslog, cronjobs,
+  authorized_keys). De setup-code krijgt de browser die de reset deed meteen mee
+- **homepage-beheer** (als root in de container, voor als je niet meer binnen raakt): `homepage-beheer 2fa-reset`
+  (2FA-app kwijt: 2FA uit en alle sessies weg, daarna inloggen met je wachtwoord en een nieuwe QR-code scannen),
+  `homepage-beheer wachtwoord` (nieuw wachtwoord), `homepage-beheer fabrieksreset` (zoals hierboven, vraagt `WIS
+  ALLES`, toont de setup-code en herstart API en worker) en `homepage-beheer gebruikers`. Het neemt gebruiker,
+  instellingen en Python over van de dienst van de API. Op een node van een homepage-cluster van ClusterForge staat
+  het niet in `/usr/local/sbin`: start het uit de code, `bash <map van de homepage>/deploy/beheer.sh 2fa-reset`
 - **gsm**: onder 760 px breed zitten de knoppen van de titelbalk achter ☰, tegels staan met twee naast elkaar en
   vensters vullen het scherm. Respecteert de notch en de gebarenbalk
 - **als app**: in Chrome op Android *Toevoegen aan startscherm* (op iOS via Delen). Eigen icoon, opent zonder

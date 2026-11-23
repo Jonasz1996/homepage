@@ -11,7 +11,11 @@
   let username = $state('')
   let password = $state('')
   let password2 = $state('')
-  let token = $state('')
+  // Na een fabrieksreset (Fabrieksreset.svelte) geeft de server de setup-code mee aan wie de reset deed.
+  const RESET_KEY = 'hp-setup-code'
+  let fromReset = ''
+  try { fromReset = sessionStorage.getItem(RESET_KEY) || '' } catch { /* privévenster */ }
+  let token = $state(fromReset)
   let code = $state('')
   let needCode = $state(false)
   let busy = $state(false)
@@ -42,6 +46,7 @@
   const setup = () => run(async () => {
     if (password !== password2) throw new Error('Wachtwoorden zijn niet gelijk')
     await api('/auth/setup', { method: 'POST', body: { token, username, password } })
+    try { sessionStorage.removeItem(RESET_KEY) } catch { /* */ }
     ondone()
   })
 
@@ -74,10 +79,17 @@
     <div class="body">
       {#if mode === 'setup'}
         <h1>Eerste account</h1>
-        <p class="hint">
-          Vul de setup-code in die het installatiescript toonde
-          (ook te vinden in <code>/etc/homepage/setup-token</code>).
-        </p>
+        {#if fromReset}
+          <p class="hint">
+            Fabrieksreset klaar: het dashboard is leeg. Maak opnieuw een account aan; de setup-code staat al ingevuld.
+            Daarna stel je 2FA in en kies je hoe je verder wil (importeren, Proxmox, achtergrond, ...).
+          </p>
+        {:else}
+          <p class="hint">
+            Vul de setup-code in die het installatiescript toonde
+            (ook te vinden in <code>/etc/homepage/setup-token</code>).
+          </p>
+        {/if}
         <form onsubmit={(e) => { e.preventDefault(); setup() }}>
           <label class="lbl" for="t">Setup-code</label>
           <input id="t" bind:value={token} autocomplete="off" required />
