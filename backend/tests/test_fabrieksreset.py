@@ -211,3 +211,74 @@ async def test_backup_vooraf_met_postgres(authed, monkeypatch):
     assert (await db.execute(select(func.count()).select_from(AuditLog).where(
         AuditLog.action == "fabrieksreset-backup"))).scalar_one() == 1
     await agen.aclose()
+
+
+# --- commandoregel (homepage-beheer) -------------------------------------------------------------------------------
+
+class _Maker:
+    """get_maker()() zoals in app.beheer, op de database van de test."""
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        self.agen = app.dependency_overrides[get_db]()
+        return await self.agen.__anext__()
+
+    async def __aexit__(self, *exc):
+        await self.agen.aclose()
+
+
+async def test_cli_2fa_reset_en_wachtwoord(authed, monkeypatch, capsys):
+    from app import beheer
+    monkeypatch.setattr(beheer, "get_maker", lambda: _Maker())
+    assert await beheer.gebruikers() == 0
+    assert "jonas\t2FA aan" in capsys.readouterr().out
+
+    assert await beheer.tfa_reset(None) == 0
+    agen, db = await _db()
+    u = (await db.execute(select(User))).scalar_one()
+    assert u.totp_enabled is False and u.totp_secret is None
+    assert (await db.execute(select(func.count()).select_from(Session))).scalar_one() == 0
+    await agen.aclose()
+    # De oude sessie werkt niet meer; inloggen met het wachtwoord en dan opnieuw 2FA instellen.
+    authed.cookies.clear()
+    st = (await authed.get("/api/auth/state")).json()
+    assert st["setup_required"] is False and st["mfa_ok"] is False
+    from .conftest import PASSWORD
+    r = await authed.post("/api/auth/login", json={"username": "jonas", "password": PASSWORD})
+    assert r.status_code == 200, r.text
+    assert (await authed.get("/api/auth/state")).json()["user"]["totp_enabled"] is False
+    secret = (await authed.get("/api/auth/totp/enroll")).json()["secret"]
+    r = await authed.post("/api/auth/totp/enable", json={"code": pyotp.TOTP(secret).now()})
+    assert r.status_code == 200, r.text
+
+    pw = iter(["nieuw-wachtwoord-123", "nieuw-wachtwoord-123"])
+    monkeypatch.setattr(beheer.getpass, "getpass", lambda *_: next(pw))
+    assert await beheer.wachtwoord("jonas") == 0
+    authed.cookies.clear()
+    r = await authed.post("/api/auth/login", json={"username": "jonas", "password": PASSWORD})
+    assert r.status_code == 401
+    r = await authed.post("/api/auth/login", json={"username": "jonas", "password": "nieuw-wachtwoord-123"})
+    assert r.status_code == 200 and r.json().get("code_required")
+    with pytest.raises(SystemExit):
+        await beheer.tfa_reset("bestaat-niet")
+
+
+async def test_cli_fabrieksreset(authed, monkeypatch, capsys):
+    from app import beheer
+    monkeypatch.setattr(beheer, "get_maker", lambda: _Maker())
+    await _fill(authed)
+    monkeypatch.setattr("builtins.input", lambda *_: "nee")
+    assert await beheer.fabrieksreset(False) == 1
+    agen, db = await _db()
+    assert (await db.execute(select(func.count()).select_from(Service))).scalar_one() == 1
+    await agen.aclose()
+    monkeypatch.setattr("builtins.input", lambda *_: "wis alles")
+    assert await beheer.fabrieksreset(False) == 0
+    assert f"Setup-code: {SETUP_TOKEN}" in capsys.readouterr().out
+    agen, db = await _db()
+    for model in (Service, User, Achtergrond):
+        assert (await db.execute(select(func.count()).select_from(model))).scalar_one() == 0
+    await agen.aclose()
+    assert (await authed.get("/api/auth/state")).json()["setup_required"] is True
