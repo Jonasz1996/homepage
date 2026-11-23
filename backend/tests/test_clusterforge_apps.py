@@ -234,3 +234,50 @@ async def test_kopie_toont_alleen_status():
     c = ClusterForge(CF, {"app": "plex", "cf_zelfde": "Plex"}, {"token": "cfa_test"},
                      httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     assert [f["label"] for f in await c.summary()] == ["Status"]
+
+
+async def test_koppelen_in_een_stap(authed, monkeypatch):
+    from app.routers import clusterforge as cf_router
+
+    fake = Fake()
+
+    def handler(request):
+        if request.headers["Authorization"] != "Bearer cfa_test":
+            return httpx.Response(401, json={"code": "unauthorized", "message": "token ongeldig"})
+        return fake(request)
+
+    monkeypatch.setattr(cf_router.integ_router, "clients", HttpClients(httpx.MockTransport(handler)))
+    r = await authed.post("/api/clusterforge/koppelen", json={"url": CF + "/api/", "token": "fout"})
+    assert r.status_code == 400 and "weigert dit token" in r.json()["detail"]
+    r = await authed.post("/api/clusterforge/koppelen", json={"url": CF + "/api", "token": "cfa_test"})
+    assert r.status_code == 200, r.text
+    assert r.json()["added"] == 2 and r.json()["tiles"] == 2
+    # Nog eens (nieuw token): dezelfde API, niets dubbel.
+    r = await authed.post("/api/clusterforge/koppelen", json={"url": CF, "token": "cfa_test"})
+    assert r.json()["added"] == 0 and r.json()["tiles"] == 2
+    agen, db = await _db()
+    conns = (await db.execute(select(ApiConnection))).scalars().all()
+    assert [(c.kind, c.url) for c in conns] == [("clusterforge", CF)]
+    await agen.aclose()
+
+
+async def test_api_opnieuw_gemaakt_neemt_tegels_over(client):
+    agen, db, conn = await _setup()
+    http = HttpClients(httpx.MockTransport(Fake()))
+    await clusterforge.run_sync(db, http)
+    await db.commit()
+    await db.delete(conn)
+    await db.flush()
+    for s in (await _services(db)).values():
+        if s.api_id == conn.id:
+            s.api_id = None  # zoals API-beheer bij het verwijderen
+    new = ApiConnection(name="ClusterForge", kind="clusterforge", url=CF, config={}, secrets=encrypt_json({"token": "cfa_test"}))
+    db.add(new)
+    await db.delete(await db.get(AppState, "clusterforge"))  # SQLite hergebruikt het id: zonder ETag zoals in PostgreSQL
+    await db.commit()
+    await clusterforge.run_sync(db, http)
+    await db.commit()
+    s = await _services(db)
+    assert set(s) == {"Eigen tegel", "Plex", "Homepage"}  # geen dubbels
+    assert s["Plex"].api_id == new.id and s["Plex"].config["cf_api"] == new.id
+    await agen.aclose()

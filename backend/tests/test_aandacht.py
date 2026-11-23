@@ -86,7 +86,7 @@ async def test_syslog_ontvanger_onder_aandacht(authed):
     await agen.aclose()
 
 
-async def test_kopie_buiten_de_container_voorgesteld(authed):
+async def test_kopie_buiten_de_container_voorgesteld(authed, monkeypatch):
     async def voorstel():
         r = (await authed.get("/api/attention")).json()
         return next((i for i in r["items"] + r["ignored"] if i["key"] == "offsite-voorstel"), None)
@@ -94,9 +94,8 @@ async def test_kopie_buiten_de_container_voorgesteld(authed):
     # Nergens een kopie van secret.key: oranje, met wat een back-up van de CT in PBS al doet.
     v = await voorstel()
     assert v["level"] == "warn" and v["title"] == "Back-up van het dashboard staat alleen in de container"
-    assert "secret.key" in v["text"] and "PBS" in v["text"] and "negeren" in v["text"]
-    assert str(get_settings().offsite_dir) in v["text"]
-    assert v["fix"] == {"window": "health", "tab": "homepage"}
+    assert "secret.key" in v["text"] and len(v["text"]) < 160  # kort: één zin en de knop
+    assert v["fix"] == {"window": "health", "tab": "homepage", "label": "kopie instellen"}
     # Negeren blijft tot het niveau verandert.
     r = (await authed.put("/api/attention/ignore", json={"key": v["key"], "sig": v["sig"]})).json()
     assert "offsite-voorstel" in {i["key"] for i in r["ignored"]}
@@ -104,7 +103,19 @@ async def test_kopie_buiten_de_container_voorgesteld(authed):
     assert (await authed.post("/api/security/secret-key-saved")).status_code == 200
     r = (await authed.get("/api/attention")).json()
     v = next(i for i in r["items"] if i["key"] == "offsite-voorstel")
-    assert v["level"] == "info" and "onleesbaar" not in v["text"] and r["counts"]["warn"] == 0
+    assert v["level"] == "info" and "secret.key" not in v["text"] and r["counts"]["warn"] == 0
+    # De container zelf staat op een PBS (back-updekking, op hostnaam): geen voorstel.
+    from app.monitoring import coverage, upgrade
+    monkeypatch.setattr(upgrade, "me", lambda: upgrade.Me(hostname="jbogaerthomepage"))
+    agen, db = await _db()
+    _state(db, coverage.STATE_KEY, {"clusters": [{"rows": [{"name": "jbogaerthomepage", "pbs_count": 1, "level": "ok"}]}]})
+    await db.commit()
+    await agen.aclose()
+    assert await voorstel() is None
+    agen, db = await _db()
+    await db.delete(await db.get(AppState, coverage.STATE_KEY))
+    await db.commit()
+    await agen.aclose()
     # Kopie buiten de container aan: geen voorstel meer.
     r = await authed.put("/api/health/settings", json={"cpu_warn": 85, "disk_warn": 55, "snapshot_days": 14,
                                                       "offsite": True})

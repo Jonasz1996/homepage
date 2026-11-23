@@ -619,13 +619,21 @@ Later, deel 3 (Authentik en gsm):
     Het adres, de soort of de aanmelding van een API met sleutels wijzigen vraagt ook een recente 2FA, tenzij je de
     sleutels opnieuw ingeeft. Een pad blijft altijd op het adres van de API
 - **clusterforge** (een API van soort `clusterforge`, homepage-API v2): ClusterForge herkent zelf de apps op alle
-  nodes (container, dienst, cluster) en de homepage maakt er vanzelf tegels van. Eén keer in **API-beheer** een API
-  van soort *ClusterForge* maken met het adres van ClusterForge (`http://192.168.113.153:8080`) en een API-token
-  (ClusterForge → Instellingen → Dashboard-API). Elke minuut haalt de worker de indeling op
+  nodes (container, dienst, cluster) en de homepage maakt er vanzelf tegels van. Het snelst: op het lege dashboard
+  (na de installatie of een fabrieksreset) stap 1 "Haal alles uit ClusterForge": adres van ClusterForge
+  (`http://<IP van ClusterForge>:8080` of `https://clusterforge.<jouw domein>`) en een API-token (ClusterForge →
+  Instellingen → Dashboard-API), en alle tegels staan er meteen. Of in **API-beheer** een API van soort
+  *ClusterForge* met hetzelfde adres en token. Elke minuut haalt de worker de indeling op
   (`/api/dashboard/v2/homepage/layout`, met ETag) en maakt, wijzigt en verwijdert de tegels met
   `managed_by: clusterforge` in de groepen zoals ClusterForge ze indeelt; je eigen tegels blijven onaangeroerd. Elke
-  tegel toont de velden die ClusterForge kiest (status, nodes, versie, Zabbix, CrowdSec, ...), het mini dashboard
-  waar de app draait, en de check vraagt `/apps/<app>?strict=1` (rood zodra ClusterForge de app niet gezond vindt).
+  tegel toont de velden die ClusterForge kiest (status, versie, Zabbix, CrowdSec, ...; lege velden zoals "0/0" niet)
+  en het mini dashboard waar de app draait. Heeft de tegel een link, dan kijkt de homepage zelf of dat doel antwoordt
+  (http-check: een dood doel staat rood met "doel antwoordt niet", ook als ClusterForge de app gezond vindt); zonder
+  link vraagt de check `/apps/<app>?strict=1`. De homepage zet zelf recht: een naam als "302 Found" wordt de naam uit
+  het adres, "X (X)" wordt X, twee tegels met hetzelfde publieke adres (via het cluster en via NPM) worden één tegel,
+  en een tegel in "overig" krijgt een groep die bij de app past (Media, Infrastructuur, Domotica, Productiviteit, AI).
+  Proxmox-tegels hangen vanzelf aan een Proxmox-API uit API-beheer met hun eigen node (gevonden op IP, naam of nummer:
+  proxmox50 ↔ pve50); zonder Proxmox-API staan de cijfers van een app maar op één tegel, de andere tonen hun status.
   Bijsturen (verbergen, hernoemen, groep, icoon, velden) doe je in ClusterForge → Homepage-apps. `"sync": false` in
   de API zet het automatisch aanmaken uit; een tegel van type clusterforge met `app` werkt dan nog altijd
 - **zabbix** (een tegel of API van soort `zabbix`): elke minuut haalt de homepage de hosts en open problemen uit
@@ -639,8 +647,8 @@ Later, deel 3 (Authentik en gsm):
   leesrechten op alle hostgroepen) en als adres de webinterface (`https://zabbix.jbogaert.be`, zonder
   `/api_jsonrpc.php`). Gebruikt alleen lezen: host.get, trigger.get, item.get en trend.get
 - **clusterforge** (een tegel of API van soort `clusterforge`): de HA-clusters uit ClusterForge, via zijn
-  alleen-lezen dashboard-API (`/api/dashboard/v1`). Adres: rechtstreeks op IP, bv. `http://192.168.113.153:8080`
-  (zonder `/api`); geheim `token`: een API-token `cfa_…` uit ClusterForge (**Instellingen → Dashboard-API (homepage) →
+  alleen-lezen dashboard-API (`/api/dashboard/v1`). Adres: dat van ClusterForge zonder `/api`, bv.
+  `http://<IP van ClusterForge>:8080`; geheim `token`: een API-token `cfa_…` uit ClusterForge (**Instellingen → Dashboard-API (homepage) →
   Token maken**, als beheerder; niets aangevinkt = alle clusters, ook nieuwe). Eén tegel toont:
   - zonder instelling `cluster`: alle clusters (gezond/totaal, nodes, incidenten, updates en het SOC-niveau). Het mini
     dashboard heeft een tabel met per cluster status, health score, nodes, VIP → node, database, incidenten, updates,
@@ -772,7 +780,9 @@ Later, deel 3 (Authentik en gsm):
   alleen de tegels als YAML. Bevestigen met de zin `WIS ALLES`; alleen thuis, ook met een echte login nooit van
   buitenaf, en met aanmelden aan ook een verse 2FA. Blijft staan: `/etc/homepage` (secret.key, setup-code), de
   dagelijkse back-ups en de kopie buiten de container, en alles op je machines zelf (rsyslog, cronjobs,
-  authorized_keys). De setup-code krijgt de browser die de reset deed meteen mee
+  authorized_keys). De setup-code krijgt de browser die de reset deed meteen mee. Daarna zet **API-beheer → ↺ uit
+  back-up** (of stap 3 op het lege dashboard) al je API's met hun sleutels en calls terug uit een dagelijkse back-up
+  of de gedownloade `.dump` (alleen de API's; met dezelfde secret.key, anders komen ze zonder sleutels)
 - **homepage-beheer** (als root in de container, voor als je niet meer binnen raakt): `homepage-beheer 2fa-reset`
   (2FA-app kwijt: 2FA uit en alle sessies weg, daarna inloggen met je wachtwoord en een nieuwe QR-code scannen),
   `homepage-beheer wachtwoord` (nieuw wachtwoord), `homepage-beheer fabrieksreset` (zoals hierboven, vraagt `WIS

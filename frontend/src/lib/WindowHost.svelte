@@ -20,7 +20,7 @@
       case 'network':
         return { initialTab: m.tab, initialQuery: m.q, onclose: close, onchanged: (d) => (dash.net = d) }
       case 'apis':
-        return { onclose: () => { close(); reload(); dash.refresh(['widgets']) } }
+        return { start: m.tab, onclose: () => { close(); reload(); dash.refresh(['widgets']) } }
       case 'webhooks':
         return { services: dash.services, onclose: close }
       case 'planned':

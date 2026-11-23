@@ -1,11 +1,12 @@
 """ClusterForge beheert het dashboard: aan- en uitzetten, kiezen op welke pagina, en nu synchroniseren."""
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import clusterforge_sync as cfs
+from .. import outside
 from ..db import ensure_state, get_db
 from ..deps import audit, current_user
 from ..models import Page, Service, User
@@ -81,3 +82,63 @@ async def sync_now(data: SyncIn, request: Request, user: User = Depends(current_
     await audit(db, request, user, "clusterforge_sync", **{k: v for k, v in result.items() if k != "error"})
     await db.commit()
     return result
+
+
+# --- in één stap koppelen (welkomstscherm) -------------------------------------------------------------------
+
+class KoppelIn(BaseModel):
+    url: str = Field(min_length=8, max_length=500)
+    token: str = Field(min_length=4, max_length=500)
+
+
+def _base(url: str) -> str:
+    url = url.strip().rstrip("/")
+    for tail in ("/api/dashboard/v2", "/api/dashboard/v1", "/api"):
+        if url.lower().endswith(tail):
+            url = url[: -len(tail)]
+    if not url.lower().startswith(("http://", "https://")) or " " in url:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Een adres met http:// of https://, bv. https://clusterforge.voorbeeld.be")
+    return url
+
+
+@router.post("/koppelen", dependencies=[outside.guard("acties", fresh=True)])
+async def koppelen(data: KoppelIn, request: Request, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Adres + token van ClusterForge: de API maken (of het token van de bestaande vervangen) en meteen alle tegels
+    ophalen die ClusterForge publiceert. Daarna houdt de worker ze elke minuut bij."""
+    from ..integrations import IntegrationError
+    from ..layout import record_revision
+    from ..models import ApiConnection
+    from ..monitoring import clusterforge as cfapps
+    from ..security import encrypt_json
+
+    url = _base(data.url)
+    token = data.token.strip()
+    probe = ApiConnection(name="ClusterForge", kind="clusterforge", url=url, config={}, secrets=encrypt_json({"token": token}))
+    try:
+        layout, _ = await cfapps.fetch_layout(probe, integ_router.clients, None)
+    except IntegrationError as e:
+        msg = str(e)
+        if "401" in msg or "403" in msg:
+            msg = "ClusterForge weigert dit token: maak een nieuw in ClusterForge (Instellingen → Dashboard-API)."
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, msg) from None
+    except ValueError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Dat adres is geen ClusterForge (geen JSON)") from None
+    conns = (await db.execute(select(ApiConnection).where(ApiConnection.kind == "clusterforge"))).scalars().all()
+    conn = next((c for c in conns if (c.url or "").rstrip("/").lower() == url.lower()), None)
+    if conn is None:
+        conn = ApiConnection(name="ClusterForge", category="Monitoring", kind="clusterforge", template="clusterforge",
+                             url=url, config={})
+        db.add(conn)
+    conn.secrets = probe.secrets
+    await db.flush()
+    pve = await cfapps.proxmox_nodes(db, integ_router.clients)
+    stats = await cfapps.apply(db, conn, layout or {}, pve)
+    # De worker past de indeling bij zijn volgende ronde opnieuw toe (zonder ETag): dan klopt ook zijn toestand.
+    st = await ensure_state(db, cfapps.STATE_KEY)
+    st.value = {**(st.value or {}), str(conn.id): {"error": None}}
+    tiles = sum(1 for s in (await db.execute(select(Service))).scalars().all() if cfapps.is_managed(s, conn.id))
+    await audit(db, request, user, "clusterforge_koppelen", url=url, **stats)
+    if any(stats.values()):
+        await record_revision(db, user, f"ClusterForge gekoppeld: {stats['added']} tegels nieuw")
+    await db.commit()
+    return {**stats, "tiles": tiles, "api_id": conn.id}

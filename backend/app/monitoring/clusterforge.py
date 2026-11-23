@@ -322,7 +322,13 @@ async def apply(db: AsyncSession, conn: ApiConnection, layout: dict,
     """Maakt, wijzigt en verwijdert de beheerde tegels van deze verbinding. Geeft de aantallen terug."""
     services = (await db.execute(select(Service))).scalars().all()
     groups = (await db.execute(select(Group))).scalars().all()
-    by_key = {(s.config or {}).get("cf_key"): s for s in services if is_managed(s, conn.id)}
+    # Ook tegels van een ClusterForge-API die niet meer bestaat (verwijderd en opnieuw gemaakt, of teruggezet uit een
+    # back-up): die neemt deze API over in plaats van er dubbels naast te zetten.
+    alive = set((await db.execute(select(ApiConnection.id).where(ApiConnection.kind == "clusterforge"))).scalars())
+    by_key = {}
+    for s in services:
+        if is_managed(s) and (is_managed(s, conn.id) or (s.config or {}).get("cf_api", s.api_id) not in alive):
+            by_key.setdefault((s.config or {}).get("cf_key"), s)
     group_by_name = {g.name.lower(): g for g in groups}
     page = (await db.execute(select(Page).order_by(Page.position, Page.id).limit(1))).scalar_one_or_none()
     if page is None:

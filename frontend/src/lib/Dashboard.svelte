@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte'
-  import { api } from './api.js'
+  import { api, withReauth } from './api.js'
   import { boom } from './fx.js'
   import { CHANGELOG } from './changelog.js'
   import { dash } from './dash.svelte.js'
@@ -19,6 +19,23 @@
   // vensters er zijn in windows.js.
   // zonder: zonder login binnen (geen 2FA-code nodig); sessie: er is ook een echte login op dit toestel.
   let { user, zonder = false, sessie = true, onlogout } = $props()
+
+  // Welkomstscherm: ClusterForge in één stap koppelen. Het adres alvast raden uit dat van de homepage zelf
+  // (homepage.voorbeeld.be → https://clusterforge.voorbeeld.be); op een IP blijft het leeg.
+  const guessCf = () => {
+    const h = location.hostname
+    return /^[\d.]+$|^\[|^localhost$/.test(h) || !h.includes('.') ? '' : `https://clusterforge.${h.split('.').slice(1).join('.')}`
+  }
+  let cf = $state({ url: guessCf(), token: '', busy: false, error: '' })
+  async function koppelCf() {
+    cf.busy = true; cf.error = ''
+    try {
+      const r = await withReauth(() => api('/clusterforge/koppelen', { method: 'POST', body: { url: cf.url.trim(), token: cf.token.trim() } }))
+      cf.token = ''
+      await dash.loadLayout(); dash.refresh(['widgets'])
+      if (!r.tiles) cf.error = 'Gekoppeld, maar ClusterForge publiceert nog geen diensten.'
+    } catch (e) { cf.error = e.message } finally { cf.busy = false }
+  }
 
   let query = $state('')
   let now = $state(new Date())
@@ -154,7 +171,7 @@
         <p class="hint">
           {date}
           {#if zonder}{' · '}<button class="zl" onclick={() => dash.open('security', { tab: 'outside' })}
-            title="Aanmelden staat uit (⚿ → van buitenaf): je bent {user.username}, zonder {sessie ? '2FA-code' : 'login of 2FA-code'}">zonder login</button>{/if}
+            title="Op je LAN kan je alles zonder {sessie ? '2FA-code' : 'login'}. Van buitenaf staan terminal, updates, acties en downloads uit. Aanpassen: ⚿ → van buitenaf.">op het LAN zonder login · van buitenaf: uit</button>{/if}
           {#if summary.up + summary.down > 0}
             {' · '}<span class="ok">{summary.up} up</span>{#if summary.down}{' · '}<button class="down" onclick={() => (dash.problemsOnly = true)}
               title="Alleen de tegels met een probleem tonen, van alle pagina's">{summary.down} down</button>{/if}{#if summary.maint}{' · '}<span class="maint">{summary.maint} in onderhoud</span>{/if}{#if summary.paused}{' · '}<span class="maint">{summary.paused} gepauzeerd</span>{/if}
@@ -193,13 +210,22 @@
         <h3>Nog leeg: zo begin je</h3>
         <p class="hint">Na de installatie of een fabrieksreset. Elke stap kan je overslaan en later doen via het menu.</p>
         <ol class="steps">
-          <li><b>Tegels</b>: importeer je <code>services.yaml</code> van homepage.dev of een eigen export, of begin met
-            een lege pagina.
-            <div class="row"><button class="btn" onclick={() => dash.open('import')}>Importeren</button>
+          <li><b>Haal alles uit ClusterForge</b>: elke dienst die ClusterForge kent wordt een tegel, en blijft vanzelf
+            bijgewerkt. Eén sleutel: in ClusterForge Instellingen → Dashboard-API (homepage) → Token maken.
+            <div class="cf">
+              <input bind:value={cf.url} placeholder="http://<IP van ClusterForge>:8080" aria-label="Adres van ClusterForge" />
+              <input bind:value={cf.token} type="password" placeholder="token cfa_…" aria-label="Token van ClusterForge" autocomplete="new-password" />
+              <button class="btn" onclick={koppelCf} disabled={cf.busy || !cf.url.trim() || !cf.token.trim()}>{cf.busy ? 'Bezig…' : 'Ophalen'}</button>
+            </div>
+            {#if cf.error}<p class="e">{cf.error}</p>{/if}</li>
+          <li><b>Andere tegels</b>: importeer je <code>services.yaml</code> van homepage.dev of een eigen export, of begin
+            met een lege pagina.
+            <div class="row"><button class="btn alt" onclick={() => dash.open('import')}>Importeren</button>
               <button class="btn alt" onclick={newPage}>Lege pagina</button></div></li>
-          <li><b>API's</b>: Proxmox, PBS, NPM, AdGuard, Zabbix, ClusterForge, ... voor de mini dashboards en het
-            ophalen van je machines.
-            <div class="row"><button class="btn alt" onclick={() => dash.open('apis')}>API-beheer</button></div></li>
+          <li><b>API's</b>: had je een back-up van voor de reset? Dan komen al je API's met hun sleutels in één keer
+            terug. Anders stel je ze één voor één in (Proxmox, PBS, NPM, Zabbix, ...).
+            <div class="row"><button class="btn alt" onclick={() => dash.open('apis', { tab: 'herstel' })}>Uit back-up</button>
+              <button class="btn alt" onclick={() => dash.open('apis')}>API-beheer</button></div></li>
           <li><b>Achtergrond</b>: een eigen foto, met of zonder de effecten erboven.
             <div class="row"><button class="btn alt" onclick={() => dash.open('weergave')}>Weergave</button></div></li>
           <li><b>De rest</b>: SSH-login, meldingen op je gsm, van buitenaf, back-ups. De checklist toont wat nog
@@ -242,6 +268,9 @@
   :global(.empty) { margin-top: 18px }
   .steps { margin: 6px 0 0; padding-left: 20px; display: grid; gap: 14px; font-size: 13.5px; line-height: 1.6 }
   .steps .row { margin-top: 6px }
+  .cf { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; max-width: 760px }
+  .cf input { flex: 1 1 220px; min-width: 0 }
+  .e { color: var(--err); font-size: 12.5px; margin: 6px 0 0 }
   @media (max-width: 560px) {
     .head { padding: 18px 16px 12px }
     .offline { margin: 0 16px 12px }

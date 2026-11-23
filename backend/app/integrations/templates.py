@@ -56,8 +56,9 @@ TEMPLATES: dict[str, dict] = {
                "hint": "Adres: de webinterface, bv. https://zabbix.jbogaert.be. Token: Gebruikers → API-tokens."},
     "clusterforge": {"label": "ClusterForge", "category": "Monitoring", "kind": "clusterforge",
                      "match": ["clusterforge"],
-                     "hint": "Adres: rechtstreeks op IP, bv. http://192.168.113.153:8080 (zonder /api). Token: in "
-                             "ClusterForge bij Instellingen → Dashboard-API (homepage) → Token maken (cfa_…)."},
+                     "hint": "Adres: het adres waarop je ClusterForge opent (zonder /api), bv. https://clusterforge.<jouw domein> "
+                             "of http://<IP van ClusterForge>:8080. Token: in ClusterForge bij Instellingen → "
+                             "Dashboard-API (homepage) → Token maken (cfa_…)."},
     "vaultx": {"label": "VaultX", "category": "Overig", "kind": "vaultx", "match": ["vaultx"],
                "hint": "Adres: rechtstreeks op IP, bv. http://192.168.0.50 (Debian-container, poort 80) of :8080 met Docker, "
                        "zonder /api. Sleutel: in VaultX je account → API-sleutels voor je dashboard → Sleutel aanmaken (vxk_…)."},

@@ -170,8 +170,10 @@ async def test_backupdekking(authed):
 
     att = (await authed.get("/api/attention")).json()["items"]
     cov = {i["key"]: i for i in att if i["key"].startswith("cov:")}
-    assert set(cov) == {"cov:102", "cov:104", "cov:103", "cov:single"}
-    assert cov["cov:102"]["title"] == "test (CT 102) zit in geen enkele back-upjob, oude back-up blijft staan"
+    assert set(cov) == {"cov:nojob", "cov:104", "cov:single"}
+    # Wie in geen enkele back-upjob zit: samen in één punt (na een verse installatie waren dat er tientallen).
+    assert cov["cov:nojob"]["title"] == "2 CT's zonder back-up" and cov["cov:nojob"]["level"] == "err"
+    assert "test" in cov["cov:nojob"]["text"]
     assert cov["cov:single"]["title"] == "1 VM/CT maar op één PBS" and cov["cov:single"]["fix"]["tab"] == "backups"
     assert (await authed.get("/api/health/summary")).json()["backups"]["err"] == 2
 

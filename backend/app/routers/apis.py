@@ -270,7 +270,9 @@ async def list_apis(user: User = Depends(current_user), db: AsyncSession = Depen
             cats.append(a.category)
     kinds = [{"name": c.name, "label": c.label, "config": c.config_help, "secrets": c.secret_help, "prefix": c.call_prefix}
              for c in REGISTRY.values() if c.name not in ("json", "customapi")]
-    return {"apis": [_conn_out(a, tiles) for a in conns], "categories": cats, "kinds": kinds,
+    # Wat op de startpagina staat (niet te verwarren met de categorieën van de API's hiernaast).
+    groups = len({s.group_id for s in tiles if s.group_id})
+    return {"apis": [_conn_out(a, tiles) for a in conns], "categories": cats, "kinds": kinds, "groups": groups,
             "templates": tpl.public(), "formats": callmod.FORMATS,
             "tiles": [{"id": s.id, "name": s.name, "url": s.url, "type": s.type, "api_id": s.api_id,
                        "own_keys": bool(s.secrets and decrypt_json(s.secrets))} for s in tiles]}
@@ -514,3 +516,72 @@ async def adopt(data: AdoptIn, request: Request, user: User = Depends(current_us
         await record_revision(db, user, f"{moved} tegels naar API-beheer verhuisd")
     await db.commit()
     return {"moved": moved, "apis": len(by_key)}
+
+
+# --- terugzetten uit een back-up (na een fabrieksreset) -------------------------------------------------------
+
+MAX_DUMP = 2 * 1024 ** 3
+
+
+class HerstelIn(BaseModel):
+    name: str = Field(max_length=200)
+
+
+def _dumps() -> list[dict]:
+    from ..config import get_settings
+    from ..health.selfcheck import list_dumps
+
+    return list_dumps(get_settings().backup_dir)[:10]
+
+
+async def _herstel(db: AsyncSession, request: Request, user: User, path, bron: str) -> dict:
+    from .. import apiherstel
+
+    try:
+        tables = await apiherstel.read_dump(path)
+    except apiherstel.HerstelFout as e:
+        raise HTTPException(422, str(e)) from None
+    result = await apiherstel.restore(db, tables)
+    await audit(db, request, user, "api_herstel", bron=bron, added=len(result["added"]), no_keys=len(result["no_keys"]))
+    await db.commit()
+    return result
+
+
+@router.get("/herstel")
+async def herstel_list(user: User = Depends(current_user)):
+    """De back-ups op de container waaruit API's terug kunnen (nieuwste eerst)."""
+    from .. import apiherstel
+
+    return {"dumps": _dumps(), "pg_restore": apiherstel.pg_restore_exe() is not None}
+
+
+@router.post("/herstel", dependencies=[FETCHES_NEW])
+async def herstel(data: HerstelIn, request: Request, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    from ..config import get_settings
+
+    if data.name not in {d["name"] for d in _dumps()}:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Die back-up staat niet (meer) op de container")
+    return await _herstel(db, request, user, get_settings().backup_dir / data.name, data.name)
+
+
+@router.post("/herstel/upload", dependencies=[FETCHES_NEW])
+async def herstel_upload(request: Request, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Een back-up die je downloadde (homepage-…dump), als ruwe body."""
+    import tempfile
+    from pathlib import Path
+
+    fd, name = tempfile.mkstemp(prefix="homepage-herstel-", suffix=".dump")
+    path = Path(name)
+    try:
+        size = 0
+        with open(fd, "wb") as f:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > MAX_DUMP:
+                    raise HTTPException(413, "Te groot (meer dan 2 GB)")
+                f.write(chunk)
+        if not size:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Leeg bestand")
+        return await _herstel(db, request, user, path, "upload")
+    finally:
+        path.unlink(missing_ok=True)
