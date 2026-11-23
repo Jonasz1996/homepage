@@ -8,7 +8,8 @@
 
   // API-beheer: alle API's per categorie, met hun adres, aanmelding, sleutels en eigen calls, en welke tegels ze
   // gebruiken. Sjablonen voor bekende apps, en het in één keer instellen van veel tegels.
-  let { onclose, onchanged } = $props()
+  // start = 'herstel': meteen "API's uit een back-up" (vanuit het welkomstscherm).
+  let { onclose, onchanged, start = null } = $props()
 
   let data = $state.raw(null)
   let error = $state('')
@@ -32,7 +33,26 @@
   async function loadSuggest() {
     try { sug = await api('/apis/suggest') } catch (e) { error = e.message }
   }
-  onMount(() => { load(); loadSuggest() })
+  onMount(() => { load(); loadSuggest(); if (start === 'herstel') openHerstel() })
+
+  // --- API's terugzetten uit een back-up (na een fabrieksreset) -------------------------
+  let herstel = $state(null) // {dumps, pg_restore}
+  let herstelRes = $state(null)
+  async function openHerstel() {
+    view = 'herstel'; herstelRes = null; error = ''
+    try { herstel = await api('/apis/herstel') } catch (e) { error = e.message }
+  }
+  async function herstelDo(body) {
+    busy = true; error = ''; herstelRes = null
+    try {
+      herstelRes = await withReauth(() => body instanceof File
+        ? api('/apis/herstel/upload', { method: 'POST', body })
+        : api('/apis/herstel', { method: 'POST', body: { name: body } }))
+      await load(); onchanged?.()
+    } catch (e) { error = e.message } finally { busy = false }
+  }
+  const kb = (n) => n > 1e6 ? `${(n / 1e6).toFixed(0)} MB` : `${Math.max(1, Math.round(n / 1e3))} kB`
+  const when = (s) => new Date(s).toLocaleString('nl-BE', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
 
   let sel = $derived(data?.apis.find((a) => a.id === selId) || null)
   let kinds = $derived(Object.fromEntries((data?.kinds || []).map((k) => [k.name, k])))
@@ -234,10 +254,14 @@
       <div class="sact">
         <button class="mini ok" onclick={startNew}>+ API</button>
         <button class="mini" class:hot={sugCount} onclick={openSuggest} title="Tegels herkennen en in één keer een API geven">⚡ tegels herkennen{#if sugCount}<b class="n">{sugCount}</b>{/if}</button>
+        <button class="mini" onclick={openHerstel} title="Na een fabrieksreset: je API's met hun sleutels terug uit een back-up">↺ uit back-up</button>
       </div>
       <input class="srch" bind:value={q} placeholder="zoek API of tegel" aria-label="Zoek API" />
       {#if data}
-        <p class="stat">{data.apis.length} API's · {withApi} van {data.tiles.length} tegels gekoppeld</p>
+        <p class="stat">Startpagina: {data.tiles.length} tegels in {data.groups} groep{data.groups === 1 ? '' : 'en'} ·
+          <button class="lnk" onclick={onclose}>naar de startpagina</button></p>
+        <p class="stat">{data.apis.length} API's · {withApi} tegels gebruiken er een</p>
+        {#if byCat.length}<p class="lbl cats">API's per categorie</p>{/if}
         {#each byCat as [cat, list] (cat)}
           <button class="cat" onclick={() => { const s = new Set(closedCats); s.has(cat) ? s.delete(cat) : s.add(cat); closedCats = s }}>
             {closedCats.has(cat) ? '▸' : '▾'} {cat} <small>{list.length}</small></button>
@@ -267,9 +291,32 @@
             <li><b>⚡ tegels herkennen</b>: tegels zoals Radarr, Jellyfin of Immich krijgen in één keer een API uit een sjabloon; je vult alleen de sleutel in.
               Tegels die hun sleutels nog zelf hebben (Proxmox, AdGuard, ...) verhuis je hier in één klik.</li>
             <li><b>+ API</b>: kies een sjabloon of begin leeg met een eigen API.</li>
+            <li><b>↺ uit back-up</b>: na een fabrieksreset al je API's met hun sleutels in één keer terug.</li>
             <li><b>calls</b>: per API eigen endpoints toevoegen. Druk op ▶ probeer en klik in het antwoord op wat je op de tegel wil zien.</li>
           </ul>
         </div>
+
+      {:else if view === 'herstel'}
+        <h3>API's uit een back-up</h3>
+        <p class="hint">Na een fabrieksreset: je API's komen terug met hun sleutels en calls, zonder opnieuw te plakken.
+          API's die er al zijn (zelfde soort en adres) blijven zoals ze zijn.</p>
+        {#if herstelRes}
+          <p class="okm">{herstelRes.added.length ? `${herstelRes.added.length} API${herstelRes.added.length === 1 ? '' : "'s"} terug: ${herstelRes.added.join(', ')}.` : 'Niets nieuws: alles stond er al.'}</p>
+          {#if herstelRes.no_keys.length}<p class="e">Zonder sleutels (back-up van een andere installatie): {herstelRes.no_keys.join(', ')}. Plak die opnieuw.</p>{/if}
+        {/if}
+        {#if herstel && !herstel.pg_restore}<p class="e">pg_restore staat niet op deze container.</p>{/if}
+        {#if herstel?.dumps.length}
+          <p class="lbl">Back-ups op de container</p>
+          {#each herstel.dumps as d (d.name)}
+            <div class="row hr"><span class="in">{when(d.at)} <small>{d.name} · {kb(d.size)}</small></span>
+              <button class="mini ok" disabled={busy} onclick={() => herstelDo(d.name)}>terugzetten</button></div>
+          {/each}
+        {:else if herstel}
+          <p class="hint">Geen back-ups op de container gevonden.</p>
+        {/if}
+        <p class="lbl">Of een back-up die je downloadde (homepage-….dump)</p>
+        <input type="file" accept=".dump" disabled={busy} onchange={(e) => { const f = e.currentTarget.files?.[0]; if (f) herstelDo(f); e.currentTarget.value = '' }} />
+        {#if busy}<p class="hint">Bezig…</p>{/if}
 
       {:else if view === 'new'}
         <h3>Nieuwe API</h3>
@@ -513,6 +560,12 @@
   .hint { color: var(--muted); font-size: 12px; margin: 4px 0 }
   .e { color: var(--err); font-size: 13px }
   .okm { color: var(--ok); font-size: 12.5px }
+  .lnk { all: unset; cursor: pointer; color: var(--text); text-decoration: underline dotted; text-underline-offset: 3px }
+  .lnk:hover, .lnk:focus-visible { color: var(--text-h) }
+  .cats { margin: 6px 0 0 }
+  .hr { display: flex; gap: 10px; align-items: center; justify-content: space-between; max-width: 640px; padding: 4px 0;
+        border-bottom: 1px solid var(--line) }
+  .hr small { color: var(--dim) }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; max-width: 760px }
   .full { grid-column: 1 / -1 }
   .cb { display: flex; align-items: flex-end; padding-bottom: 8px }

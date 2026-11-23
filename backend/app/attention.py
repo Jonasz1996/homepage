@@ -219,9 +219,24 @@ async def noodplan_items(db: AsyncSession, now: datetime, ctx: dict) -> list[dic
                  {"window": "noodplan"}, sig=",".join(k for k, _ in probs))]
 
 
+async def self_in_pbs(db: AsyncSession) -> bool:
+    """Staat de container van het dashboard zelf (op hostnaam) op minstens één PBS? Uit de back-updekking."""
+    from .monitoring.upgrade import me
+
+    host = me().hostname
+    if not host:
+        return False
+    for c in (await _state(db, coverage.STATE_KEY)).get("clusters") or []:
+        for r in c.get("rows") or []:
+            if str(r.get("name") or "").split(".")[0].lower() == host and int(r.get("pbs_count") or 0) >= 1:
+                return True
+    return False
+
+
 async def backup_coverage(db: AsyncSession) -> list[dict]:
-    """Per VM/CT zonder back-up of buiten elke job een punt; wie maar op één PBS staat, samen in één punt."""
-    out, single = [], []
+    """Per VM/CT met een echt probleem een punt; wie in geen enkele back-upjob zit, en wie maar op één PBS staat,
+    elk samen in één punt (na een verse installatie waren dat er tientallen)."""
+    out, single, nojob = [], [], []
     fix = {"window": "health", "tab": "backups"}
     for c in (await _state(db, coverage.STATE_KEY)).get("clusters") or []:
         for r in c["rows"]:
@@ -230,10 +245,24 @@ async def backup_coverage(db: AsyncSession) -> list[dict]:
             if r["level"] == "warn" and r["pbs_count"] == 1 and r["jobs"]:
                 single.append(r)
                 continue
+            if not r["jobs"]:
+                nojob.append(r)
+                continue
             what = f"{r['name']} ({r['type'].upper()} {r['vmid']})"
             out.append(item(f"cov:{r['vmid']}", r["level"], "back-ups", f"{what} {r['why']}",
                             "Staat uit, daarom niet rood." if r["stopped"] and r["level"] == "warn" else "", fix,
                             sig=r["why"]))
+    if nojob:
+        level = "err" if any(r["level"] == "err" for r in nojob) else "warn"
+        kinds = {"ct": "CT", "vm": "VM"}
+        count: dict[str, int] = {}
+        for r in nojob:
+            k = kinds.get(str(r["type"]).lower(), str(r["type"]).upper())
+            count[k] = count.get(k, 0) + 1
+        what = " en ".join(f"{n} {k}" + ("'s" if n != 1 else "") for k, n in sorted(count.items()))
+        names = ", ".join(r["name"] for r in nojob[:6]) + (" …" if len(nojob) > 6 else "")
+        out.append(item("cov:nojob", level, "back-ups", f"{what} zonder back-up", f"In geen enkele back-upjob: {names}.",
+                        fix, sig=str(len(nojob))))
     if single:
         where = sorted({r["copies"][0]["pbs"] for r in single})
         what = "VM/CT's" if len(single) != 1 else "VM/CT"
@@ -409,18 +438,14 @@ async def homepage(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
     if off.get("enabled") and off.get("key_stale"):
         out.append(item("offsite-sleutel", "err", "homepage", "De sleutel in de kopie buiten de container is verouderd",
                         sc.KEY_STALE, fix))
-    if not (await hw.settings(db)).get("offsite"):
-        # Geen kopie buiten de container: een voorstel. Oranje als er ook nergens een kopie van secret.key is (dan zijn
-        # de geheimen in elke back-up onleesbaar als de container wegvalt), anders ter info.
+    if not (await hw.settings(db)).get("offsite") and not await self_in_pbs(db):
+        # Geen kopie buiten de container en de container zelf staat op geen enkele PBS: één zin en de knop. Oranje
+        # als er ook nergens een kopie van secret.key is (dan zijn de geheimen in elke back-up onleesbaar).
         level = "info" if (await security.check_secret_key(db))["level"] == "ok" else "warn"
         out.append(item("offsite-voorstel", level, "homepage", "Back-up van het dashboard staat alleen in de container",
-                        "Valt de container of zijn node weg, dan zijn de back-ups en secret.key mee weg"
-                        + (", en zonder secret.key zijn de opgeslagen wachtwoorden en API-sleutels onleesbaar"
-                           if level == "warn" else "")
-                        + f". Koppel een NAS-share, PBS-opslag of USB-schijf op {get_settings().offsite_dir} en zet "
-                        "de kopie buiten de container aan, met een wachtzin voor de sleutel. Zit deze CT al in een "
-                        "back-up van PBS, dan staan de dumps en secret.key daar ook in en mag je dit negeren.", fix,
-                        sig=level))
+                        "Zet een kopie op je NAS, PBS-opslag of USB-schijf: anders is ze mee weg met de container."
+                        + (" Bewaar ook secret.key ergens anders." if level == "warn" else ""),
+                        {"window": "health", "tab": "homepage", "label": "kopie instellen"}, sig=level))
     disk = sc.disk_alert(s)
     if disk:
         pct = max((d.get("pct") or 0 for d in s.get("disks") or []), default=0)

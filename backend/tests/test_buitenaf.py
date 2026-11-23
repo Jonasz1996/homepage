@@ -84,7 +84,8 @@ def test_welke_routes_van_buitenaf_uit_staan():
         # tegel met integratie die een ander adres krijgt (layout, import) controleert dat zelf: outside.require.
         "POST /api/apis": "acties", "PATCH /api/apis/{api_id}": "acties", "POST /api/apis/{api_id}/calls": "acties",
         "PATCH /api/apis/calls/{call_id}": "acties", "POST /api/apis/{api_id}/try": "acties",
-        "POST /api/apis/bulk": "acties",
+        "POST /api/apis/bulk": "acties", "POST /api/apis/herstel": "acties", "POST /api/apis/herstel/upload": "acties",
+        "POST /api/clusterforge/koppelen": "acties",
         "GET /api/configs/versions/{vid}/download": "downloads", "GET /api/diagnose": "downloads",
         "POST /api/diagnose": "downloads",
         "GET /api/noodplan/document": "downloads",

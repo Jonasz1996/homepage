@@ -100,7 +100,7 @@
             {#if i.text}<p>{i.text}</p>{/if}
           </div>
           <div class="btns">
-            {#if i.fix}<button class="mini" onclick={() => onfix(i.fix)}>{FIX_LABEL[i.fix.window] || 'openen'}</button>{/if}
+            {#if i.fix}<button class="mini" onclick={() => onfix(i.fix)}>{i.fix.label || FIX_LABEL[i.fix.window] || 'openen'}</button>{/if}
             <button class="mini dim" disabled={busy === i.key} onclick={() => ignore(i)} title="Verbergen tot het verandert of opgelost is">negeren</button>
           </div>
         </div>
@@ -138,7 +138,7 @@
             <p>{r.text}</p>
             {#if r.todo.length}<ul>{#each r.todo as t}<li>{t}</li>{/each}</ul>{/if}
           </div>
-          {#if r.fix}<button class="mini" onclick={() => onfix(r.fix)}>{FIX_LABEL[r.fix.window] || 'openen'}</button>{/if}
+          {#if r.fix}<button class="mini" onclick={() => onfix(r.fix)}>{r.fix.label || FIX_LABEL[r.fix.window] || 'openen'}</button>{/if}
         </div>
       {/each}
     {/each}

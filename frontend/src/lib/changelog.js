@@ -3,6 +3,20 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 50,
+    datum: '2026-11-23',
+    titel: 'Na een fabrieksreset: sneller terug, met eerlijkere tegels',
+    items: [
+      'Een tegel van een dood doel staat nu rood met "doel antwoordt niet", ook als ClusterForge de app gezond vindt: de homepage kijkt zelf naar de link van de tegel. Wat ClusterForge ervan vindt, zie je nog in de cijfers.',
+      'Geen namen meer als "302 Found": dan wordt het de naam uit het adres. "Authentik (Authentik)" heet gewoon Authentik, en twee tegels met hetzelfde adres (via het cluster en via NPM) worden één tegel.',
+      'Tegels zonder groep belanden niet meer in "overig": Jellyfin gaat naar Media, Gitea naar Infrastructuur, enzovoort. Alleen wat nergens past blijft in Overig.',
+      'Proxmox: heb je een Proxmox-API, dan hangt elke Proxmox-tegel daar vanzelf aan, met de cijfers van zijn eigen node. Zonder Proxmox-API staan de clustercijfers maar op één tegel. Lege velden zoals "Nodes 0/0" zijn weg.',
+      'Na een fabrieksreset: het lege dashboard begint met "Haal alles uit ClusterForge" (adres en één token, en alle tegels staan er meteen), en API-beheer → ↺ uit back-up zet al je API\'s met hun sleutels terug uit een back-up van voor de reset.',
+      'Rustiger: CT\'s en VM\'s zonder back-upjob staan samen in één punt onder Aandacht, de melding over de back-up van het dashboard is één zin met de knop "kopie instellen" (en verdwijnt als de container zelf al op een PBS staat), de kopregel zegt "op het LAN zonder login · van buitenaf: uit", en API-beheer toont hoeveel tegels en groepen er op je startpagina staan.',
+    ],
+    instellen: [],
+  },
+  {
     nr: 49,
     datum: '2026-11-23',
     titel: 'Eigen achtergrond en fabrieksreset',
