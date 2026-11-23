@@ -281,3 +281,65 @@ async def test_api_opnieuw_gemaakt_neemt_tegels_over(client):
     assert set(s) == {"Eigen tegel", "Plex", "Homepage"}  # geen dubbels
     assert s["Plex"].api_id == new.id and s["Plex"].config["cf_api"] == new.id
     await agen.aclose()
+
+
+def test_docker_dubbel_op_ip_valt_weg():
+    lay = layout(("Media", tile("plex@docker", "plex", "Plex", "plex.png", "http://192.168.0.151:32400")),
+                 ("Media", tile("plex@npm", "plex", "Plex (npm)", "plex.png", "https://plex.jbogaert.be")),
+                 ("Infra", tile("pve@4", "proxmox", "Proxmox", "proxmox.png", "https://192.168.0.4:8006")),
+                 ("Infra", tile("pve@50", "proxmox", "Proxmox 50", "proxmox.png", "https://proxmox50.jbogaert.be")),
+                 ("Media", tile("tdarr@1", "tdarr", "Tdarr", "tdarr.png", "http://192.168.0.152:8265")))
+    out = {o["key"]: o for o in clusterforge.prepare(lay)}
+    assert set(out) == {"plex@npm", "pve@4", "pve@50", "tdarr@1"}
+    assert out["plex@npm"]["name"] == "Plex"
+
+
+async def test_opnieuw_ordenen(authed, monkeypatch):
+    from app.routers import clusterforge as cf_router
+
+    r = await authed.post("/api/clusterforge/ordenen")
+    assert r.status_code == 400
+    agen, db, conn = await _setup()
+    await agen.aclose()
+    monkeypatch.setattr(cf_router.integ_router, "clients", HttpClients(httpx.MockTransport(Fake())))
+    r = await authed.post("/api/clusterforge/ordenen")
+    assert r.status_code == 200, r.text
+    assert r.json()["added"] == 2 and r.json()["errors"] == []
+    r = await authed.post("/api/clusterforge/ordenen")
+    assert r.json()["added"] == 0 and r.json()["updated"] == 0
+
+
+def test_npm_en_docker_van_dezelfde_app_een_tegel():
+    lay = layout(("Media", tile("readarr@npm", "readarr", "Readarr", "readarr.png", "https://readarr.jbogaert.be")),
+                 ("Media", tile("readarr@docker", "readarr", "Readarr (Docker)", "readarr.png", "http://192.168.0.160:8787")),
+                 ("Overig", tile("gokapi@npm", "gokapi", "Gokapi", "g.png", "https://gokapi.jbogaert.be")),
+                 ("Overig", tile("gokapi@docker", "gokapi", "Gokapi (Docker)", "g.png", "")),
+                 ("Overig", {**tile("old@npm", "semaphore", "Semaphore", "s.png", "https://sem.jbogaert.be"), "gone": True}),
+                 ("Overig", tile("sem@docker", "semaphore", "Semaphore (Docker)", "s.png", "")),
+                 ("Media", tile("wp@a", "wordpress", "Wordpress", "w.png", "https://blog1.jbogaert.be")),
+                 ("Media", tile("wp@b", "wordpress", "Wordpress", "w.png", "https://blog2.jbogaert.be")))
+    out = {o["key"]: o for o in clusterforge.prepare(lay)}
+    assert set(out) == {"readarr@npm", "gokapi@npm", "sem@docker", "wp@a", "wp@b"}
+    assert out["sem@docker"]["name"] == "Semaphore"  # "(Docker)" weg, de naam is vrij
+
+
+async def test_sleutel_verandert_zelfde_tegel(client):
+    agen, db, conn = await _setup()
+    fake = Fake()
+    fake.layout = layout(("Media", tile("readarr@npm", "readarr", "Readarr", "r.png", "https://readarr.jbogaert.be")),
+                         ("Media", tile("gokapi@npm", "gokapi", "Gokapi", "g.png", "https://gokapi.jbogaert.be")),
+                         ("Media", tile("gokapi@docker", "gokapi", "Gokapi (Docker)", "g.png", "")))
+    http = HttpClients(httpx.MockTransport(fake))
+    await clusterforge.run_sync(db, http)
+    await db.commit()
+    before = {n: s.id for n, s in (await _services(db)).items()}
+    assert set(before) == {"Eigen tegel", "Readarr", "Gokapi"}
+    fake.layout = layout(("Media", tile("readarr@docker", "readarr", "Readarr (Docker)", "r.png", "https://readarr.jbogaert.be")),
+                         ("Media", tile("gokapi@docker", "gokapi", "Gokapi (Docker)", "g.png", "")), version="v2")
+    await clusterforge.run_sync(db, http)
+    await db.commit()
+    after = await _services(db)
+    assert set(after) == {"Eigen tegel", "Readarr", "Gokapi"}
+    assert after["Readarr"].id == before["Readarr"] and after["Readarr"].config["cf_key"] == "readarr@docker"
+    assert after["Gokapi"].id == before["Gokapi"]
+    await agen.aclose()

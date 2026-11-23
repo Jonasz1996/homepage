@@ -184,7 +184,7 @@ def wanted(layout: dict) -> list[tuple[str, int, dict]]:
     out = []
     for g in layout.get("groups") or []:
         for i, t in enumerate(g.get("tiles") or []):
-            if t.get("key") and t.get("app"):
+            if t.get("key") and t.get("app") and not t.get("gone"):
                 out.append((str(g.get("name") or "ClusterForge")[:80], i, t))
     return out
 
@@ -204,10 +204,17 @@ def prepare(layout: dict) -> list[dict]:
         j = best.get(addr)
         if j is None or (_npm_like(raw[j][2]) and not _npm_like(t)):
             best[addr] = i
+    # Dubbels van dezelfde app (bv. de Docker-container op http://IP:poort én dezelfde app op zijn naam via NPM): de
+    # tegel op een naam wint. Niet voor Proxmox/PBS, waar elke node zijn eigen tegel is.
+    named = {str(t["app"]).lower() for _, _, t in raw if _host(t.get("href")) and not _is_ip(_host(t.get("href")))}
     out: list[dict] = []
     for i, (gname, pos, t) in enumerate(raw):
         addr = address(t.get("href"))
         if addr and best[addr] != i:
+            continue
+        host = _host(t.get("href"))
+        if host and _is_ip(host) and str(t["app"]).lower() in named and not is_proxmox(str(t["app"]), t.get("icon")) \
+                and "backup" not in str(t["app"]).lower() and "pbs" not in str(t["app"]).lower():
             continue
         slug = str(t["app"])
         href = (str(t.get("href") or "")[:500]) or None
@@ -218,11 +225,12 @@ def prepare(layout: dict) -> list[dict]:
             gname = groups_named.get(cat.lower(), cat) if cat else OVERIG
         out.append({"key": str(t["key"]), "group": gname[:80], "pos": pos, "name": name, "href": href, "icon": icon,
                     "description": (str(t.get("description") or "")[:255]) or None, "slug": slug, "zelfde": None})
-    # "Authentik (npm)" → "Authentik" als die naam nog vrij is.
+    out = _same_app(out, raw)
+    # "Authentik (npm)" → "Authentik" en "Gokapi (Docker)" → "Gokapi" als die naam nog vrij is.
     taken = {o["name"].lower() for o in out}
     for o in out:
         m = _SUFFIX.match(o["name"])
-        if m and m.group(2).strip().lower() == "npm" and m.group(1).strip().lower() not in taken:
+        if m and m.group(2).strip().lower() in SOURCES and m.group(1).strip().lower() not in taken:
             taken.add(m.group(1).strip().lower())
             o["name"] = m.group(1).strip()
     # Meer tegels van dezelfde app: de cijfers van de app maar op de eerste.
@@ -233,6 +241,46 @@ def prepare(layout: dict) -> list[dict]:
         else:
             first[o["slug"]] = o["name"]
     return out
+
+
+# Waar ClusterForge een app vond; staat soms achter de naam ("Gokapi (Docker)") en verandert, net als de sleutel
+# (readarr@npm → readarr@docker), terwijl het dezelfde app blijft.
+SOURCES = {"npm", "docker", "lxc", "ct", "vm", "container", "dienst", "service", "systemd", "cluster"}
+
+
+def base_name(name: str) -> str:
+    m = _SUFFIX.match(name or "")
+    if m and m.group(1).strip() and m.group(2).strip().lower() in SOURCES:
+        return m.group(1).strip().lower()
+    return (name or "").strip().lower()
+
+
+def _named_host(href: str | None) -> str | None:
+    h = _host(href)
+    return h if h and not _is_ip(h) else None
+
+
+def _same_app(out: list[dict], raw) -> list[dict]:
+    """Eén tegel per app: dezelfde app (zelfde app-slug en naam zonder "(npm)"/"(Docker)") via NPM én via Docker wordt
+    één tegel. Twee verschillende publieke namen blijven twee tegels (twee instanties). Proxmox/PBS nooit (elke node
+    een tegel). De tegel op een publieke naam wint, dan die niet via NPM, dan de eerste."""
+    npm = {str(t["key"]): _npm_like(t) for _, _, t in raw}
+    groups: dict[tuple[str, str], list[int]] = {}
+    for i, o in enumerate(out):
+        slug = o["slug"].lower()
+        if is_proxmox(slug, o["icon"]) or "backup" in slug or "pbs" in slug:
+            continue
+        groups.setdefault((slug, base_name(o["name"])), []).append(i)
+    drop: set[int] = set()
+    for idx in groups.values():
+        if len(idx) < 2:
+            continue
+        hosts = {_named_host(out[i]["href"]) for i in idx} - {None}
+        if len(hosts) > 1:
+            continue
+        keep = min(idx, key=lambda i: (_named_host(out[i]["href"]) is None, npm.get(out[i]["key"], False), i))
+        drop |= set(idx) - {keep}
+    return [o for i, o in enumerate(out) if i not in drop]
 
 
 # --- Proxmox -----------------------------------------------------------------------------
@@ -337,7 +385,23 @@ async def apply(db: AsyncSession, conn: ApiConnection, layout: dict,
         await db.flush()
     stats = {"added": 0, "updated": 0, "removed": 0}
     seen = set()
-    for t in prepare(layout):
+    tiles = prepare(layout)
+    # Veranderde de sleutel (readarr@npm → readarr@docker), dan dezelfde tegel houden (notities, icoon, plaats, check)
+    # in plaats van een nieuwe naast de oude: een tegel waarvan de sleutel verdween, met dezelfde app en hetzelfde
+    # adres of dezelfde naam, schuift door naar de nieuwe sleutel.
+    want = {t["key"] for t in tiles}
+    orphans = {k: s for k, s in by_key.items() if k not in want}
+    for t in tiles:
+        if t["key"] in by_key or not orphans:
+            continue
+        for k, s in list(orphans.items()):
+            same_app = str((s.config or {}).get("app") or "").lower() == t["slug"].lower()
+            same_addr = address(s.url) is not None and address(s.url) == address(t["href"])
+            if same_app and (same_addr or base_name(s.name) == base_name(t["name"])):
+                by_key[t["key"]] = s
+                del orphans[k], by_key[k]
+                break
+    for t in tiles:
         key = t["key"]
         seen.add(key)
         group = group_by_name.get(t["group"].lower())
@@ -426,4 +490,4 @@ async def run_sync(db: AsyncSession, http: HttpClients) -> None:
 
 
 # Versie van de regels hierboven: verandert ze, dan past de volgende ronde de indeling opnieuw toe (ook bij 304).
-RULES = 2
+RULES = 4

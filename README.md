@@ -634,6 +634,10 @@ Later, deel 3 (Authentik en gsm):
   en een tegel in "overig" krijgt een groep die bij de app past (Media, Infrastructuur, Domotica, Productiviteit, AI).
   Proxmox-tegels hangen vanzelf aan een Proxmox-API uit API-beheer met hun eigen node (gevonden op IP, naam of nummer:
   proxmox50 ↔ pve50); zonder Proxmox-API staan de cijfers van een app maar op één tegel, de andere tonen hun status.
+  Eén tegel per app: dezelfde app via NPM én via Docker (zelfde app, naam zonder "(npm)"/"(Docker)") wordt één tegel,
+  die op de publieke naam; verandert de sleutel (`readarr@npm` → `readarr@docker`), dan schuift dezelfde tegel mee.
+  Apps met `gone` krijgen geen tegel. Twee verschillende publieke namen blijven twee tegels; Proxmox/PBS nooit samen. Veranderen de regels na een update, dan past de worker ze vanzelf toe op de bestaande
+  tegels; **API-beheer → ⟳ ClusterForge-tegels ordenen** doet het meteen
   Bijsturen (verbergen, hernoemen, groep, icoon, velden) doe je in ClusterForge → Homepage-apps. `"sync": false` in
   de API zet het automatisch aanmaken uit; een tegel van type clusterforge met `app` werkt dan nog altijd
 - **zabbix** (een tegel of API van soort `zabbix`): elke minuut haalt de homepage de hosts en open problemen uit
