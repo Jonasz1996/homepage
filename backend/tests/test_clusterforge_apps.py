@@ -307,3 +307,39 @@ async def test_opnieuw_ordenen(authed, monkeypatch):
     assert r.json()["added"] == 2 and r.json()["errors"] == []
     r = await authed.post("/api/clusterforge/ordenen")
     assert r.json()["added"] == 0 and r.json()["updated"] == 0
+
+
+def test_npm_en_docker_van_dezelfde_app_een_tegel():
+    lay = layout(("Media", tile("readarr@npm", "readarr", "Readarr", "readarr.png", "https://readarr.jbogaert.be")),
+                 ("Media", tile("readarr@docker", "readarr", "Readarr (Docker)", "readarr.png", "http://192.168.0.160:8787")),
+                 ("Overig", tile("gokapi@npm", "gokapi", "Gokapi", "g.png", "https://gokapi.jbogaert.be")),
+                 ("Overig", tile("gokapi@docker", "gokapi", "Gokapi (Docker)", "g.png", "")),
+                 ("Overig", {**tile("old@npm", "semaphore", "Semaphore", "s.png", "https://sem.jbogaert.be"), "gone": True}),
+                 ("Overig", tile("sem@docker", "semaphore", "Semaphore (Docker)", "s.png", "")),
+                 ("Media", tile("wp@a", "wordpress", "Wordpress", "w.png", "https://blog1.jbogaert.be")),
+                 ("Media", tile("wp@b", "wordpress", "Wordpress", "w.png", "https://blog2.jbogaert.be")))
+    out = {o["key"]: o for o in clusterforge.prepare(lay)}
+    assert set(out) == {"readarr@npm", "gokapi@npm", "sem@docker", "wp@a", "wp@b"}
+    assert out["sem@docker"]["name"] == "Semaphore"  # "(Docker)" weg, de naam is vrij
+
+
+async def test_sleutel_verandert_zelfde_tegel(client):
+    agen, db, conn = await _setup()
+    fake = Fake()
+    fake.layout = layout(("Media", tile("readarr@npm", "readarr", "Readarr", "r.png", "https://readarr.jbogaert.be")),
+                         ("Media", tile("gokapi@npm", "gokapi", "Gokapi", "g.png", "https://gokapi.jbogaert.be")),
+                         ("Media", tile("gokapi@docker", "gokapi", "Gokapi (Docker)", "g.png", "")))
+    http = HttpClients(httpx.MockTransport(fake))
+    await clusterforge.run_sync(db, http)
+    await db.commit()
+    before = {n: s.id for n, s in (await _services(db)).items()}
+    assert set(before) == {"Eigen tegel", "Readarr", "Gokapi"}
+    fake.layout = layout(("Media", tile("readarr@docker", "readarr", "Readarr (Docker)", "r.png", "https://readarr.jbogaert.be")),
+                         ("Media", tile("gokapi@docker", "gokapi", "Gokapi (Docker)", "g.png", "")), version="v2")
+    await clusterforge.run_sync(db, http)
+    await db.commit()
+    after = await _services(db)
+    assert set(after) == {"Eigen tegel", "Readarr", "Gokapi"}
+    assert after["Readarr"].id == before["Readarr"] and after["Readarr"].config["cf_key"] == "readarr@docker"
+    assert after["Gokapi"].id == before["Gokapi"]
+    await agen.aclose()

@@ -5,10 +5,10 @@ export const CHANGELOG = [
   {
     nr: 51,
     datum: '2026-11-23',
-    titel: 'ClusterForge-tegels opnieuw ordenen, minder Docker-dubbels',
+    titel: 'ClusterForge-tegels opnieuw ordenen, geen NPM/Docker-dubbels meer',
     items: [
       'API-beheer → ⟳ ClusterForge-tegels ordenen: past de regels (naam, dubbels, groep, check, Proxmox per node) meteen toe op alle tegels uit ClusterForge, ook de bestaande. De worker doet dat ook vanzelf na een update; met de knop hoef je niet te wachten en zie je wat er veranderde.',
-      'Dezelfde app als Docker-container op http://IP:poort én op zijn naam via NPM: alleen de tegel op de naam blijft. Proxmox- en PBS-nodes houden elk hun tegel.',
+      'Eén tegel per app: dezelfde app via NPM én via Docker (Readarr en "Readarr (Docker)", Gokapi, Semaphore, ...) wordt één tegel, die op de publieke naam. Verandert de sleutel in ClusterForge (readarr@npm → readarr@docker), dan blijft het dezelfde tegel met je notities en icoon. Apps die ClusterForge als weg markeert, krijgen geen tegel. Twee echte instanties met een eigen adres, en Proxmox- en PBS-nodes, houden elk hun tegel.',
     ],
     instellen: [],
   },
