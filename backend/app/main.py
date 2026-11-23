@@ -136,4 +136,6 @@ async def healthz(request: Request, db: AsyncSession = Depends(get_db)):
     ok = await watchdog.healthz(request, db)
     if ok is None:
         return JSONResponse({"detail": "Not Found"}, status_code=404)
-    return JSONResponse({"ok": ok}, status_code=200 if ok else 503)
+    # herstart: deze API draait oudere code dan er op schijf staat (gebouwd zonder herstart, codeversie.py).
+    from . import codeversie
+    return JSONResponse({"ok": ok, "herstart": codeversie.api_stale()}, status_code=200 if ok else 503)

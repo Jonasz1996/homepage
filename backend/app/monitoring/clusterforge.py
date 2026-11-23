@@ -25,6 +25,7 @@ de sync uit de buurt. Een check die je zelf aanpaste blijft staan. Met "sync": f
 import ipaddress
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -43,7 +44,7 @@ EVERY = 60
 STATE_KEY = "clusterforge"
 MANAGED = "clusterforge"
 # Sleutels in de config die de sync zelf zet (en dus ook weer weghaalt).
-AUTO_KEYS = ("managed_by", "cf_key", "cf_api", "app", "node", "cf_zelfde")
+AUTO_KEYS = ("managed_by", "cf_key", "cf_api", "app", "node", "cf_zelfde", "cf_name", "cf_icon", "cf_weg", "cf_terug")
 # Checks die de sync zelf zet: alleen die mag hij vervangen.
 AUTO_CHECKS = ({"type": "api", "interval": 60}, {"type": "http", "interval": 60})
 
@@ -64,25 +65,45 @@ _OVERIG = {"", "overig", "overige", "other", "others", "misc", "diversen", "unca
 CATEGORIES: list[tuple[str, tuple[str, ...]]] = [
     ("Media", ("jellyfin", "plex", "emby", "kodi", "tautulli", "overseerr", "jellyseerr", "ombi", "navidrome",
                "airsonic", "subsonic", "audiobookshelf", "immich", "photoprism", "piwigo", "kavita", "komga",
-               "calibre", "tdarr", "handbrake", "music", "muziek", "photos", "fotos", "video", "tv", "films",
-               "sonarr", "radarr", "lidarr", "readarr", "prowlarr", "bazarr", "jackett", "whisparr", "qbittorrent",
-               "transmission", "deluge", "sabnzbd", "nzbget", "flaresolverr", "autobrr", "pinchflat", "metube")),
+               "calibre", "tdarr", "handbrake", "music", "muziek", "photos", "fotos", "video", "tv", "films")),
+    ("Downloads", ("sonarr", "radarr", "lidarr", "readarr", "prowlarr", "bazarr", "jackett", "whisparr", "qbittorrent",
+                   "transmission", "deluge", "sabnzbd", "nzbget", "flaresolverr", "autobrr", "pinchflat", "metube",
+                   "jdownloader", "youtubedl", "ytdl")),
     ("Domotica", ("homeassistant", "hass", "zigbee2mqtt", "zigbee", "mqtt", "mosquitto", "nodered", "esphome",
                   "frigate", "scrypted", "domoticz", "openhab", "homebridge", "solar", "p1")),
     ("AI", ("ai", "ollama", "openwebui", "webui", "llm", "comfyui", "localai", "aiverslag", "whisper", "qwen")),
     ("Productiviteit", ("nextcloud", "paperless", "agenda", "calendar", "radicale", "baikal", "bookstack", "wiki",
-                        "outline", "vikunja", "mealie", "tandoor", "firefly", "actual", "stirling", "convertx",
-                        "onlyoffice", "collabora", "joplin", "trilium", "memos", "linkwarden", "wallabag", "freshrss",
-                        "miniflux", "hedgedoc", "excalidraw", "n8n", "docs", "notes", "office", "mail", "kanban")),
-    ("Infrastructuur", ("proxmox", "pve", "pbs", "backup", "npm", "nginx", "proxy", "traefik", "caddy", "adguard",
-                        "pihole", "dns", "dhcp", "opnsense", "pfsense", "unifi", "omada", "router", "switch",
-                        "authentik", "keycloak", "vaultwarden", "bitwarden", "vault", "vaultx", "gitea", "gitlab",
-                        "forgejo", "git", "portainer", "docker", "registry", "clusterforge", "homepage", "zabbix",
-                        "grafana", "prometheus", "uptime", "kuma", "netdata", "influxdb", "loki", "syslog",
-                        "wireguard", "tailscale", "headscale", "cloudflared", "ldap", "guacamole", "webmin",
-                        "cockpit", "minio", "truenas", "nas", "samba", "postgres", "mariadb", "mysql", "redis",
-                        "crowdsec", "speedtest", "ntp", "smtp", "dashboard")),
+                        "outline", "vikunja", "mealie", "tandoor", "firefly", "actual", "onlyoffice", "collabora",
+                        "joplin", "trilium", "memos", "linkwarden", "wallabag", "freshrss", "miniflux", "hedgedoc",
+                        "excalidraw", "docs", "notes", "office", "mail", "kanban", "wordpress", "ghost")),
+    ("Beveiliging", ("authentik", "keycloak", "vaultwarden", "bitwarden", "vault", "vaultx", "crowdsec", "ldap",
+                     "authelia", "wazuh")),
+    ("Monitoring", ("zabbix", "grafana", "prometheus", "uptime", "kuma", "netdata", "influxdb", "loki", "syslog",
+                    "graylog", "scrutiny", "glances", "beszel", "dozzle")),
+    ("Netwerk", ("adguard", "pihole", "dns", "dhcp", "opnsense", "pfsense", "unifi", "omada", "router", "switch",
+                 "wireguard", "tailscale", "headscale", "cloudflared", "npm", "nginx", "proxy", "traefik", "caddy",
+                 "speedtest", "netbootxyz", "pxe", "ntp", "guest", "wifi")),
+    ("Tools", ("gokapi", "semaphore", "syncthing", "qdirstat", "filebrowser", "sftpgo", "cronicle", "ittools",
+               "stirling", "convertx", "cyberchef", "drawio", "pairdrop", "snapdrop", "privatebin", "shlink", "n8n",
+               "code", "vscode", "jupyter")),
+    ("Infrastructuur", ("proxmox", "pve", "pbs", "backup", "portainer", "docker", "registry", "gitea", "gitlab",
+                        "forgejo", "git", "clusterforge", "homepage", "truenas", "nas", "samba", "minio", "postgres",
+                        "mariadb", "mysql", "redis", "guacamole", "webmin", "cockpit", "smtp", "dashboard")),
 ]
+# Hoe die groepen ook kunnen heten: bestaat er al een groep met zo'n naam, dan komt een nieuwe tegel daar (bv.
+# "Downloads" bij jou "Tools", "Domotica" bij jou "Smart home"). Pas als er geen is, komt de groep zelf.
+ALIASES: dict[str, tuple[str, ...]] = {
+    "Media": ("media", "multimedia", "entertainment"),
+    "Downloads": ("downloads", "tools", "hulpmiddelen"),
+    "Domotica": ("domotica", "smart home", "smarthome", "home automation", "huis"),
+    "AI": ("ai", "kunstmatige intelligentie"),
+    "Productiviteit": ("productiviteit", "productivity", "kantoor", "apps"),
+    "Beveiliging": ("beveiliging", "security", "infrastructuur"),
+    "Monitoring": ("monitoring", "infrastructuur"),
+    "Netwerk": ("netwerk", "network", "infrastructuur"),
+    "Tools": ("tools", "hulpmiddelen", "productiviteit"),
+    "Infrastructuur": ("infrastructuur", "infra", "infrastructure", "systeem"),
+}
 _COMPOUND = {"home-assistant": "homeassistant", "home assistant": "homeassistant", "node-red": "nodered",
              "open-webui": "openwebui", "open webui": "openwebui", "pi-hole": "pihole", "uptime-kuma": "kuma"}
 
@@ -169,6 +190,34 @@ def guess_group(name: str, slug: str, icon: str | None, href: str | None) -> str
     return None
 
 
+def _target(t: dict) -> str | None:
+    """Het echte doel achter NPM als ClusterForge het meestuurt (host:poort), anders None."""
+    for k in ("target", "upstream", "backend"):
+        v = str(t.get(k) or "").strip()
+        if re.fullmatch(r"\[?[\w.:-]+\]?:\d{1,5}", v):
+            return v
+    return None
+
+
+def category_of(gname: str) -> str | None:
+    g = gname.strip().lower()
+    for cat, names in ALIASES.items():
+        if g == cat.lower() or g == names[0]:
+            return cat
+    return None
+
+
+def resolve_group(gname: str, groups: dict[str, "Group"]) -> "Group | None":
+    """De bestaande groep voor deze naam: dezelfde naam, of een groep die je anders noemt (ALIASES)."""
+    if gname.lower() in groups:
+        return groups[gname.lower()]
+    cat = category_of(gname)
+    for alias in ALIASES.get(cat or "", ()):
+        if alias in groups:
+            return groups[alias]
+    return None
+
+
 def is_overig(gname: str | None) -> bool:
     return str(gname or "").strip().lower() in _OVERIG
 
@@ -224,6 +273,7 @@ def prepare(layout: dict) -> list[dict]:
             cat = guess_group(name, slug, icon, href)
             gname = groups_named.get(cat.lower(), cat) if cat else OVERIG
         out.append({"key": str(t["key"]), "group": gname[:80], "pos": pos, "name": name, "href": href, "icon": icon,
+                    "raw_name": str(t.get("name") or ""), "target": _target(t),
                     "description": (str(t.get("description") or "")[:255]) or None, "slug": slug, "zelfde": None})
     out = _same_app(out, raw)
     # "Authentik (npm)" → "Authentik" en "Gokapi (Docker)" → "Gokapi" als die naam nog vrij is.
@@ -365,27 +415,46 @@ async def fetch_layout(conn: ApiConnection, http: HttpClients, etag: str | None)
     return r.json(), r.headers.get("ETag")
 
 
+ARCHIVE = "Archief (weg in ClusterForge)"
+_ARCHIVE_NAMES = ("archief", "opruimen")
+
+
+def _archive_group(groups: list[Group]) -> Group | None:
+    return next((g for g in groups if g.name.strip().lower().startswith(_ARCHIVE_NAMES)), None)
+
+
 async def apply(db: AsyncSession, conn: ApiConnection, layout: dict,
                 pve: list[tuple[int, list[dict]]] | None = None) -> dict:
-    """Maakt, wijzigt en verwijdert de beheerde tegels van deze verbinding. Geeft de aantallen terug."""
-    services = (await db.execute(select(Service))).scalars().all()
-    groups = (await db.execute(select(Group))).scalars().all()
+    """Maakt, wijzigt en archiveert de beheerde tegels van deze verbinding. Geeft de aantallen terug.
+
+    Jouw indeling wint: een bestaande tegel blijft in de groep waar hij staat, en een naam die je zelf gaf blijft.
+    Alleen nieuwe tegels krijgen een groep (een bestaande als die past, ook als je ze anders noemde). Een app die weg
+    is in ClusterForge gaat met een gepauzeerde check naar de ingeklapte groep Archief (telt niet als down); komt hij
+    terug, dan gaat hij terug naar zijn groep. Echte dubbels (dezelfde sleutel, of dezelfde app via NPM en Docker)
+    gaan weg."""
+    services = (await db.execute(select(Service).order_by(Service.id))).scalars().all()
+    groups = list((await db.execute(select(Group))).scalars().all())
     # Ook tegels van een ClusterForge-API die niet meer bestaat (verwijderd en opnieuw gemaakt, of teruggezet uit een
     # back-up): die neemt deze API over in plaats van er dubbels naast te zetten.
     alive = set((await db.execute(select(ApiConnection.id).where(ApiConnection.kind == "clusterforge"))).scalars())
-    by_key = {}
+    stats = {"added": 0, "updated": 0, "removed": 0, "archived": 0}
+    by_key: dict[str, Service] = {}
     for s in services:
         if is_managed(s) and (is_managed(s, conn.id) or (s.config or {}).get("cf_api", s.api_id) not in alive):
-            by_key.setdefault((s.config or {}).get("cf_key"), s)
+            key = (s.config or {}).get("cf_key")
+            if key in by_key:  # dezelfde sleutel twee keer (bv. een oude worker tijdens een update): de oudste blijft
+                await db.delete(s)
+                stats["removed"] += 1
+                continue
+            by_key[key] = s
     group_by_name = {g.name.lower(): g for g in groups}
     page = (await db.execute(select(Page).order_by(Page.position, Page.id).limit(1))).scalar_one_or_none()
     if page is None:
         page = Page(name="Home", position=0)
         db.add(page)
         await db.flush()
-    stats = {"added": 0, "updated": 0, "removed": 0}
-    seen = set()
     tiles = prepare(layout)
+    live = {str(t["key"]) for _, _, t in wanted(layout)}  # ook de dubbels die prepare eruit haalde
     # Veranderde de sleutel (readarr@npm → readarr@docker), dan dezelfde tegel houden (notities, icoon, plaats, check)
     # in plaats van een nieuwe naast de oude: een tegel waarvan de sleutel verdween, met dezelfde app en hetzelfde
     # adres of dezelfde naam, schuift door naar de nieuwe sleutel.
@@ -401,18 +470,13 @@ async def apply(db: AsyncSession, conn: ApiConnection, layout: dict,
                 by_key[t["key"]] = s
                 del orphans[k], by_key[k]
                 break
+    archive = _archive_group(groups)
+    seen = set()
     for t in tiles:
         key = t["key"]
         seen.add(key)
-        group = group_by_name.get(t["group"].lower())
-        if group is None:
-            group = Group(page_id=page.id, name=t["group"], position=1000 + len(group_by_name))
-            db.add(group)
-            await db.flush()
-            group_by_name[t["group"].lower()] = group
-        values: dict[str, Any] = {"name": t["name"], "description": t["description"], "url": t["href"],
-                                  "icon": t["icon"], "group_id": group.id}
-        config: dict[str, Any] = {"managed_by": MANAGED, "cf_key": key, "cf_api": conn.id, "app": t["slug"]}
+        config: dict[str, Any] = {"managed_by": MANAGED, "cf_key": key, "cf_api": conn.id, "app": t["slug"],
+                                  "cf_name": t["name"], "cf_icon": t["icon"]}
         kind, api_id = "clusterforge", conn.id
         node = match_node(t, pve) if pve and is_proxmox(t["slug"], t["icon"]) else None
         if node:
@@ -420,31 +484,77 @@ async def apply(db: AsyncSession, conn: ApiConnection, layout: dict,
             config["node"] = node[1]
         elif t["zelfde"]:
             config["cf_zelfde"] = t["zelfde"]
-        # Met een link kijkt de homepage zelf of het doel antwoordt; anders vraagt de api-check het aan ClusterForge.
-        check = {"type": "http" if t["href"] else "api", "interval": 60}
+        # Met een link kijkt de homepage zelf of het doel antwoordt; stuurt ClusterForge het doel achter NPM mee, dan
+        # rechtstreeks daarop (een doorverwijzing naar Authentik zegt niets over de app). Anders vraagt de api-check
+        # het aan ClusterForge.
+        check = ({"type": "tcp", "target": t["target"], "interval": 60} if t["target"] else
+                 {"type": "http" if t["href"] else "api", "interval": 60})
         svc = by_key.get(key)
         if svc is None:
-            db.add(Service(type=kind, api_id=api_id, position=1000 + t["pos"], config=config, check=check, **values))
+            group = resolve_group(t["group"], group_by_name)
+            if group is None:
+                group = Group(page_id=page.id, name=t["group"], position=1000 + len(group_by_name))
+                db.add(group)
+                await db.flush()
+                group_by_name[t["group"].lower()] = group
+            db.add(Service(type=kind, api_id=api_id, position=1000 + t["pos"], config=config, check=check,
+                           name=t["name"], description=t["description"], url=t["href"], icon=t["icon"],
+                           group_id=group.id))
             stats["added"] += 1
             continue
+        old_cfg = svc.config or {}
+        values: dict[str, Any] = {"description": t["description"], "url": t["href"], "type": kind, "api_id": api_id}
+        # De naam alleen als de sync hem zette (en jij hem niet veranderde); bij een tegel van voor deze regel: als
+        # het nog de naam van ClusterForge is ("302 Found", "Authentik (npm)").
+        if svc.name == old_cfg.get("cf_name") or ("cf_name" not in old_cfg and svc.name in (t["raw_name"], t["name"])):
+            values["name"] = t["name"]
+        else:
+            config["cf_name"] = old_cfg.get("cf_name") or svc.name
+        if not svc.icon or svc.icon == old_cfg.get("cf_icon", svc.icon):
+            values["icon"] = t["icon"]
+        check_now = svc.check or {}
+        if old_cfg.get("cf_weg"):  # terug in ClusterForge: uit het archief, terug naar zijn groep, check weer aan
+            back = await db.get(Group, old_cfg.get("cf_terug")) if old_cfg.get("cf_terug") else None
+            values["group_id"] = (back or resolve_group(t["group"], group_by_name) or svc.group).id
+            check_now = {k: v for k, v in check_now.items() if k != "paused"}
         changed = False
-        for k, v in {**values, "type": kind, "api_id": api_id}.items():
+        for k, v in values.items():
             if getattr(svc, k) != v:
                 setattr(svc, k, v)
                 changed = True
-        cfg = {**{k: v for k, v in (svc.config or {}).items() if k not in AUTO_KEYS}, **config}
+        cfg = {**{k: v for k, v in old_cfg.items() if k not in AUTO_KEYS}, **config}
         if cfg != svc.config:
             svc.config = cfg
             changed = True
-        if _own_check(svc.check) and svc.check != check:
-            svc.check = check
+        if _own_check(check_now) and check_now != check:
+            check_now = check
+        if check_now != (svc.check or {}):
+            svc.check = check_now
             changed = True
         if changed:
             stats["updated"] += 1
+    # Weg in ClusterForge (of niet meer in de indeling): niet wissen maar archiveren. Een dubbel die prepare eruit haalde
+    # (dezelfde app staat er nog) mag wel weg.
     for key, svc in by_key.items():
-        if key not in seen:
+        if key in seen:
+            continue
+        if key in live:
             await db.delete(svc)
             stats["removed"] += 1
+            continue
+        cfg = svc.config or {}
+        if cfg.get("cf_weg"):
+            continue
+        if archive is None:
+            archive = Group(page_id=page.id, name=ARCHIVE, position=2000, collapsed=True)
+            db.add(archive)
+            await db.flush()
+            group_by_name[archive.name.lower()] = archive
+        svc.config = {**cfg, "cf_weg": datetime.now(timezone.utc).date().isoformat(), "cf_terug": svc.group_id}
+        if svc.check and svc.check.get("type"):
+            svc.check = {**svc.check, "paused": True}
+        svc.group_id = archive.id
+        stats["archived"] += 1
     await db.flush()
     # Een groep "overig" die de sync ooit maakte (positie vanaf 1000) en nu leeg is: weg.
     for g in group_by_name.values():
@@ -490,4 +600,4 @@ async def run_sync(db: AsyncSession, http: HttpClients) -> None:
 
 
 # Versie van de regels hierboven: verandert ze, dan past de volgende ronde de indeling opnieuw toe (ook bij 304).
-RULES = 4
+RULES = 5

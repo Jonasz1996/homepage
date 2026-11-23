@@ -378,7 +378,7 @@ async def test_healthz(authed, monkeypatch):
     monkeypatch.setattr(watchdog, "_seen_saved", None)
     async with _zabbix() as zabbix:
         r = await zabbix.get("/api/healthz")
-        assert r.status_code == 503 and r.json() == {"ok": False}
+        assert r.status_code == 503 and r.json() == {"ok": False, "herstart": False}
         agen, db = await _db()
         db.add(AppState(key="worker", value={"at": datetime.now(timezone.utc).isoformat()}))
         await db.commit()
@@ -406,7 +406,7 @@ async def test_healthz_vanuit_de_container_is_geen_wachter(authed, monkeypatch):
     monkeypatch.setattr(watchdog, "_healthz", None)
     monkeypatch.setattr(watchdog, "_seen_saved", None)
     r = await authed.get("/api/healthz")
-    assert r.status_code == 503 and r.json() == {"ok": False}
+    assert r.status_code == 503 and r.json() == {"ok": False, "herstart": False}
     agen, db = await _db()
     assert await db.get(AppState, watchdog.SEEN_KEY) is None
     rows = {r["key"]: r for grp in (await authed.get("/api/attention/setup")).json()["groups"] for r in grp["rows"]}

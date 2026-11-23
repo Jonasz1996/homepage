@@ -36,7 +36,18 @@ async def version(user: User = Depends(current_user), db: AsyncSession = Depends
     seen = (st.value or {}).get(str(user.id)) if st else None
     created = user.created_at if user.created_at.tzinfo else user.created_at.replace(tzinfo=timezone.utc)
     # Een nieuw account hoeft de geschiedenis niet te zien.
-    return {**installed(), "gezien": seen, "nieuw_account": datetime.now(timezone.utc) - created < timedelta(days=1)}
+    return {**installed(), "gezien": seen, "nieuw_account": datetime.now(timezone.utc) - created < timedelta(days=1),
+            **await herstart(db)}
+
+
+async def herstart(db: AsyncSession) -> dict:
+    """Draaien API en worker de code die op schijf staat? Anders moeten ze herstart worden (codeversie.py)."""
+    from .. import codeversie as cv
+    from ..health.selfcheck import HEARTBEAT_KEY
+
+    hb = await db.get(AppState, HEARTBEAT_KEY)
+    return {"api_gestart": cv.STARTED_AT, "herstart_api": cv.api_stale(),
+            "herstart_worker": cv.worker_stale(hb.value if hb else None)}
 
 
 class SeenIn(BaseModel):

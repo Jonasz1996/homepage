@@ -3,6 +3,18 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 52,
+    datum: '2026-11-23',
+    titel: 'ClusterForge respecteert je eigen indeling, archief voor verdwenen tegels',
+    items: [
+      'Je eigen groepen en namen blijven: een tegel uit ClusterForge die je verplaatste of hernoemde, zet de homepage niet meer terug. Nieuwe tegels komen in je bestaande groep die erbij past (Tools voor downloads, Smart home voor domotica, ...), niet meer in een nieuwe "Downloads" of "Overig".',
+      'Verdwijnt een app uit ClusterForge, dan gaat de tegel naar de dichtgeklapte groep "Archief (weg in ClusterForge)" met de check gepauzeerd: hij telt niet meer als down. Komt de app terug, dan keert de tegel terug naar zijn oude groep.',
+      'Twee tegels met dezelfde ClusterForge-sleutel worden er één (de oudste blijft, met je notities).',
+      'Nieuwe versie gebouwd maar draait de API of worker nog de oude code? Dan staat er een rode melding onder ! met het herstartcommando.',
+    ],
+    instellen: [],
+  },
+  {
     nr: 51,
     datum: '2026-11-23',
     titel: 'ClusterForge-tegels opnieuw ordenen, geen NPM/Docker-dubbels meer',

@@ -94,12 +94,24 @@ async def test_sync_maakt_wijzigt_en_verwijdert(client):
     await db.commit()
     assert fake.calls[n].headers.get("If-None-Match") == '"v1"'
 
-    # In ClusterForge hernoemd, homepage verborgen: tegel bijgewerkt en verwijderd; de eigen tegel blijft.
+    # In ClusterForge hernoemd, homepage verborgen: tegel bijgewerkt, en de verdwenen tegel gaat met een gepauzeerde
+    # check naar het archief (niet gewist); de eigen tegel blijft.
     fake.layout = layout(("Media", tile("plex@plex1", "plex", "Plex films")), version="v2")
     await clusterforge.run_sync(db, http)
     await db.commit()
     s = await _services(db)
-    assert set(s) == {"Eigen tegel", "Plex films"}
+    assert set(s) == {"Eigen tegel", "Plex films", "Homepage"}
+    arch = await db.get(Group, s["Homepage"].group_id)
+    assert arch.name == clusterforge.ARCHIVE and arch.collapsed and s["Homepage"].check["paused"] is True
+    # Terug in ClusterForge: terug naar zijn groep, check weer aan.
+    fake.layout = layout(("Media", tile("plex@plex1", "plex", "Plex films")),
+                         ("Infrastructuur", tile("homepage@hp", "homepage", "Homepage", "homepage.png", "https://homepage.jbogaert.be")),
+                         version="v3")
+    await clusterforge.run_sync(db, http)
+    await db.commit()
+    s = await _services(db)
+    assert (await db.get(Group, s["Homepage"].group_id)).name == "Infrastructuur"
+    assert "paused" not in s["Homepage"].check and "cf_weg" not in s["Homepage"].config
     await agen.aclose()
 
 
