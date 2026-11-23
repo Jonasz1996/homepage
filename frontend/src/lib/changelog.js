@@ -3,6 +3,16 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 49,
+    datum: '2026-11-23',
+    titel: 'Eigen achtergrond en fabrieksreset',
+    items: [
+      'Instellingen → Weergave: een eigen foto of afbeelding als achtergrond, geüpload (een grote foto wordt eerst verkleind) of één keer opgehaald van een adres, ook op je LAN. Kies of de effecten van aiverslag erboven komen (radiale gloed, scanlijnen, zwevende punten) of niet, en hoeveel de foto gedimd en vervaagd wordt. Geldt op elk toestel; Effecten aan/uit in het menu blijft per toestel.',
+      'Instellingen → Fabrieksreset: het hele dashboard wissen (tegels, pagina\'s, API\'s en geheimen, SSH, geschiedenis, meldingen, instellingen, de achtergrond en je account) en opnieuw beginnen zoals na de installatie. Eerst kan je een volledige back-up downloaden (pg_dump, zoals de dagelijkse) of alleen de tegels als YAML; dan typ je WIS ALLES. Alleen thuis, nooit van buitenaf. Daarna maak je opnieuw een account met 2FA (de setup-code staat al ingevuld) en toont het lege dashboard de eerste stappen.',
+    ],
+    instellen: [],
+  },
+  {
     nr: 48,
     datum: '2026-11-17',
     titel: 'ClusterForge beheert je dashboard',

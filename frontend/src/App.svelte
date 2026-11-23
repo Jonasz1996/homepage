@@ -4,6 +4,7 @@
   import Auth from './lib/Auth.svelte'
   import Dashboard from './lib/Dashboard.svelte'
   import Dialogs from './lib/Dialogs.svelte'
+  import { hideWall } from './lib/wall.js'
 
   let state = $state(null)
   let error = $state('')
@@ -13,6 +14,8 @@
       state = await api('/auth/state')
       error = ''
       document.title = state.site_name || 'homepage'
+      // Niet (meer) binnen: de eigen achtergrond vraagt een sessie, dus de gewone (Dashboard laadt ze weer).
+      if (!state.mfa_ok) hideWall()
     } catch (e) {
       error = e.message
     }

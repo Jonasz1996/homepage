@@ -13,6 +13,7 @@
   import SearchPanel from './SearchPanel.svelte'
   import Topbar from './Topbar.svelte'
   import WindowHost from './WindowHost.svelte'
+  import { loadWall } from './wall.js'
 
   // Het hoofdscherm. De onderdelen staan elk in een eigen bestand; de gedeelde toestand in dash.svelte.js en welke
   // vensters er zijn in windows.js.
@@ -135,6 +136,7 @@
     dash.problemsOnly = false
     openFromUrl()
     checkNews()
+    loadWall()
     const stop = dash.start()
     const t = setInterval(() => (now = new Date()), 15000)
     return () => { stop(); clearInterval(t) }
@@ -188,12 +190,23 @@
   {:else if dash.loaded && dash.pages.length === 0 && !dash.layoutError}
     <Card title="welkom" class="empty">
       <div class="body">
-        <h3>Nog leeg</h3>
-        <p class="hint">Begin met een pagina, of importeer meteen je <code>services.yaml</code> van homepage.dev.</p>
-        <div class="row">
-          <button class="btn" onclick={() => dash.open('import')}>Importeer services.yaml</button>
-          <button class="btn alt" onclick={newPage}>Lege pagina</button>
-        </div>
+        <h3>Nog leeg: zo begin je</h3>
+        <p class="hint">Na de installatie of een fabrieksreset. Elke stap kan je overslaan en later doen via het menu.</p>
+        <ol class="steps">
+          <li><b>Tegels</b>: importeer je <code>services.yaml</code> van homepage.dev of een eigen export, of begin met
+            een lege pagina.
+            <div class="row"><button class="btn" onclick={() => dash.open('import')}>Importeren</button>
+              <button class="btn alt" onclick={newPage}>Lege pagina</button></div></li>
+          <li><b>API's</b>: Proxmox, PBS, NPM, AdGuard, Zabbix, ClusterForge, ... voor de mini dashboards en het
+            ophalen van je machines.
+            <div class="row"><button class="btn alt" onclick={() => dash.open('apis')}>API-beheer</button></div></li>
+          <li><b>Achtergrond</b>: een eigen foto, met of zonder de effecten erboven.
+            <div class="row"><button class="btn alt" onclick={() => dash.open('weergave')}>Weergave</button></div></li>
+          <li><b>De rest</b>: SSH-login, meldingen op je gsm, van buitenaf, back-ups. De checklist toont wat nog
+            ontbreekt.
+            <div class="row"><button class="btn alt" onclick={() => dash.open('instellingen')}>Wat nog ontbreekt</button>
+              <button class="btn alt" onclick={() => dash.open('webpush')}>Meldingen op je gsm</button></div></li>
+        </ol>
       </div>
     </Card>
   {:else}
@@ -227,6 +240,8 @@
   .hello .hint { margin: 6px 0 0 }
   .search { max-width: 340px }
   :global(.empty) { margin-top: 18px }
+  .steps { margin: 6px 0 0; padding-left: 20px; display: grid; gap: 14px; font-size: 13.5px; line-height: 1.6 }
+  .steps .row { margin-top: 6px }
   @media (max-width: 560px) {
     .head { padding: 18px 16px 12px }
     .offline { margin: 0 16px 12px }

@@ -116,6 +116,8 @@ def test_welke_routes_van_buitenaf_uit_staan():
         "POST /api/nieuweservice/runs/{run_id}/ongedaan": "acties",
         # Echt uitvoeren aan of uit: van buitenaf geen van beide, zoals de runs zelf.
         "PUT /api/nieuweservice/echt": "acties",
+        # Een achtergrond van een adres: de container haalt dat op (van buitenaf zou dat je LAN laten aftasten).
+        "POST /api/achtergrond/url": "acties",
     }
     ws = {r.path for r in _routes() if isinstance(r, WebSocketRoute)}
     assert ws == {"/api/ssh/ws/{host_id}", "/api/cron/ws/run/{job_id}", "/api/cron/ws/tail/{target}"}

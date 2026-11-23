@@ -2,6 +2,10 @@
 // Punten wijken voor de muis uit en de muis trekt lijntjes naar de punten in de buurt.
 import { fxEnabled } from './fx.js'
 
+// Een eigen achtergrond zonder effecten erboven (wall.js): dan ook geen punten.
+const plain = () => document.documentElement.classList.contains('wall-plain')
+const moving = () => fxEnabled() && !plain()
+
 export function startBackground(canvas) {
   if (!canvas || matchMedia('(prefers-reduced-motion: reduce)').matches) return
   const c = canvas.getContext('2d')
@@ -29,7 +33,7 @@ export function startBackground(canvas) {
   // helemaal (geen werk per beeld meer) tot ze weer aangaan.
   let last = 0, running = false
   const frame = (now) => {
-    if (!fxEnabled()) {
+    if (!moving()) {
       running = false
       c.clearRect(0, 0, W, H)
       return
@@ -79,7 +83,7 @@ export function startBackground(canvas) {
     }
   }
   const start = () => {
-    if (running || !fxEnabled()) return
+    if (running || !moving()) return
     running = true
     requestAnimationFrame(frame)
   }

@@ -46,6 +46,10 @@ export const WINDOWS = [
     load: () => import('./PushDevices.svelte') },
   { id: 'setup', menu: 'instellingen', label: 'Instellingen-checklist', hint: 'wat werkt, half of nog niet ingesteld',
     to: { id: 'attention', tab: 'instellingen' } },
+  { id: 'weergave', menu: 'instellingen', label: 'Weergave', hint: 'eigen achtergrond, met of zonder effecten erboven',
+    load: () => import('./Weergave.svelte') },
+  { id: 'fabrieksreset', menu: 'instellingen', label: 'Fabrieksreset', hint: 'alles wissen en opnieuw beginnen (alleen thuis)',
+    load: () => import('./Fabrieksreset.svelte') },
   { id: 'news', menu: 'instellingen', label: 'Wat is er nieuw', hint: 'versie en wijzigingen', load: () => import('./Changelog.svelte') },
 
   // Zonder menu: geopend vanuit een tegel, de bewerkmodus of de zoekbalk.
@@ -88,6 +92,8 @@ const ALIASES = {
   'ssh-discover': { id: 'terminal', sub: 'discover' },
   'logs-setup': { id: 'logs', setup: true },
   edit: { id: 'service' },
+  achtergrond: { id: 'weergave' },
+  reset: { id: 'fabrieksreset' },
   opruimen: { id: 'nieuweservice', tab: 'opruimen' },
 }
 

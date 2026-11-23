@@ -128,7 +128,8 @@ test('bewerkmodus: pagina, groep en tegel', async () => {
 const MENUS = {
   Infrastructuur: ['Gezondheid', 'Capaciteit', 'Netwerk', 'Cronjobs', 'Logs', 'Tijdlijn', 'Noodplan'],
   Beheer: ['Nieuwe service', 'Terminal', 'Updates', 'Gepland onderhoud', 'Configuratiewijzigingen', 'Hersteltest'],
-  Instellingen: ['Beveiliging', 'API-beheer', 'Webhooks', 'Meldingen op je gsm', 'Instellingen-checklist', 'Wat is er nieuw'],
+  Instellingen: ['Beveiliging', 'API-beheer', 'Webhooks', 'Meldingen op je gsm', 'Instellingen-checklist', 'Weergave', 'Fabrieksreset',
+    'Wat is er nieuw'],
 }
 const closeButtons = () => page.locator('button[aria-label="Sluiten"], button[aria-label$=" sluiten"]:not([aria-label="Sessie sluiten"])')
   .filter({ visible: true })
@@ -672,4 +673,57 @@ test('noodplan: bijwerken, tonen, afdrukken en downloaden', async () => {
   await page.setViewportSize({ width: 1400, height: 900 })
   await win.getByRole('button', { name: 'Sluiten' }).click()
   await expect(win).toHaveCount(0)
+})
+
+// Een PNG van 2x2 px: genoeg om als achtergrond te dienen.
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFklEQVR4nGNkYGD4z8DAwMDEwMDAAAAQBgEBl4m6ygAAAABJRU5ErkJggg==', 'base64')
+
+test('weergave: eigen achtergrond, met en zonder effecten', async () => {
+  await menu('Instellingen', 'Weergave')
+  const win = page.getByRole('dialog', { name: 'weergave' })
+  await win.locator('input[type=file]').setInputFiles({ name: 'bg.png', mimeType: 'image/png', buffer: PNG })
+  await expect(win.getByText(/geüpload/)).toBeVisible()
+  const html = page.locator('html')
+  await expect(html).toHaveClass(/\bwall\b/)
+  await expect(html).not.toHaveClass(/wall-plain/)
+  expect(await page.evaluate(() => getComputedStyle(document.getElementById('wall')).display)).toBe('block')
+  // Effecten erboven uit: geen scanlijnen en geen punten meer, ook na herladen (de server onthoudt het).
+  await win.getByLabel(/gloed, scanlijnen/).uncheck()
+  await expect(html).toHaveClass(/wall-plain/)
+  await expect.poll(() => page.evaluate(() => fetch('/api/achtergrond', { headers: { 'X-Requested-With': 'homepage' } })
+    .then((r) => r.json()).then((r) => r.effecten))).toBe(false)
+  await page.reload()
+  await expect(page.locator('html')).toHaveClass(/wall-plain/)
+  expect(await page.evaluate(() => getComputedStyle(document.body, '::after').display)).toBe('none')
+  expect(await page.evaluate(() => getComputedStyle(document.getElementById('bg')).display)).toBe('none')
+})
+
+// Als laatste: alles weg, en de eerste start opnieuw met de setup-code al ingevuld.
+test('fabrieksreset: back-up, WIS ALLES, en opnieuw een account', async () => {
+  await menu('Instellingen', 'Fabrieksreset')
+  const win = page.getByRole('dialog', { name: 'fabrieksreset' })
+  await expect(win.getByText('Wat weg gaat')).toBeVisible()
+  const wis = win.getByRole('button', { name: 'Alles wissen' })
+  await expect(wis).toBeDisabled()
+  const [dl] = await Promise.all([page.waitForEvent('download'), win.getByRole('button', { name: 'Volledige back-up downloaden' }).click()])
+  expect(dl.suggestedFilename()).toMatch(/^homepage-voor-reset-.*\.dump$/)
+  expect(readFileSync(await dl.path()).subarray(0, 5).toString()).toBe('PGDMP')
+  await win.locator('#fr-zin').fill('wis alles')
+  await wis.click()
+  await bevestig('Alles wissen')
+  await confirm2fa(page.locator('#t'))
+  await expect(page.locator('#t')).toHaveValue(TOKEN)
+  await expect(page.getByText('Fabrieksreset klaar')).toBeVisible()
+  await expect(page.locator('html')).not.toHaveClass(/\bwall\b/)
+  await page.fill('#u', 'opnieuw')
+  await page.fill('#p', PASS)
+  await page.fill('#p2', PASS)
+  await page.getByRole('button', { name: 'Account aanmaken' }).click()
+  secret = (await page.locator('#s').textContent()).trim()
+  const { code, at } = await freshCode(secret)
+  usedStep = at
+  await page.fill('#c', code)
+  await page.getByRole('button', { name: 'Activeren' }).click()
+  await expect(page.getByRole('heading', { name: 'Nog leeg' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Weergave' })).toBeVisible()
 })

@@ -160,3 +160,18 @@ a, button { -webkit-tap-highlight-color: transparent }
   input, select, textarea { font-size: 16px } /* iOS zoomt anders in bij elk veld */
 }
 
+
+/* Eigen achtergrond (Instellingen → Weergave, wall.js). Met effecten: de radiale gloed van aiverslag over de foto, en
+   scanlijnen en punten zoals altijd. Zonder: alleen de foto (gedimd), geen gloed, scanlijnen of punten. */
+#wall { display: none; position: fixed; inset: -40px; z-index: 0; pointer-events: none;
+        background: var(--wall-img) center/cover no-repeat; filter: blur(var(--wall-blur, 0px)) }
+#wall::after { content: ""; position: absolute; inset: 0;
+               background: rgba(0, 0, 0, var(--wall-dim, .35)) }
+html.wall body { background: #000 }
+html.wall #wall { display: block }
+html.wall:not(.wall-plain) #wall::after {
+  background: radial-gradient(circle, rgba(58, 58, 58, .18), rgba(20, 20, 20, .55) 70%, rgba(0, 0, 0, .85)),
+              rgba(0, 0, 0, var(--wall-dim, .35));
+}
+html.wall-plain body::after { display: none }
+html.wall-plain #bg { display: none }
