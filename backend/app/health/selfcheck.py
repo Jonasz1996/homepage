@@ -91,7 +91,9 @@ Loopt er iets mis: homepage-diagnose zet alles samen in één bestand.
 
 async def heartbeat(db: AsyncSession, started: datetime) -> None:
     now = datetime.now(timezone.utc).replace(microsecond=0)
-    value = {"at": now.isoformat(), "started": started.isoformat(), "pid": os.getpid()}
+    from ..codeversie import STARTED as code
+
+    value = {"at": now.isoformat(), "started": started.isoformat(), "pid": os.getpid(), "code": code}
     st = await db.get(AppState, HEARTBEAT_KEY)
     if st:
         st.value = value

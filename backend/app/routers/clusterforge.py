@@ -157,7 +157,7 @@ async def ordenen(request: Request, user: User = Depends(current_user), db: Asyn
     if not conns:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nog geen ClusterForge-API: koppel eerst ClusterForge")
     pve = await cfapps.proxmox_nodes(db, integ_router.clients)
-    total = {"added": 0, "updated": 0, "removed": 0}
+    total = {"added": 0, "updated": 0, "removed": 0, "archived": 0}
     errors = []
     for conn in conns:
         try:

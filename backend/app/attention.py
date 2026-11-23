@@ -398,6 +398,16 @@ async def homepage(db: AsyncSession, now: datetime, ctx: dict) -> list[dict]:
                         f"Zonder worker geen checks, meldingen of back-ups: {worker['why']}. "
                         "In de container: systemctl status homepage-worker.", fix))
     hourly = await rollup.lag(db, now)
+    # Nieuwe code gebouwd, maar API of worker niet herstart (codeversie.py): nieuwe knoppen geven 404 en fixes in de
+    # backend werken nog niet.
+    from . import codeversie as cv
+    old = [n for n, stale in (("API", cv.api_stale()),
+                              ("worker", cv.worker_stale(await _state(db, sc.HEARTBEAT_KEY)))) if stale]
+    if old:
+        out.append(item("herstart", "err", "homepage", f"Nieuwe versie gebouwd, maar de {' en de '.join(old)} draait nog de oude",
+                        "Herstart ze op elke node (de VIP-houder als laatste): systemctl restart homepage-api "
+                        "homepage-worker, of cf-homepage-api cf-homepage-worker op een ClusterForge-node.", fix,
+                        sig="|".join(old)))
     # Draait de worker niet, dan zegt het punt hierboven al genoeg.
     if hourly["late"] and worker["ok"]:
         behind = timedelta(hours=hourly["behind_h"])

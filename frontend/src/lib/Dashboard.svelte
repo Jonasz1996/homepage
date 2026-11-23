@@ -48,7 +48,8 @@
     return {
       // Een check die niets meer meldt (stale), staat grijs op de tegel: niet meetellen als up.
       up: active.filter((s) => s.status === 'up' && !s.stale).length,
-      down: active.filter((s) => s.status === 'down').length,
+      // Gepauzeerd (ook de tegels in het archief, weg in ClusterForge) telt niet als down.
+      down: active.filter((s) => s.status === 'down' && !s.paused).length,
       maint: all.length - active.length,
       paused: active.filter((s) => s.paused).length,
     }

@@ -13,8 +13,9 @@
   let password2 = $state('')
   // Na een fabrieksreset (Fabrieksreset.svelte) geeft de server de setup-code mee aan wie de reset deed.
   const RESET_KEY = 'hp-setup-code'
-  let fromReset = ''
-  try { fromReset = sessionStorage.getItem(RESET_KEY) || '' } catch { /* privévenster */ }
+  const fromReset = (() => {
+    try { return sessionStorage.getItem(RESET_KEY) || '' } catch { return '' /* privévenster */ }
+  })()
   let token = $state(fromReset)
   let code = $state('')
   let needCode = $state(false)
