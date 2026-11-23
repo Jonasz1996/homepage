@@ -1,6 +1,7 @@
 import hmac
 import math
 import time
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 import pyotp
@@ -11,12 +12,12 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
-from .. import bestanden, zonderlogin
+from .. import bestanden, herstel, zonderlogin
 from ..config import get_settings
 from ..db import get_db
 from ..deps import (COOKIE, audit, client_country, client_ip, current_session, current_user, limit_ip, notify,
                     optional_session, recent_auth, secure_cookie)
-from ..models import AuditLog, Session, User
+from ..models import AuditLog, HerstelVerzoek, Session, User
 from ..monitoring import webpush
 from ..security import (
     DEVICE_COOKIE,
@@ -68,6 +69,30 @@ class ReauthIn(BaseModel):
 class PasswordIn(BaseModel):
     current: str = Field(max_length=256)
     new: str = Field(min_length=12, max_length=256)
+
+
+class HerstelIn(BaseModel):
+    login: str = Field(min_length=1, max_length=254)
+
+
+class NewPasswordIn(BaseModel):
+    new: str = Field(min_length=12, max_length=256)
+
+
+# Waar homepage-beheer staat: een gewone installatie zet het in /usr/local/sbin, een node van een homepage-cluster van
+# ClusterForge niet (daar rechtstreeks uit de code).
+BEHEER_LINK = Path("/usr/local/sbin/homepage-beheer")
+BEHEER_SCRIPT = Path(__file__).resolve().parents[3] / "deploy" / "beheer.sh"
+
+
+def herstel_commando() -> str:
+    """Het begin van het commando voor accountherstel, zoals de beheerder het als root in de container typt."""
+    return "homepage-beheer" if BEHEER_LINK.exists() else f"bash {BEHEER_SCRIPT}"
+
+
+def temp_expired(user: User) -> bool:
+    until = user.password_temp_until
+    return until is not None and until.replace(tzinfo=until.tzinfo or timezone.utc) < datetime.now(timezone.utc)
 
 
 _clock = time.time
@@ -188,12 +213,16 @@ async def state(request: Request, response: Response, db: AsyncSession = Depends
             _set_device(request, response, user, fallback=session_device(sess.id))
     return {
         "setup_required": await _user_count(db) == 0,
-        "user": {"username": user.username, "totp_enabled": user.totp_enabled} if user else None,
+        "user": {"username": user.username, "totp_enabled": user.totp_enabled,
+                 # Na accountherstel: eerst een eigen wachtwoord kiezen, dan 2FA opnieuw.
+                 "nieuw_wachtwoord": user.password_temp_until is not None} if user else None,
         "mfa_ok": mfa_ok,
         "site_name": get_settings().site_name,
         # Zonder login (zonderlogin.py): sessie = er is ook een echte login op dit toestel.
         "zonder_login": bool(getattr(sess, "zonder_login", False)),
         "sessie": bool(sess) and not vluchtig,
+        # Voor "Kan niet inloggen?" op de inlogpagina: welk commando de beheerder uitvoert (zegt niets over accounts).
+        "herstel_commando": herstel_commando(),
     }
 
 
@@ -216,11 +245,17 @@ async def setup(data: SetupIn, request: Request, response: Response, db: AsyncSe
     return {"ok": True}
 
 
+def _need_own_password(user: User) -> None:
+    if user.password_temp_until is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Kies eerst een nieuw wachtwoord")
+
+
 @router.get("/totp/enroll")
 async def totp_enroll(sess: Session = Depends(current_session), db: AsyncSession = Depends(get_db)):
     user = sess.user
     if user.totp_enabled:
         raise HTTPException(status.HTTP_409_CONFLICT, "2FA staat al aan")
+    _need_own_password(user)
     if not user.totp_secret:
         user.totp_secret = encrypt(pyotp.random_base32())
         await db.commit()
@@ -237,6 +272,7 @@ async def totp_enable(data: CodeIn, request: Request, response: Response, sess: 
     user = sess.user
     if user.totp_enabled:
         raise HTTPException(status.HTTP_409_CONFLICT, "2FA staat al aan")
+    _need_own_password(user)
     if not await _claim_totp(db, user, data.code):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Code klopt niet")
     user.totp_enabled = True
@@ -304,6 +340,13 @@ async def login(data: LoginIn, request: Request, response: Response, db: AsyncSe
             _closed_notice(db, user, user_key, user_limit)
         await db.commit()
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Onjuiste gebruikersnaam of wachtwoord")
+    if temp_expired(user):
+        # Alleen wie het tijdelijke wachtwoord kent, ziet dit. Telt als mislukt: het geeft geen toegang.
+        await audit(db, request, user, "login_failed", username=data.username[:64], reden="tijdelijk verlopen")
+        await db.commit()
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED,
+                            "Dit tijdelijke wachtwoord is verlopen. Vraag je beheerder om het herstelcommando "
+                            "opnieuw uit te voeren.")
     if user.totp_enabled:
         if not data.code:
             # Het wachtwoord klopte: deze tussenstap telt niet als mislukte poging.
@@ -328,9 +371,9 @@ async def login(data: LoginIn, request: Request, response: Response, db: AsyncSe
     user.last_login_at = datetime.now(timezone.utc)
     user.last_login_ip = ip
     await _start_session(db, request, response, user, mfa_ok=user.totp_enabled)
-    await audit(db, request, user, "login")
+    await audit(db, request, user, "login", **({"tijdelijk_wachtwoord": True} if user.password_temp_until else {}))
     await db.commit()
-    return {"ok": True, "mfa_ok": user.totp_enabled}
+    return {"ok": True, "mfa_ok": user.totp_enabled, "nieuw_wachtwoord": user.password_temp_until is not None}
 
 
 def _confirm_keys(request: Request, sess: Session) -> tuple[str, ...]:
@@ -404,6 +447,70 @@ async def change_password(data: PasswordIn, request: Request, response: Response
                                 and not f.sess_id.startswith(zonderlogin.TRANSIENT_PREFIX))
     if not vluchtig:  # zonder login logde dit toestel niet in, zoals in state()
         _set_device(request, response, user)
+    return {"ok": True}
+
+
+@router.post("/herstel")
+async def herstel_aanvragen(data: HerstelIn, request: Request, db: AsyncSession = Depends(get_db)):
+    """"Kan niet inloggen?": een code voor de beheerder (homepage-beheer herstel <code>). Voor elke login hetzelfde
+    antwoord, ook voor een die niet bestaat: zo verraadt dit niet welke accounts er zijn. De login staat in het
+    verzoek op de server, niet in de code; de code geldt één keer en herstel.VERZOEK_GELDIG lang."""
+    key = f"herstel:{limit_ip(request)}"
+    if limiter.blocked(key):
+        raise _too_many()
+    limiter.fail(key)  # elke aanvraag telt: hoogstens login_max_failures per venster per IP
+    login = data.login.strip()
+    now = datetime.now(timezone.utc)
+    user = (await db.execute(select(User).where(func.lower(User.username) == login.lower()))).scalar_one_or_none()
+    # Opruimen: verlopen of gebruikte verzoeken weg, en hoogstens MAX_OPEN openstaande (de oudste gaan eerst).
+    await db.execute(delete(HerstelVerzoek).where(or_(HerstelVerzoek.expires_at < now,
+                                                      HerstelVerzoek.used_at.is_not(None))))
+    ouder = (await db.execute(select(HerstelVerzoek.id).order_by(HerstelVerzoek.id.desc())
+                              .offset(herstel.MAX_OPEN - 1))).scalars().all()
+    if ouder:
+        await db.execute(delete(HerstelVerzoek).where(HerstelVerzoek.id.in_(ouder)))
+    code = herstel.nieuwe_code()
+    until = now + herstel.VERZOEK_GELDIG
+    db.add(HerstelVerzoek(code_hash=herstel.code_hash(code), login=login[:254], user_id=user.id if user else None,
+                          created_at=now, expires_at=until, ip=client_ip(request)))
+    await audit(db, request, user, "herstel_aangevraagd", login=login[:64])
+    await db.commit()
+    return {"code": code, "geldig_tot": until, "commando": f"{herstel_commando()} herstel {code}"}
+
+
+@router.post("/password/nieuw")
+async def first_password(data: NewPasswordIn, request: Request, response: Response,
+                         sess: Session = Depends(current_session), db: AsyncSession = Depends(get_db)):
+    """Na accountherstel (homepage-beheer herstel): ingelogd met het tijdelijke wachtwoord, nog zonder 2FA. Hier kies
+    je een eigen wachtwoord; daarna stel je 2FA opnieuw in. Alleen met een echte sessie van die login."""
+    user = sess.user
+    if getattr(sess, "vluchtig", False) or user.password_temp_until is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Er is geen tijdelijk wachtwoord om te vervangen")
+    if temp_expired(user):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED,
+                            "Het tijdelijke wachtwoord is verlopen. Vraag je beheerder om het herstelcommando "
+                            "opnieuw uit te voeren.")
+    keys = _confirm_keys(request, sess)
+    if limiter.blocked(*keys):
+        raise _too_many()
+    with password_slot(known=False) as free:
+        if not free:
+            raise _busy()
+        limiter.fail(*keys)  # vóór de eerste await
+        await db.commit()
+        same = await verify_password_async(user.password_hash, data.new)
+        new_hash = None if same else await hash_password_async(data.new)
+    if same:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Kies een ander wachtwoord dan het tijdelijke")
+    limiter.reset(*keys)
+    user.password_hash = new_hash
+    user.password_temp_until = None
+    sess.auth_at = datetime.now(timezone.utc)
+    await db.execute(delete(Session).where(Session.user_id == user.id, Session.id != sess.id))
+    await audit(db, request, user, "password_changed", na_herstel=True)
+    notify(db, "Account hersteld", f"{user.username} koos een nieuw wachtwoord na accountherstel, vanaf "
+           f"{client_ip(request) or '?'}. Nu nog 2FA opnieuw instellen.", level="warn", source="auth")
+    await db.commit()
     return {"ok": True}
 
 

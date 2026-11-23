@@ -37,6 +37,9 @@ class User(Base):
     oidc_issuer: Mapped[str | None] = mapped_column(String(300))
     oidc_sub: Mapped[str | None] = mapped_column(String(255), unique=True)
     oidc_name: Mapped[str | None] = mapped_column(String(64))
+    # Tijdelijk wachtwoord (homepage-beheer herstel): geldig tot dit moment, en na het inloggen moet eerst een nieuw
+    # wachtwoord gekozen worden (en 2FA opnieuw ingesteld). None = een gewoon wachtwoord.
+    password_temp_until: Mapped[datetime | None]
 
 
 class Session(Base):
@@ -58,6 +61,24 @@ class Session(Base):
     last_seen_at: Mapped[datetime | None]
 
     user: Mapped[User] = relationship(lazy="joined")
+
+
+class HerstelVerzoek(Base):
+    """"Kan niet inloggen?" op de inlogpagina: een openstaand verzoek om accountherstel. De gebruiker krijgt een code
+    (alleen de sha256 staat hier) en geeft die aan de beheerder; homepage-beheer herstel <code> zoekt het verzoek op,
+    leest de opgegeven login en maakt een tijdelijk wachtwoord. Ook voor een login die niet bestaat (user_id None):
+    de pagina toont voor elke invoer hetzelfde."""
+
+    __tablename__ = "herstel_verzoeken"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    login: Mapped[str] = mapped_column(String(254))
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    expires_at: Mapped[datetime]
+    used_at: Mapped[datetime | None]
+    ip: Mapped[str | None] = mapped_column(String(64))
 
 
 class Page(Base):

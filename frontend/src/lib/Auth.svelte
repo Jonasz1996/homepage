@@ -1,11 +1,22 @@
 <script>
   import { api } from './api.js'
   import Card from './Card.svelte'
+  import CopyCmd from './CopyCmd.svelte'
 
   let { auth, ondone } = $props()
 
+  // "Kan niet inloggen?": een eigen scherm op de inlogpagina. De server geeft voor elke login een code (ook als het
+  // account niet bestaat, zodat dit niets verraadt); de beheerder plakt die in homepage-beheer herstel.
+  let kwijt = $state(false)
+  let kwijtLogin = $state('')
+  let verzoek = $state(null)
+
   let mode = $derived(
-    auth.setup_required ? 'setup' : auth.user && !auth.user.totp_enabled ? 'enroll' : 'login'
+    auth.setup_required ? 'setup'
+      : auth.user?.nieuw_wachtwoord ? 'nieuw'
+      : auth.user && !auth.user.totp_enabled ? 'enroll'
+      : kwijt ? 'kwijt'
+      : 'login'
   )
 
   let username = $state('')
@@ -63,6 +74,32 @@
     ondone()
   })
 
+  const vraagCode = () => run(async () => {
+    verzoek = await api('/auth/herstel', { method: 'POST', body: { login: kwijtLogin } })
+  })
+
+  function openKwijt() {
+    kwijt = true
+    kwijtLogin = kwijtLogin || username
+    verzoek = null
+    error = ''
+  }
+
+  function terugNaarLogin() {
+    kwijt = false
+    verzoek = null
+    error = ''
+  }
+
+  const fmtTijd = (t) => new Date(t).toLocaleString('nl-BE', { dateStyle: 'short', timeStyle: 'short' })
+
+  const newPassword = () => run(async () => {
+    if (password !== password2) throw new Error('Wachtwoorden zijn niet gelijk')
+    await api('/auth/password/nieuw', { method: 'POST', body: { new: password } })
+    password = password2 = ''
+    ondone()
+  })
+
   const enable = () => run(async () => {
     await api('/auth/totp/enable', { method: 'POST', body: { code } })
     ondone()
@@ -72,7 +109,7 @@
     if (mode === 'enroll' && !enroll) run(async () => (enroll = await api('/auth/totp/enroll')))
   })
 
-  const titles = { setup: 'setup', enroll: '2fa --enroll', login: 'login' }
+  const titles = { setup: 'setup', nieuw: 'passwd', enroll: '2fa --enroll', kwijt: 'herstel', login: 'login' }
 </script>
 
 <main class="wrap">
@@ -103,6 +140,57 @@
           <p class="err">{error}</p>
           <button class="btn" disabled={busy}>Account aanmaken</button>
         </form>
+      {:else if mode === 'nieuw'}
+        <h1>Kies een nieuw wachtwoord</h1>
+        <p class="hint">
+          Je bent ingelogd met een tijdelijk wachtwoord. Kies nu je eigen wachtwoord; daarna stel je 2FA opnieuw in
+          met je authenticator-app.
+        </p>
+        <form onsubmit={(e) => { e.preventDefault(); newPassword() }}>
+          <label class="lbl" for="np">Nieuw wachtwoord (minstens 12 tekens)</label>
+          <input id="np" type="password" bind:value={password} autocomplete="new-password" minlength="12" required />
+          <label class="lbl" for="np2">Herhaal wachtwoord</label>
+          <input id="np2" type="password" bind:value={password2} autocomplete="new-password" required />
+          <p class="err">{error}</p>
+          <button class="btn" disabled={busy}>Opslaan en verder</button>
+        </form>
+      {:else if mode === 'kwijt'}
+        <h1>Toegang herstellen</h1>
+        {#if !verzoek}
+          <p class="hint">
+            Geef je login in. Je krijgt een code die je aan je systeembeheerder geeft; die herstelt er je account mee.
+          </p>
+          <form onsubmit={(e) => { e.preventDefault(); vraagCode() }}>
+            <label class="lbl" for="hl">Gebruikersnaam of e-mail</label>
+            <!-- svelte-ignore a11y_autofocus -->
+            <input id="hl" bind:value={kwijtLogin} autocomplete="username" maxlength="254" autofocus required />
+            <p class="err">{error}</p>
+            <div class="row">
+              <button class="btn" disabled={busy}>Code aanvragen</button>
+              <button type="button" class="btn alt" onclick={terugNaarLogin}>Terug</button>
+            </div>
+          </form>
+        {:else}
+          <p class="hint">
+            Je aanvraag is genoteerd. Bestaat er een account met deze login, dan kan je beheerder het met deze code
+            herstellen.
+          </p>
+          <label class="lbl" for="hc">Je code</label>
+          <pre id="hc" class="code">{verzoek.code}</pre>
+          <p class="hint">
+            Vraag aan je systeembeheerder om je account te herstellen door dit commando uit te voeren (als root in de
+            container van het dashboard):
+          </p>
+          <CopyCmd cmd={verzoek.commando} />
+          <p class="hint">
+            Je krijgt dan een tijdelijk wachtwoord (1 uur geldig) waarmee je de toegang tot je account herstelt. Log
+            ermee in, kies een nieuw wachtwoord en stel daarna 2FA opnieuw in. De code geldt één keer, tot
+            {fmtTijd(verzoek.geldig_tot)}.
+          </p>
+          <div class="row">
+            <button type="button" class="btn" onclick={terugNaarLogin}>Naar inloggen</button>
+          </div>
+        {/if}
       {:else if mode === 'enroll'}
         <h1>Twee-staps-verificatie</h1>
         <p class="hint">
@@ -146,6 +234,11 @@
           <div class="or"><span>of</span></div>
           <a class="btn alt sso" href="/api/auth/oidc/start">Inloggen met {sso.label}</a>
         {/if}
+        {#if !needCode}
+          <a class="linkbtn" href="#herstel" onclick={(e) => { e.preventDefault(); openKwijt() }}>
+            Wachtwoord vergeten of kan niet inloggen?
+          </a>
+        {/if}
       {/if}
     </div>
   </Card>
@@ -159,4 +252,8 @@
   .or { display: flex; align-items: center; gap: 10px; color: var(--dim); font-size: 11.5px; margin: 16px 0 10px }
   .or::before, .or::after { content: ''; flex: 1; height: 1px; background: var(--line) }
   .sso { display: block; text-align: center; text-decoration: none }
+  .linkbtn { display: block; width: fit-content; margin: 14px auto 0; color: var(--dim); font-size: 12px;
+             text-decoration: underline; cursor: pointer }
+  .linkbtn:hover { color: var(--text-h) }
+  .code { font-size: 20px; letter-spacing: 1px; text-align: center; color: var(--text-h); user-select: all }
 </style>

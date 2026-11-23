@@ -787,7 +787,15 @@ Later, deel 3 (Authentik en gsm):
   authorized_keys). De setup-code krijgt de browser die de reset deed meteen mee. Daarna zet **API-beheer → ↺ uit
   back-up** (of stap 3 op het lege dashboard) al je API's met hun sleutels en calls terug uit een dagelijkse back-up
   of de gedownloade `.dump` (alleen de API's; met dezelfde secret.key, anders komen ze zonder sleutels)
-- **homepage-beheer** (als root in de container, voor als je niet meer binnen raakt): `homepage-beheer 2fa-reset`
+- **homepage-beheer** (als root in de container, voor als je niet meer binnen raakt): `homepage-beheer herstel
+  <code>` (accountherstel. Op de inlogpagina klikt de gebruiker **Wachtwoord vergeten of kan niet inloggen?**, geeft
+  zijn login in en krijgt een code `HR-XXXX-XXXX-XXXX-XXXX` met het commando erbij. De code is een token van de server
+  voor een openstaand verzoek (24 uur, één keer bruikbaar); de login staat in dat verzoek, niet in de code, dus
+  niemand verzint een code voor een andere naam. Voor elke login, ook een die niet bestaat, toont de pagina hetzelfde.
+  De beheerder plakt de code: 2FA uit, alle sessies weg en meteen een tijdelijk wachtwoord dat 1 uur geldt (`--uren N`
+  voor langer). Wie ermee inlogt, kiest eerst een eigen wachtwoord en stelt dan 2FA opnieuw in. Een gebruikersnaam
+  in plaats van de code kan ook. Elke aanvraag en elke reset staat in het auditlog),
+  `homepage-beheer 2fa-reset`
   (2FA-app kwijt: 2FA uit en alle sessies weg, daarna inloggen met je wachtwoord en een nieuwe QR-code scannen),
   `homepage-beheer wachtwoord` (nieuw wachtwoord), `homepage-beheer fabrieksreset` (zoals hierboven, vraagt `WIS
   ALLES`, toont de setup-code en herstart API en worker) en `homepage-beheer gebruikers`. Het neemt gebruiker,
