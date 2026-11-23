@@ -348,3 +348,60 @@ async def test_cli_herstel_verlopen(authed, monkeypatch, capsys):
     r = await authed.post("/api/auth/login", json={"username": "jonas", "password": pw})
     assert r.status_code == 401 and "verlopen" in r.json()["detail"]
     assert (await authed.get("/api/auth/state")).json()["mfa_ok"] is False
+
+
+async def test_herstel_met_code_van_de_inlogpagina(authed, monkeypatch, capsys):
+    """Inlogpagina: een code voor elke login (zelfde antwoord, ook als het account niet bestaat); de CLI leest er de
+    login uit, geeft een tijdelijk wachtwoord, en elke code werkt maar één keer."""
+    import re
+
+    from app import beheer
+    from app.models import HerstelVerzoek
+    monkeypatch.setattr(beheer, "get_maker", lambda: _Maker())
+    authed.cookies.clear()
+    r1 = await authed.post("/api/auth/herstel", json={"login": "Jonas"})
+    r2 = await authed.post("/api/auth/herstel", json={"login": "bestaat-niet@voorbeeld.be"})
+    assert r1.status_code == r2.status_code == 200
+    assert set(r1.json()) == set(r2.json()) == {"code", "geldig_tot", "commando"}
+    code, vreemd = r1.json()["code"], r2.json()["code"]
+    assert re.fullmatch(r"HR(-[A-Z2-9]{4}){4}", code) and code != vreemd
+    assert r1.json()["commando"].endswith(f"herstel {code}")
+    agen, db = await _db()
+    rows = (await db.execute(select(HerstelVerzoek).order_by(HerstelVerzoek.id))).scalars().all()
+    assert [v.login for v in rows] == ["Jonas", "bestaat-niet@voorbeeld.be"]
+    assert all(code not in v.code_hash and len(v.code_hash) == 64 for v in rows)  # alleen de hash
+    assert (await db.execute(select(func.count()).select_from(AuditLog)
+                             .where(AuditLog.action == "herstel_aangevraagd"))).scalar_one() == 2
+    await agen.aclose()
+
+    # Een zelf verzonnen code (of die van een onbestaand account) doet niets.
+    with pytest.raises(SystemExit, match="onbekend"):
+        await beheer.herstel("HR-AAAA-BBBB-CCCC-DDDD")
+    with pytest.raises(SystemExit, match="bestaat niet"):
+        await beheer.herstel(vreemd)
+    # Kleine letters en zonder streepjes werkt ook.
+    assert await beheer.herstel(code.lower().replace("-", "")) == 0
+    pw = re.search(r"Tijdelijk wachtwoord: (\S+)", capsys.readouterr().out).group(1)
+    with pytest.raises(SystemExit, match="al gebruikt"):
+        await beheer.herstel(code)
+    r = await authed.post("/api/auth/login", json={"username": "jonas", "password": pw})
+    assert r.status_code == 200 and r.json()["nieuw_wachtwoord"] is True
+
+    # Hoogstens login_max_failures aanvragen per IP per venster.
+    codes = [(await authed.post("/api/auth/herstel", json={"login": "x"})).status_code for _ in range(8)]
+    assert 429 in codes
+
+
+async def test_herstel_code_verlopen(authed, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from app import beheer
+    from app.models import HerstelVerzoek
+    monkeypatch.setattr(beheer, "get_maker", lambda: _Maker())
+    code = (await authed.post("/api/auth/herstel", json={"login": "jonas"})).json()["code"]
+    agen, db = await _db()
+    await db.execute(update(HerstelVerzoek).values(expires_at=datetime.now(timezone.utc) - timedelta(minutes=1)))
+    await db.commit()
+    await agen.aclose()
+    with pytest.raises(SystemExit, match="verlopen"):
+        await beheer.herstel(code)

@@ -12,12 +12,12 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
-from .. import bestanden, zonderlogin
+from .. import bestanden, herstel, zonderlogin
 from ..config import get_settings
 from ..db import get_db
 from ..deps import (COOKIE, audit, client_country, client_ip, current_session, current_user, limit_ip, notify,
                     optional_session, recent_auth, secure_cookie)
-from ..models import AuditLog, Session, User
+from ..models import AuditLog, HerstelVerzoek, Session, User
 from ..monitoring import webpush
 from ..security import (
     DEVICE_COOKIE,
@@ -69,6 +69,10 @@ class ReauthIn(BaseModel):
 class PasswordIn(BaseModel):
     current: str = Field(max_length=256)
     new: str = Field(min_length=12, max_length=256)
+
+
+class HerstelIn(BaseModel):
+    login: str = Field(min_length=1, max_length=254)
 
 
 class NewPasswordIn(BaseModel):
@@ -444,6 +448,34 @@ async def change_password(data: PasswordIn, request: Request, response: Response
     if not vluchtig:  # zonder login logde dit toestel niet in, zoals in state()
         _set_device(request, response, user)
     return {"ok": True}
+
+
+@router.post("/herstel")
+async def herstel_aanvragen(data: HerstelIn, request: Request, db: AsyncSession = Depends(get_db)):
+    """"Kan niet inloggen?": een code voor de beheerder (homepage-beheer herstel <code>). Voor elke login hetzelfde
+    antwoord, ook voor een die niet bestaat: zo verraadt dit niet welke accounts er zijn. De login staat in het
+    verzoek op de server, niet in de code; de code geldt één keer en herstel.VERZOEK_GELDIG lang."""
+    key = f"herstel:{limit_ip(request)}"
+    if limiter.blocked(key):
+        raise _too_many()
+    limiter.fail(key)  # elke aanvraag telt: hoogstens login_max_failures per venster per IP
+    login = data.login.strip()
+    now = datetime.now(timezone.utc)
+    user = (await db.execute(select(User).where(func.lower(User.username) == login.lower()))).scalar_one_or_none()
+    # Opruimen: verlopen of gebruikte verzoeken weg, en hoogstens MAX_OPEN openstaande (de oudste gaan eerst).
+    await db.execute(delete(HerstelVerzoek).where(or_(HerstelVerzoek.expires_at < now,
+                                                      HerstelVerzoek.used_at.is_not(None))))
+    ouder = (await db.execute(select(HerstelVerzoek.id).order_by(HerstelVerzoek.id.desc())
+                              .offset(herstel.MAX_OPEN - 1))).scalars().all()
+    if ouder:
+        await db.execute(delete(HerstelVerzoek).where(HerstelVerzoek.id.in_(ouder)))
+    code = herstel.nieuwe_code()
+    until = now + herstel.VERZOEK_GELDIG
+    db.add(HerstelVerzoek(code_hash=herstel.code_hash(code), login=login[:254], user_id=user.id if user else None,
+                          created_at=now, expires_at=until, ip=client_ip(request)))
+    await audit(db, request, user, "herstel_aangevraagd", login=login[:64])
+    await db.commit()
+    return {"code": code, "geldig_tot": until, "commando": f"{herstel_commando()} herstel {code}"}
 
 
 @router.post("/password/nieuw")
