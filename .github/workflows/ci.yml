@@ -144,6 +144,12 @@ jobs:
           cache-dependency-path: |
             frontend/package-lock.json
             e2e/package-lock.json
+      # pg_dump van dezelfde versie als de server (17), voor de back-up vóór een fabrieksreset (zoals in de container).
+      - name: PostgreSQL-client 17
+        run: |
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y -q postgresql-client-17
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
       - name: Backend starten
         run: |
           mkdir -p /tmp/hp
