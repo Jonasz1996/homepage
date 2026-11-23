@@ -3,6 +3,18 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 50,
+    datum: '2026-11-23',
+    titel: 'Tegels uit ClusterForge: netter en eerlijker',
+    items: [
+      'Een tegel van een dood doel staat nu rood met "doel antwoordt niet", ook als ClusterForge de app gezond vindt: de homepage kijkt zelf naar de link van de tegel. Wat ClusterForge ervan vindt, zie je nog in de cijfers.',
+      'Geen namen meer als "302 Found": dan wordt het de naam uit het adres. "Authentik (Authentik)" heet gewoon Authentik, en twee tegels met hetzelfde adres (via het cluster en via NPM) worden één tegel.',
+      'Tegels zonder groep belanden niet meer in "overig": Jellyfin gaat naar Media, Gitea naar Infrastructuur, enzovoort. Alleen wat nergens past blijft in Overig.',
+      'Proxmox: heb je een Proxmox-API, dan hangt elke Proxmox-tegel daar vanzelf aan, met de cijfers van zijn eigen node. Zonder Proxmox-API staan de clustercijfers maar op één tegel. Lege velden zoals "Nodes 0/0" zijn weg.',
+    ],
+    instellen: [],
+  },
+  {
     nr: 49,
     datum: '2026-11-23',
     titel: 'Eigen achtergrond en fabrieksreset',

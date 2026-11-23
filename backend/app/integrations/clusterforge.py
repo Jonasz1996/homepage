@@ -76,6 +76,10 @@ def app_value(value: Any, kind: str | None) -> Any:
     return value
 
 
+def _empty_value(v: Any) -> bool:
+    return v is None or (isinstance(v, str) and v.replace(" ", "") in ("", "0/0", "—", "-"))
+
+
 def score_text(c: dict) -> str:
     if c.get("score") is None:
         return "—"
@@ -135,8 +139,10 @@ class ClusterForge(Integration):
 
     @staticmethod
     def app_fields(t: dict) -> list[dict]:
+        # Een veld zonder inhoud (bv. "Nodes 0/0" bij een tegel via NPM) zegt niets: weg.
         out = [field(str(f.get("label"))[:30], app_value(f.get("value"), f.get("format")),
-                     APP_LEVEL.get(f.get("level") or "ok")) for f in t.get("fields") or []]
+                     APP_LEVEL.get(f.get("level") or "ok")) for f in t.get("fields") or []
+               if not _empty_value(f.get("value"))]
         return out[:8] or [field("status", t.get("status_label"), APP_LEVEL.get(t.get("status")))]
 
     def app_detail(self, t: dict) -> dict:
@@ -312,7 +318,9 @@ class ClusterForge(Integration):
 
     async def summary(self) -> list[dict]:
         if self.app_key:
-            return self.app_fields(await self.app())
+            fields = self.app_fields(await self.app())
+            # Meer tegels van dezelfde app (monitoring/clusterforge.py): de cijfers staan op de eerste, hier alleen de status.
+            return fields[:1] if self.config.get("cf_zelfde") else fields
         if self.node_key:
             return self.node_fields(await self.node())
         if self.soc_mode:

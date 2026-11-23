@@ -172,6 +172,8 @@ def _verdict(check: dict, code: int, start_host: str, end_host: str, data: bytes
     ok = accepted(code, check)
     rule = _accept_rule(check)
     error = None if ok else f"HTTP {code}" + (f" (verwacht {rule})" if rule else "")
+    if not ok and not rule and code in (502, 504):
+        error += ": doel antwoordt niet"  # NPM (of een andere proxy) leeft, de app erachter niet
     if ok and moved and check.get("same_host"):
         ok, error = False, f"Doorverwezen naar {moved} (loginpagina?)"
     if ok and content:

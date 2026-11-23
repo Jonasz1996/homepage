@@ -83,7 +83,7 @@ async def test_sync_maakt_wijzigt_en_verwijdert(client):
     assert set(s) == {"Eigen tegel", "Plex", "Homepage"}
     plex = s["Plex"]
     assert plex.type == "clusterforge" and plex.api_id == conn.id and plex.config["app"] == "plex"
-    assert plex.check == {"type": "api", "interval": 60}
+    assert plex.check == {"type": "http", "interval": 60}  # met een link: de homepage kijkt zelf naar het doel
     assert plex.group_id == s["Eigen tegel"].group_id  # bestaande groep Media hergebruikt
     groups = {g.name for g in (await db.execute(select(Group))).scalars().all()}
     assert groups == {"Media", "Infrastructuur"}
@@ -149,3 +149,88 @@ async def test_check_vraagt_strict():
     data = await c.health()
     assert isinstance(data, dict)
     assert seen and seen[-1].endswith("/api/dashboard/v2/apps/plex?strict=1")
+
+
+# --- bevindingen 23/11: namen, dubbels, groepen, Proxmox, kopieën ------------------------------------------------
+
+def test_prepare_namen_dubbels_groepen():
+    lay = layout(
+        ("Overig", tile("a@1", "web", "302 Found", "x.png", "http://192.168.10.203")),
+        ("Overig", tile("b@1", "ai", "Ai", "ai.png", "https://ai.jbogaert.be")),
+        ("Infra", tile("c@cl", "authentik", "Authentik (Authentik)", "authentik.png", "https://auth.jbogaert.be/")),
+        ("Overig", tile("d@npm", "authentik", "Authentik (npm)", "authentik.png", "https://auth.jbogaert.be")),
+        ("overig", tile("e@npm", "jellyfin", "Jellyfin (npm)", "jellyfin.png", "https://jellyfin.jbogaert.be")),
+        ("Media", tile("f@1", "plex", "Plex", "plex.png", "https://plex.jbogaert.be")),
+        ("Overig", tile("g@1", "gitea", "Gitea", "gitea.png", "https://git.jbogaert.be")),
+        ("Overig", tile("h@1", "iets", "Iets", "iets.png", "https://iets.jbogaert.be")),
+    )
+    out = {o["key"]: o for o in clusterforge.prepare(lay)}
+    assert set(out) == {"a@1", "b@1", "c@cl", "e@npm", "f@1", "g@1", "h@1"}  # d@npm is een dubbel van c@cl
+    assert out["a@1"]["name"] == "Web" and out["a@1"]["group"] == "Overig"  # IP: de naam van de app
+    assert out["b@1"]["name"] == "Ai" and out["b@1"]["group"] == "AI"
+    assert out["c@cl"]["name"] == "Authentik"
+    assert out["e@npm"]["name"] == "Jellyfin" and out["e@npm"]["group"] == "Media"  # bestaande groep Media
+    assert out["g@1"]["group"] == "Infrastructuur"
+    assert out["h@1"]["group"] == "Overig"
+
+
+def test_naam_uit_link():
+    assert clusterforge.clean_name("302 Found", "https://ai.jbogaert.be", "web") == "AI"
+    assert clusterforge.clean_name("Welcome to nginx!", "https://home-assistant.x.be", "ha") == "Home Assistant"
+    assert clusterforge.clean_name("Plex", "https://plex.x", "plex") == "Plex"
+
+
+def test_match_node():
+    pve = [(7, [{"name": "pve50", "ip": "192.168.0.50"}, {"name": "pve100", "ip": "192.168.0.100"}])]
+    assert clusterforge.match_node({"href": "https://proxmox50.jbogaert.be", "name": "Proxmox"}, pve) == (7, "pve50")
+    assert clusterforge.match_node({"href": "https://192.168.0.100:8006", "name": "Proxmox"}, pve) == (7, "pve100")
+    assert clusterforge.match_node({"href": "https://x.be", "name": "Proxmox", "description": "pve50"}, pve) == (7, "pve50")
+    assert clusterforge.match_node({"href": "https://proxmox.jbogaert.be", "name": "Proxmox"}, pve) is None
+    assert clusterforge.is_proxmox("proxmox", "proxmox.png") and not clusterforge.is_proxmox("pbs", "proxmox-backup.png")
+
+
+async def test_proxmox_tegels_aan_proxmox_api(client):
+    agen, db, conn = await _setup()
+    pve = ApiConnection(name="Proxmox", kind="proxmox", url="https://192.168.0.50:8006", config={},
+                        secrets=encrypt_json({"username": "u@pve!t", "password": "x"}))
+    db.add(pve)
+    await db.commit()
+    fake = Fake()
+    fake.layout = layout(("Infrastructuur", tile("pve@50", "proxmox", "Proxmox", "proxmox.png", "https://proxmox50.jbogaert.be")),
+                         ("Infrastructuur", tile("pve@100", "proxmox", "Proxmox 100", "proxmox.png", "https://proxmox100.jbogaert.be")),
+                         ("Infrastructuur", tile("pve@x", "proxmox", "Proxmox X", "proxmox.png", "https://proxmoxx.jbogaert.be")))
+
+    def handler(request):
+        if request.url.path == "/api2/json/cluster/status":
+            return httpx.Response(200, json={"data": [{"type": "cluster", "name": "c"},
+                                                      {"type": "node", "name": "pve50", "ip": "192.168.0.50"},
+                                                      {"type": "node", "name": "pve100", "ip": "192.168.0.100"}]})
+        return fake(request)
+
+    await clusterforge.run_sync(db, HttpClients(httpx.MockTransport(handler)))
+    await db.commit()
+    s = await _services(db)
+    assert s["Proxmox"].type == "proxmox" and s["Proxmox"].api_id == pve.id and s["Proxmox"].config["node"] == "pve50"
+    assert s["Proxmox 100"].config["node"] == "pve100"
+    x = s["Proxmox X"]
+    assert x.type == "clusterforge" and x.api_id == conn.id and x.config["cf_zelfde"] == "Proxmox"
+    # Een volgende ronde (304) laat ze zo; de tegels blijven van deze ClusterForge-API.
+    await clusterforge.run_sync(db, HttpClients(httpx.MockTransport(handler)))
+    await db.commit()
+    assert len(await _services(db)) == 4
+    await agen.aclose()
+
+
+async def test_kopie_toont_alleen_status():
+    from app.integrations.clusterforge import ClusterForge
+
+    def handler(request):
+        return httpx.Response(200, json={"slug": "plex", "status": "ok", "status_label": "Gezond", "fields": [
+            {"key": "status", "label": "Status", "value": "Gezond", "level": "ok"},
+            {"key": "nodes", "label": "Nodes", "value": "0/0"}, {"key": "cpu", "label": "CPU", "value": "18%"}]})
+
+    c = ClusterForge(CF, {"app": "plex"}, {"token": "cfa_test"}, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    assert [f["label"] for f in await c.summary()] == ["Status", "CPU"]  # Nodes 0/0 weg
+    c = ClusterForge(CF, {"app": "plex", "cf_zelfde": "Plex"}, {"token": "cfa_test"},
+                     httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    assert [f["label"] for f in await c.summary()] == ["Status"]
