@@ -3,6 +3,17 @@
 // "instellen": wat je zelf moet doen voor het werkt.
 export const CHANGELOG = [
   {
+    nr: 53,
+    datum: '2026-11-23',
+    titel: 'Je agenda op het dashboard (ICS-feed)',
+    items: [
+      'Nieuw tegeltype "Agenda (ICS)", zoals de kalender van homepage.dev: de tegel toont wat nu bezig is, je volgende afspraak en hoeveel er vandaag en deze week zijn; het mini dashboard de komende afspraken met wanneer, wat en waar.',
+      'Werkt met je eigen agenda (agenda.jbogaert.be/ics) en met elke iCal-link (Nextcloud, Google, Outlook). Herhalingen, uitzonderingen, verplaatste en geannuleerde afspraken tellen mee.',
+      'De feed wordt om de 15 minuten opgehaald, niet bij elke verversing. Is hij even weg, dan blijft de vorige kopie staan met een oranje waarschuwing.',
+    ],
+    instellen: ['Nieuwe tegel → type ics (of API-beheer → sjabloon Agenda (ICS)) met als adres de url van je ICS-feed.'],
+  },
+  {
     nr: 52,
     datum: '2026-11-23',
     titel: 'ClusterForge respecteert je eigen indeling, archief voor verdwenen tegels',

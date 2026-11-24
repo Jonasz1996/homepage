@@ -687,6 +687,17 @@ Later, deel 3 (Authentik en gsm):
   per soort, gebruikers, appcatalogus, NPM-koppelingen, notities en links. De check (soort **api**) wordt rood als de
   database van VaultX weg is, de sleutel verlopen of ingetrokken is, of een NPM-sync in VaultX mislukt.
   `link` (optioneel): het adres waarmee je VaultX in de browser opent (bv. `https://vaultx.jbogaert.be`)
+- **ics** (een tegel of API van soort `ics`, sjabloon *Agenda (ICS)*): een agenda uit een ICS-feed, zoals de
+  kalender-widget van homepage.dev: de eigen agenda op `https://agenda.jbogaert.be/ics`, of een iCal-link van
+  Nextcloud, Google of Outlook. Adres: de url van de feed (`webcal://` mag ook; een sleutel in de url, `?token=…`,
+  blijft staan). De feed wordt niet bij elke verversing opgehaald maar om de `refresh` minuten (standaard 15); is hij
+  even weg, dan toont de tegel tot een dag lang de vorige kopie met een oranje waarschuwing. De tegel toont wat nu
+  bezig is, de volgende afspraak en het aantal vandaag en de komende 7 dagen; het mini dashboard de komende
+  afspraken (`days` dagen vooruit, standaard 14) met wanneer, wat en waar. Herhalingen (dagelijks, wekelijks,
+  maandelijks, jaarlijks, met interval, aantal, einddatum, weekdagen zoals "laatste vrijdag"), uitzonderingen,
+  verplaatste en geannuleerde afspraken tellen mee; `tz` (standaard `Europe/Brussels`) geldt voor afspraken zonder
+  tijdzone. Geheimen alleen als de feed een login vraagt: `token` (Bearer) of `username`/`password` (basic). De check
+  (soort **api**) wordt rood als de feed niet te halen is of geen agenda is (bv. een loginpagina van Authentik)
 - **van buitenaf** (⚿ → van buitenaf): komt een bezoek via Cloudflare (NPM kreeg het met een `CF-Connecting-IP` van
   Cloudflare of een tunnel), met een vervalste header van Cloudflare of vanaf een publiek IP, dan staan de terminal
   (ook cronjobs starten of bewaken, rsyslog uitrollen, sleutels vastzetten), updates installeren, acties (aan/uit,
